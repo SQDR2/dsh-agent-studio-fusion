@@ -55,6 +55,7 @@ import { CachePolicy } from './cache-policy.js'
 import type { ChangeBase } from './change-evidence.js'
 import { evidencePage } from './evidence-page.js'
 import { readNativeEvidence } from './native-evidence.js'
+import { isRouteTransportName, registeredRouteTransport, withRouteTransport } from './route-transport.js'
 
 const textOutput = { schema: { type: 'string' as const }, render: (_args: unknown, text: string) => [{ type: 'text' as const, text }] }
 const stringList = { type: 'array' as const, items: { type: 'string' as const }, required: true as const }
@@ -296,45 +297,17 @@ export class FusionCoordinator {
       },
       installTools: (scope, agent, _binding, role) => this.#tools(scope, agent, role),
       readOnlyTools: (agent, binding, role) => {
-        const state = this.state(binding.taskId)
-        // enforced-v3 keeps its fixed catalog (prompt cache); the guard refuses tools on a completed task.
-        if (role === 'lead' && adaptiveWorkflow(binding) && state.control.mode === 'completed' && !roleSeparated(binding)) return []
-        if (role === 'worker') {
-          if (state.currentWorkOrder?.mode === 'text') return []
-          if (state.currentWorkOrder?.mode === 'explore') return this.options.workerTools.filter(name => READ_TOOLS.has(name))
-          // Implement mode. 0.2.0 keeps `undefined`: `startContinuable` still
-          // sends `toolFilter`, and returning an array here would also call
-          // `presentAs('native')` in NativeFusionScopes. 0.2.1 has no start-time
-          // toolFilter, so the array is the ceiling. The scope is installed at
-          // `agent/created`, before the child's first request, and that array
-          // also presents the Worker natively, as the read-only modes already were.
-          // The deny-only guard stays the second gate on both hosts.
-          return hasStartActivation(this.ctx.subagents) ? [...this.options.workerTools] : undefined
-        }
-        const lease = this.#held.get(binding.taskId)
-        if (roleSeparated(binding)) return this.#leadWriter(binding, agent) ? undefined : this.#separatedLeadTools(state, binding)
-        if (enforcedWorkflow(binding)) {
-          if (adaptiveWorkflow(binding) && !state.currentWorkOrder) return undefined
-          const takeover = state.currentWorkOrder && this.#runtime(binding.taskId).takeover
-          if (takeover && lease?.holder === SessionId(agent.id) && this.leases.stillHeld(lease)) return undefined
-          return [...READ_TOOLS, ...FUSION_TOOLS].filter(name => {
-            if (adaptiveWorkflow(binding) && state.currentWorkOrder) {
-              // Do not offer new handoffs while this persistent Worker owns the
-              // task. The delegate method remains the hard guard for forged calls.
-              if (name === 'fusion_delegate_text' || name === 'fusion_explore') return false
-              if (name === 'fusion_delegate' || name === 'fusion_finish_direct') return state.currentWorkOrder.mode === 'explore'
-                && state.phase === 'PLANNING' && state.exploration?.status === 'completed'
-              if (name === 'fusion_review_result') return state.phase === 'REVIEWING'
-              if (name === 'fusion_wait') return state.phase === 'WORKER_RUNNING'
-            }
-            return name !== 'fusion_submit_result'
-            && (name !== 'fusion_takeover' || state.currentWorkOrder?.mode !== 'text'
-              && state.currentWorkOrder?.mode !== 'explore' && state.reviewResult?.decision === 'rework')
-          })
-        }
-        if (binding.profile.interactionMode === 'model-like' && !state.currentWorkOrder) return undefined
-        return state.control.mode === 'running' && lease?.holder === SessionId(agent.id) && this.leases.stillHeld(lease)
-          ? undefined : [...READ_TOOLS, ...FUSION_TOOLS]
+        const ceiling = this.#roleCeiling(agent, binding, role)
+        // A bridge route (Antigravity's agy) can only answer under its own
+        // transport, so any role that must call tools needs it in the table —
+        // the Lead to delegate and review, the Worker to report. A text
+        // delegation answers in prose and a finished task may call nothing, so
+        // those ceilings keep their exact shape.
+        if (ceiling === undefined) return ceiling
+        const reportsBack = role === 'worker'
+          ? this.state(binding.taskId).currentWorkOrder?.mode !== 'text'
+          : ceiling.length > 0
+        return reportsBack ? withRouteTransport(ceiling, this.#routeTransport(binding, role)) : ceiling
       },
     })
     this.approvals = new NativeApprovals(ctx, store, { owner: agent => this.owner(agent),
@@ -345,7 +318,9 @@ export class FusionCoordinator {
     this.#dispose.push(this.approvals.install())
     this.#dispose.push(this.roleSandbox.install())
     this.effects = new NativeEffects(ctx, store, { owner: agent => this.owner(agent),
-      track: exec => !isRead(exec) && !FUSION_TOOLS.has(exec.name),
+      // A bridge-route transport replays a step its own loop already executed, so
+      // it is never an outstanding effect this Host must settle.
+      track: exec => !isRead(exec) && !FUSION_TOOLS.has(exec.name) && !isRouteTransportName(exec.name),
       backgroundMaxMs: (_exec, binding) => binding.profile.interactionMode === 'model-like' ? null : (this.state(binding.taskId).currentWorkOrder?.policy.commandMaxSeconds ?? this.options.commandMaxSeconds ?? DEFAULT_POLICY.commandMaxSeconds) * 1000,
       failed: (agent, error) => this.#trackingFailed(agent, `Fusion native effect tracking failed: ${String(error)}`) })
     this.#dispose.push(this.effects.install())
@@ -820,6 +795,72 @@ export class FusionCoordinator {
     throw new Error(`Worker step limit reached (${spent.requests}/${spent.limit}); no feedback or new work order was sent. Existing reports and counters are retained. Do not retry Worker feedback; collect any still-settling response with fusion_wait, explain unfinished work, and await a user decision.`)
   }
 
+  /**
+   * The transport this role's route needs to hand a step back, when this Host
+   * registers it. A bridge route (Antigravity's agy) runs its own loop and can
+   * only answer under its own transport name, so a ceiling without it makes
+   * every advertised tool unreachable. Nothing is invented: an unregistered
+   * transport is skipped (see `route-transport.ts`).
+   */
+  #routeTransport(binding: SessionBinding, role: Role): string | undefined {
+    return registeredRouteTransport(this.ctx, this.modelControl.route(binding, role).provider)
+  }
+
+  /**
+   * The Worker's full request ceiling: the configured tools plus the transport
+   * its route needs. Start-time `toolFilter` (0.2.0) and the scope restriction
+   * (0.2.1) both read it, so the transport cannot be lost on either host.
+   */
+  #workerCeiling(binding: SessionBinding): readonly string[] {
+    return withRouteTransport(this.options.workerTools, this.#routeTransport(binding, 'worker'))
+  }
+
+  /**
+   * One role's capability ceiling before any route transport is added. `undefined`
+   * means "no narrowing"; an empty array means "this role may call nothing".
+   */
+  #roleCeiling(agent: Agent, binding: SessionBinding, role: Role): readonly string[] | undefined {
+    const state = this.state(binding.taskId)
+    // enforced-v3 keeps its fixed catalog (prompt cache); the guard refuses tools on a completed task.
+    if (role === 'lead' && adaptiveWorkflow(binding) && state.control.mode === 'completed' && !roleSeparated(binding)) return []
+    if (role === 'worker') {
+      if (state.currentWorkOrder?.mode === 'text') return []
+      if (state.currentWorkOrder?.mode === 'explore') return this.options.workerTools.filter(name => READ_TOOLS.has(name))
+      // Implement mode. 0.2.0 keeps `undefined`: `startContinuable` still
+      // sends `toolFilter`, and returning an array here would also call
+      // `presentAs('native')` in NativeFusionScopes. 0.2.1 has no start-time
+      // toolFilter, so the array is the ceiling. The scope is installed at
+      // `agent/created`, before the child's first request, and that array
+      // also presents the Worker natively, as the read-only modes already were.
+      // The deny-only guard stays the second gate on both hosts.
+      return hasStartActivation(this.ctx.subagents) ? [...this.options.workerTools] : undefined
+    }
+    const lease = this.#held.get(binding.taskId)
+    if (roleSeparated(binding)) return this.#leadWriter(binding, agent) ? undefined : this.#separatedLeadTools(state, binding)
+    if (enforcedWorkflow(binding)) {
+      if (adaptiveWorkflow(binding) && !state.currentWorkOrder) return undefined
+      const takeover = state.currentWorkOrder && this.#runtime(binding.taskId).takeover
+      if (takeover && lease?.holder === SessionId(agent.id) && this.leases.stillHeld(lease)) return undefined
+      return [...READ_TOOLS, ...FUSION_TOOLS].filter(name => {
+        if (adaptiveWorkflow(binding) && state.currentWorkOrder) {
+          // Do not offer new handoffs while this persistent Worker owns the
+          // task. The delegate method remains the hard guard for forged calls.
+          if (name === 'fusion_delegate_text' || name === 'fusion_explore') return false
+          if (name === 'fusion_delegate' || name === 'fusion_finish_direct') return state.currentWorkOrder.mode === 'explore'
+            && state.phase === 'PLANNING' && state.exploration?.status === 'completed'
+          if (name === 'fusion_review_result') return state.phase === 'REVIEWING'
+          if (name === 'fusion_wait') return state.phase === 'WORKER_RUNNING'
+        }
+        return name !== 'fusion_submit_result'
+        && (name !== 'fusion_takeover' || state.currentWorkOrder?.mode !== 'text'
+          && state.currentWorkOrder?.mode !== 'explore' && state.reviewResult?.decision === 'rework')
+      })
+    }
+    if (binding.profile.interactionMode === 'model-like' && !state.currentWorkOrder) return undefined
+    return state.control.mode === 'running' && lease?.holder === SessionId(agent.id) && this.leases.stillHeld(lease)
+      ? undefined : [...READ_TOOLS, ...FUSION_TOOLS]
+  }
+
   #toolBlocked(exec: Readonly<ToolExecution>, binding: SessionBinding, role: Role): string | undefined {
     if (!exec.agent) return 'Fusion tools require a native Agent'
     const blocked = this.#accessBlocked(exec.agent, binding, role)
@@ -842,6 +883,16 @@ export class FusionCoordinator {
       && !(exec.name !== 'fusion_takeover' && this.modelControl.leadRecover(binding, 'worker'))) {
       return 'Sidekick is unavailable; preserve its task and use the local Fusion controls to continue or replace its model. Do not retry delegation or take over automatically.'
     }
+    // A bridge route (Antigravity's agy) reports each step it ran inside its own
+    // loop through its transport (`agy_tool`), which only replays the recorded
+    // output. It carries no authority of its own: the real call was dispatched
+    // inside the bridge, where the agent-scope guard applied first. So it must
+    // not be refused as an unconfigured tool, counted as a read-only violation
+    // or a stale-brief action, or made to hold the write lease — every role and
+    // mode that reports back (a Lead delegating, a Worker exploring or
+    // implementing) needs it, and losing it silently degrades the turn to prose
+    // (WORKER_TOOLS_UNREACHABLE).
+    if (isRouteTransportName(exec.name) && this.#routeTransport(binding, role) === exec.name) return undefined
     if (role === 'worker' && !isRead(exec)) {
       const problem = workerToolBriefProblem(this.store, binding.taskId, exec, this.#runtime(binding.taskId).briefRevision ?? 0)
       if (problem) return problem
@@ -1339,7 +1390,7 @@ export class FusionCoordinator {
       const accepted = binding.workerId
         ? await this.transport.continue(agent, childId, brief, exec.signal)
         : await this.transport.start(agent, { childId, brief, label: args.goal.slice(0, 100),
-          route: this.modelControl.route(binding, 'worker'), persona: binding.prompts.worker, allowedTools: this.options.workerTools }, exec.signal)
+          route: this.modelControl.route(binding, 'worker'), persona: binding.prompts.worker, allowedTools: this.#workerCeiling(binding) }, exec.signal)
       started = true
       this.append(binding.taskId, 'child/accepted', { operationId: order.operationId, child: childId, messageId: accepted.messageId })
       this.store.advanceOutbox(binding.taskId, order.operationId, 'dispatched', 'accepted', { nativeMessageId: accepted.messageId })

@@ -96,6 +96,12 @@ async function setup(script: Script, workerScript?: Script, options: {
   /** Register a sandbox-policy service that folds `sandbox/mode` events like the Host's. */
   sandbox?: boolean
   noCwd?: boolean
+  /**
+   * Put the Worker on a bridge route (`antigravity`) and register that route's
+   * transport tool (`agy_tool`) globally, the way dsh-agy-link does. The Worker
+   * adapter still script-drives it: the fixture asserts the ceiling, not agy.
+   */
+  bridgeTransport?: boolean
 } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'fusion-coordinator-'))
   const workspace = join(root, 'project')
@@ -174,7 +180,14 @@ async function setup(script: Script, workerScript?: Script, options: {
     }
   }
   const adapter = new ContextAdapter(script)
-  ctx.llm.registerAdapter(['test-native'], adapter)
+  ctx.llm.registerAdapter(options.bridgeTransport ? ['test-native', 'antigravity'] : ['test-native'], adapter)
+  const bridgeTool = defineTool({ name: 'agy_tool', description: 'Replays one recorded bridge tool step',
+    parameters: { run: { type: 'string', required: true }, step: { type: 'number', required: true },
+      tool: { type: 'string' }, input: { type: 'json' } },
+    output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] },
+    execute: async () => 'replayed bridge step' })
+  const bridgeDispose = options.bridgeTransport ? ctx.tools.register(bridgeTool) : undefined
+  if (bridgeDispose) cleanups.push(async () => { bridgeDispose() })
   const parent = (await ctx.agents.create({ sessionId: SessionId('lead'), meta: options.noCwd ? {} : { cwd: workspace },
     ...(options.presetTools ? { setup: async (scope: Context) => { await ctx.agentPresets.mount(scope, 'scoped-files') } } : {}),
     agentOptions: { provider: 'test-native', model: 'ordinary', maxTokens: options.parentMaxTokens } })).agent
@@ -189,7 +202,8 @@ async function setup(script: Script, workerScript?: Script, options: {
         ...(options.outputTokens ? { reserveOutputTokens: options.outputTokens.worker } : {}) },
     },
     ...(options.modelLike ? { interactionMode: 'model-like' } : {}),
-    ...(options.enforcedWorkflow ? { workflowPolicy: options.enforcedWorkflow === true ? 'enforced-v1' : options.enforcedWorkflow } : {}), lead: { provider: 'test-native', model: 'lead' }, worker: { provider: 'test-native', model: 'worker' }, dataPolicyId: 'fixture-only' }, prompts)
+    ...(options.enforcedWorkflow ? { workflowPolicy: options.enforcedWorkflow === true ? 'enforced-v1' : options.enforcedWorkflow } : {}), lead: { provider: 'test-native', model: 'lead' },
+    worker: options.bridgeTransport ? { provider: 'antigravity', model: 'worker' } : { provider: 'test-native', model: 'worker' }, dataPolicyId: 'fixture-only' }, prompts)
   const budget = options.keepalive && new NativeRequestBudget(store)
   const authorization = budget && authorizeConfiguredPair(store, [profile.lead, profile.worker], {
     acknowledgeAccountUsage: true, acknowledgeUnknownCost: true, validHours: 1,
@@ -1065,6 +1079,33 @@ describe('unreachable Worker route', () => {
     // be replaceable on that basis.
     expect(store.readDocument(`runtime:${taskId}`)?.value).not.toHaveProperty('workerUnreachable')
     expect(JSON.stringify(toolResults(parent))).not.toContain('worker-tools-unreachable')
+  })
+})
+
+describe('bridge-route Worker', () => {
+  /**
+   * dsh-agy-link can only answer under `agy_tool`: `agy` runs the bridged call in
+   * its own loop and the adapter reports that step for replay. A ceiling that
+   * listed only Fusion's tools therefore advertised names the route could never
+   * emit, the whole delegation ran as prose, and the Host (correctly) diagnosed
+   * WORKER_TOOLS_UNREACHABLE (session-e9722abb). The transport must ride the
+   * ceiling, and it must not be refused as an unconfigured or effectful tool.
+   */
+  it('carries the route transport so the Worker can report back', async () => {
+    const { parent, coordinator, store, adapter, taskId } = await setup([
+      delegate(), review('accept'), textResponse('Verified.'),
+    ], [edit(), toolCallResponse('mirror', 'agy_tool', { run: 'run-1', step: 1, tool: 'edit' }), report()],
+    { bridgeTransport: true })
+    parent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Fix addition and verify it.' }] }))
+    await parent.whenIdle()
+    const workerRequests = adapter.requests.filter(request => request.model === 'worker')
+    const names = workerRequests[0]!.tools!.map(tool => tool.name)
+    expect(names, JSON.stringify(workerRequests[0]!.tools)).toEqual(expect.arrayContaining(['agy_tool', shellTool, 'fusion_submit_result']))
+    const results = JSON.stringify(toolResults(parent))
+    expect(results).not.toContain('outside the Sidekick')
+    expect(results).not.toContain('WORKER_TOOLS_UNREACHABLE')
+    expect(coordinator.state(taskId), results).toMatchObject({ phase: 'COMPLETED', verification: 'verified' })
+    expect(store.readDocument(`runtime:${taskId}`)?.value).not.toHaveProperty('workerUnreachable')
   })
 })
 

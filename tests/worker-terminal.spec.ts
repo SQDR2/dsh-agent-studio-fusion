@@ -66,7 +66,8 @@ describe('Worker no-report diagnosis', () => {
       workerRunning: false, childId: 'fusion-worker-1', provider: 'antigravity', model: 'gemini-3.8-flash' })
     // The Lead must not be told to retry feedback or take over, and must not be told
     // this is an outage: it is a route that cannot reach Host tools.
-    expect(String(reply.next)).toContain('enable its mcpBridge')
+    expect(String(reply.next)).toContain('mcpBridge on')
+    expect(String(reply.next)).toContain('agy_tool')
     expect(String(reply.next)).toContain('Do not retry fusion_rework')
     expect(String(reply.next)).toContain('not a provider outage')
   })
