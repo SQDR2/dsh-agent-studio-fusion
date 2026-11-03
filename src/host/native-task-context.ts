@@ -52,9 +52,26 @@ interface SavedProjection {
 export class NativeTaskContext {
   constructor(readonly store: SqliteFusionStore, readonly parent: (id: string) => Agent | undefined) {}
 
-  begin(agent: Agent, taskId: TaskId): void {
+  /**
+   * Record where this task's user instructions begin. A task created by an automatic
+   * rollover continues the same conversation, so it inherits the boundary of the task
+   * it replaces: the user's instructions belong to the conversation, not to one
+   * accounting task. Narrowing it to the rollover point silently hid every earlier
+   * user message from `fusion_delegate`'s verbatim requirement check, which then
+   * rejected the Lead's own true quotes as fabricated.
+   */
+  begin(agent: Agent, taskId: TaskId, firstSeq: number = agent.session.seq): void {
+    if (!Number.isSafeInteger(firstSeq) || firstSeq < 0 || firstSeq > agent.session.seq) {
+      throw new Error('Fusion task input boundary requires reconciliation')
+    }
     this.store.writeDocument(`task-origin:${taskId}`, 0,
-      { schemaVersion: 1, sessionId: agent.id, firstSeq: agent.session.seq } satisfies Origin)
+      { schemaVersion: 1, sessionId: agent.id, firstSeq } satisfies Origin)
+  }
+
+  /** The recorded user-instruction boundary of a task, when it has one. */
+  originSeq(taskId: TaskId): number | undefined {
+    const origin = this.store.readDocument(`task-origin:${taskId}`)?.value as Origin | undefined
+    return origin && Number.isSafeInteger(origin.firstSeq) ? origin.firstSeq : undefined
   }
 
   /**

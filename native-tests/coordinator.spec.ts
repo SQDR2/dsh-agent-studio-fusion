@@ -2340,7 +2340,11 @@ describe('complete native Fusion workflow', () => {
     const second = coordinator.bindings.read(parent.id)!.binding.taskId
     expect(second).not.toBe(taskId)
     expect(coordinator.state(second).phase).toBe('COMPLETED')
-    expect(taskSnapshot(adapter.requests[1]!)).toMatchObject({ taskId: second, phase: 'PLANNING', workOrder: null, userInstructions: [] })
+    // A rollover is accounting only. The user's words belong to the conversation, so
+    // the successor keeps them in scope; narrowing it to the rollover seq is what made
+    // fusion_delegate reject the Lead's own true quotes as fabricated.
+    expect(taskSnapshot(adapter.requests[1]!).userInstructions.map(section => section.text)).toContainEqual(['Hello'])
+    expect(taskSnapshot(adapter.requests[1]!)).toMatchObject({ taskId: second, phase: 'PLANNING', workOrder: null })
     expect(coordinator.store.listDocumentIds('child:')).toEqual([])
     await coordinator.clear(parent)
     parent.followup(createUserMessage({ source: { kind: 'user' },  content: [{ type: 'text', text: 'Ordinary session' }] }))
@@ -3858,6 +3862,24 @@ describe('enforced-v3 daily-driver safeguards (study 2026-09-26)', () => {
     await parent.whenIdle()
     expect(results(parent)).toContain('must be exact quotes')
     expect(results(parent)).toContain('needs requirements')
+  })
+
+  /**
+   * Reproduces the delegated-task deadlock: the user states the requirement before an
+   * automatic rollover, and the Lead's own true quote is then checked against a scope
+   * starting at the rollover. Every delegation attempt failed and the turn spun.
+   */
+  it('accepts a verbatim requirement quoted before an automatic rollover', async () => {
+    const { parent, coordinator } = await setup([
+      textResponse('Hello.'), delegateV3(true, ['Correct addition.']), acceptV3(), textResponse('Verified.'),
+    ], [edit(), report()], options)
+    // The requirement is stated in the first task, which the next turn rolls out of.
+    parent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Correct addition.' }] }))
+    await parent.whenIdle()
+    parent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Go ahead now.' }] }))
+    await parent.whenIdle()
+    expect(results(parent)).not.toContain('must be exact quotes')
+    expect(coordinator.state(coordinator.bindings.read(parent.id)!.binding.taskId).phase).toBe('COMPLETED')
   })
 
   it('accepts only with one met verdict per user requirement', async () => {

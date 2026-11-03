@@ -34,6 +34,25 @@ export function workerStopExplanation(code: string): { reasonCode: string; next:
   }
 }
 
+/**
+ * Why a quiescent Worker produced no report.
+ *
+ * A Worker that was offered a tool table but never dispatched one tool call of it
+ * did not "run out of steps" or lose work: its route could not call those tools at
+ * all. Adapters that drive their own execution loop (for example an external CLI
+ * agent) only surface tool calls when the request also carries their own transport
+ * tool, so `fusion_submit_result` stays unreachable even though this plugin did
+ * advertise it. That is a configuration mismatch the Lead must report accurately
+ * instead of retrying or blaming the model.
+ *
+ * Both counts are read from the Worker's own session log, so a text assignment —
+ * offered the Worker Fusion tools and nothing else — is judged the same way. An
+ * unreadable log yields no evidence and therefore keeps the generic verdict.
+ */
+export function workerNoReportCause(input: { requestedTools: number; dispatchedToolCalls: number }): 'unreachable-tools' | 'no-report' {
+  return input.requestedTools > 0 && input.dispatchedToolCalls === 0 ? 'unreachable-tools' : 'no-report'
+}
+
 /** Continue/switch is refused before the route is written. Say so when a switch was requested. */
 export function unsettledContinuationError(switching: boolean): { zh: string; en: string } {
   return switching

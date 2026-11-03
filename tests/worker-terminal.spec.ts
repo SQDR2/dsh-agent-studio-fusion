@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { absentWorkerOutcome, unsettledContinuationError, workerSettlementGuidance, workerStopExplanation } from '../src/host/worker-terminal.js'
+import { absentWorkerOutcome, unsettledContinuationError, workerNoReportCause, workerSettlementGuidance, workerStopExplanation } from '../src/host/worker-terminal.js'
 
 describe('settled Worker terminal status', () => {
   it('does not take a recovery lock when a disposed Worker left no unknown effects', () => {
@@ -33,5 +33,21 @@ describe('settled Worker terminal status', () => {
     expect(unsettledContinuationError(true).zh).toContain('本次尚未切换模型')
     expect(unsettledContinuationError(true).en).toContain('this switch was not applied')
     expect(unsettledContinuationError(false).en).not.toContain('switch was not applied')
+  })
+})
+
+describe('Worker no-report diagnosis', () => {
+  it('names an unreachable tool table instead of an incomplete turn', () => {
+    expect(workerNoReportCause({ requestedTools: 3, dispatchedToolCalls: 0 })).toBe('unreachable-tools')
+  })
+
+  it('keeps the generic verdict when the Worker did dispatch tools', () => {
+    expect(workerNoReportCause({ requestedTools: 3, dispatchedToolCalls: 1 })).toBe('no-report')
+    expect(workerNoReportCause({ requestedTools: 11, dispatchedToolCalls: 4 })).toBe('no-report')
+  })
+
+  it('never blames accessibility when no tool table was offered at all', () => {
+    // A tool-less request proves nothing about reachability; do not guess.
+    expect(workerNoReportCause({ requestedTools: 0, dispatchedToolCalls: 0 })).toBe('no-report')
   })
 })

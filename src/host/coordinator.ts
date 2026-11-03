@@ -45,7 +45,7 @@ import { NativeWorkerTransport } from './native-worker.js'
 import { NativeFusionActivity } from './native-activity.js'
 import { captureExploration, citedEvidenceChanged } from './native-exploration.js'
 import { workspaceWriterDenial } from './workspace-guard.js'
-import { absentWorkerOutcome, workerStopExplanation } from './worker-terminal.js'
+import { absentWorkerOutcome, workerNoReportCause, workerStopExplanation } from './worker-terminal.js'
 import { resolveModelOutputLimits } from './model-output.js'
 import { assertWorkerBriefRequest, captureWorkerBrief, workerToolBriefProblem } from './native-worker-brief.js'
 import { changedPaths, pathAllowed, snapshotWorkspace, workspacePath, workspaceRelative } from './workspace.js'
@@ -260,7 +260,7 @@ export class FusionCoordinator {
         // Adopt the known completed child of pre-workerId bindings once.
         if (!binding.workerId && previous.acceptedChild) this.bindings.assignWorker(agent.id, binding.taskId, previous.acceptedChild)
         const nextTask = asTaskId(randomUUID())
-        this.#createTask(agent, nextTask, { profile: binding.profile, prompts: binding.prompts })
+        this.#createTask(agent, nextTask, { profile: binding.profile, prompts: binding.prompts }, binding.taskId)
         return this.bindings.rollover(agent.id, binding.taskId, nextTask)
       },
       taskContext: (agent, binding, role) => binding.profile.interactionMode === 'model-like'
@@ -558,12 +558,20 @@ export class FusionCoordinator {
     this.scopes.install(agent, binding, 'lead')
   }
 
-  #createTask(agent: Agent, taskId: TaskId, resolved: ResolvedProfile): void {
+  /**
+   * `continues` names the task this one replaced. An automatic rollover keeps the
+   * conversation's user-instruction boundary; only a fresh selection starts a new one.
+   * A predecessor with no recorded boundary had the whole conversation in scope, so
+   * the successor records 0 rather than re-narrowing to this rollover point — the
+   * same conservative rule `render` applies to unrecorded tasks.
+   */
+  #createTask(agent: Agent, taskId: TaskId, resolved: ResolvedProfile, continues?: TaskId): void {
     this.store.create({ schemaVersion: 1, id: randomUUID(), taskId, seq: 1, revision: 1,
       type: 'task/created', createdAt: new Date().toISOString(), causeId: 'model-selector',
       payload: { parent: SessionId(agent.id), selection: { kind: 'profile', profileId: resolved.profile.id } } })
     this.append(taskId, 'profile/frozen', { digest: resolved.profile.digest, profileId: resolved.profile.id, version: resolved.profile.version })
-    this.taskContext.begin(agent, taskId)
+    const inherited = continues === undefined ? undefined : this.taskContext.originSeq(continues) ?? 0
+    this.taskContext.begin(agent, taskId, inherited)
   }
 
   async clear(agent: Agent): Promise<void> {
@@ -668,6 +676,41 @@ export class FusionCoordinator {
   #latestUserSeq(agent: Agent): number {
     return agent.session.snapshotEvents().findLast(event => event.type === 'user/message'
       && (event.data.source === undefined || event.data.source.kind === 'user'))?.seq ?? 0
+  }
+
+  /**
+   * What the Worker was actually offered and what it dispatched, read from its own
+   * session log so a disposed Worker still answers. `offered` comes from the recorded
+   * request header — the table the route really received — never from this plugin's
+   * configured ceiling: a text assignment is offered the three Worker Fusion tools
+   * and nothing else, so a configured-count guess would report it as tool-less.
+   * An unreadable log yields zeroes, which merely keeps the generic verdict.
+   */
+  async #workerToolEvidence(childId: string | undefined): Promise<{ offered: number; dispatched: number }> {
+    if (!childId) return { offered: 0, dispatched: 0 }
+    try {
+      const live = this.ctx.agents.get(NativeSessionId(childId))
+      const events = live ? live.session.snapshotEvents() : (await this.ctx.sessionQuery.readSession(NativeSessionId(childId))).events
+      const header = events.findLast(event => event.type === 'request/header')
+      return { offered: header?.type === 'request/header' ? header.data.header.tools?.length ?? 0 : 0,
+        dispatched: events.filter(event => event.type === 'tool/call').length }
+    } catch { return { offered: 0, dispatched: 0 } }
+  }
+
+  /**
+   * A Worker that never dispatched one tool call of the table it was offered
+   * could not reach `fusion_submit_result` at all: its route ran the assignment
+   * outside this Host's tool loop. That is an adapter/configuration mismatch, so
+   * it is named instead of a generic incomplete turn the Lead would retry in vain.
+   */
+  async #unreachableTools(binding: SessionBinding, childId: string | undefined): Promise<string | undefined> {
+    const evidence = await this.#workerToolEvidence(childId)
+    if (workerNoReportCause({ requestedTools: evidence.offered, dispatchedToolCalls: evidence.dispatched }) !== 'unreachable-tools') return undefined
+    return JSON.stringify({ status: 'needs-decision', reason: 'worker dispatched no tool call, so it could not reach fusion_submit_result',
+      reasonCode: 'worker-tools-unreachable', failureCode: 'WORKER_TOOLS_UNREACHABLE',
+      childId, workerRunning: false,
+      provider: this.modelControl.route(binding, 'worker').provider, model: this.modelControl.route(binding, 'worker').model,
+      next: 'This is a route/adapter mismatch, not a provider outage, quota limit or a model capability. The Worker route ran its own agent loop and only surfaces a tool call when the request also carries that adapter\'s own transport tool, so the Fusion tools this Host advertised were unreachable. Do not retry fusion_rework, do not take over and do not claim completion. Tell the user which Worker route failed, and that it must be configured to reach Host tools (for the antigravity/agy route: enable its mcpBridge and allowlist fusion_submit_result) or be replaced by a direct-call route in Settings → Fusion.' })
   }
 
   #clearWorkerFailure(taskId: TaskId): void {
@@ -1428,6 +1471,12 @@ export class FusionCoordinator {
     const runtime = this.#runtime(binding.taskId), state = this.state(binding.taskId), order = state.currentWorkOrder!
     if (!runtime.submitted) {
       const waiting = this.modelControl.waiting(binding, 'worker')
+      // A recorded WORKFLOW_INCOMPLETE still has two very different causes: the
+      // route could not call the advertised tools at all, or the Worker simply
+      // stopped short of reporting. The first is a configuration mismatch the
+      // Lead must not retry, so it is decided before the generic explanation.
+      const unreachable = waiting?.code === 'WORKFLOW_INCOMPLETE' ? await this.#unreachableTools(binding, state.acceptedChild) : undefined
+      if (unreachable) return unreachable
       if (waiting) {
         const explanation = workerStopExplanation(waiting.code)
         return JSON.stringify({ status: 'needs-decision', reasonCode: explanation.reasonCode, failureCode: waiting.code,
@@ -1448,6 +1497,8 @@ export class FusionCoordinator {
       }
       const spent = this.#workerStepLimit(binding.taskId)
       if (spent) this.#recordWorkerStepStop(binding.taskId, spent)
+      const cause = await this.#unreachableTools(binding, state.acceptedChild)
+      if (cause) return cause
       return JSON.stringify({ status: 'needs-decision', reason: 'worker ended without submitting a report',
         reasonCode: spent ? 'worker-step-limit' : 'workflow-incomplete',
         failureCode: spent ? 'worker-step-limit' : 'WORKFLOW_INCOMPLETE',
