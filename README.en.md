@@ -45,7 +45,7 @@ After contaminated attempts were excluded, four tasks were clean in every condit
 ## Use
 
 1. Install the plugin ([INSTALL.md](INSTALL.md)).
-2. Open **Settings → Fusion** and choose a Lead and a Sidekick. Any model you are signed in to in DSH works.
+2. Open the **Fusion** entry in the left sidebar (default below Memory System) and choose a Lead and a Sidekick. Any model you are signed in to in DSH works.
 3. Select **Fusion · auto** in the model menu and work as usual.
 
 **Pairing:** Fusion saves money because the Sidekick costs far less than the Lead. Pick a strong frontier Lead and a Sidekick that is much cheaper (ideally 5× or more). The closer their prices, the smaller the saving.
@@ -78,7 +78,7 @@ While the Lead waits for the Sidekick, often for several minutes, the model's pr
   - Matched by model name: gpt-*, claude-*, gemini-*, glm-*, grok-*, kimi-*, deepseek-*, …
   - Plus the billing of the [dsh-oauth-login](https://github.com/aa2246740/dsh-oauth-login) routes: plans billed per request default to off, since every ping counts as a request.
 - **Auto:** starts only after the model has actually reported cache hits, so a model without caching never pays for pings.
-- **Every model is adjustable on the settings page:** on/off, interval, reset to default. The page also shows the observed effect for each model:
+- **Every model is adjustable in the Fusion panel:** on/off, interval, reset to default. The panel also shows the observed effect for each model:
   - whether the cache survived each wait;
   - how many pings were sent and how many tokens they read;
   - how many tokens were kept from being resent at full price.
