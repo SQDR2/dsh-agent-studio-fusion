@@ -45,7 +45,7 @@ import { NativeWorkerTransport } from './native-worker.js'
 import { NativeFusionActivity } from './native-activity.js'
 import { captureExploration, citedEvidenceChanged } from './native-exploration.js'
 import { workspaceWriterDenial } from './workspace-guard.js'
-import { absentWorkerOutcome, workerNoReportCause, workerStopExplanation } from './worker-terminal.js'
+import { absentWorkerOutcome, workerNoReportCause, workerStopExplanation, workerUnreachableFor, workerUnreachableReply } from './worker-terminal.js'
 import { resolveModelOutputLimits } from './model-output.js'
 import { assertWorkerBriefRequest, captureWorkerBrief, workerToolBriefProblem } from './native-worker-brief.js'
 import { changedPaths, pathAllowed, snapshotWorkspace, workspacePath, workspaceRelative } from './workspace.js'
@@ -108,6 +108,14 @@ interface RuntimeRecord {
     category: 'quota-exhausted' | 'provider-error'; code?: string }
   /** A user-authorized retry must not rediscover the same retained native error. */
   workerFailureClearedThrough?: { childId: string; eventSeq: number }
+  /**
+   * The Worker for this frozen order was dispatched a tool table it never called,
+   * so its route cannot reach `fusion_submit_result` and the order can never be
+   * reported. Recorded once the Host observes it, so the task stops presenting the
+   * handoff as live (session-16660dfd: the task stayed WORKER_RUNNING with no way
+   * forward, because only a settle could rediscover a fact already known).
+   */
+  workerUnreachable?: { workOrderId: WorkOrderId; childId: string; provider: string; model: string }
 }
 const STUB_REVIEW = /^(?:placeholder|todo|tbd|n\/?a|none|ok|okay|lgtm|done|accept(?:ed)?|looks good|fine|test)\.?$/i
 
@@ -706,11 +714,54 @@ export class FusionCoordinator {
   async #unreachableTools(binding: SessionBinding, childId: string | undefined): Promise<string | undefined> {
     const evidence = await this.#workerToolEvidence(childId)
     if (workerNoReportCause({ requestedTools: evidence.offered, dispatchedToolCalls: evidence.dispatched }) !== 'unreachable-tools') return undefined
-    return JSON.stringify({ status: 'needs-decision', reason: 'worker dispatched no tool call, so it could not reach fusion_submit_result',
-      reasonCode: 'worker-tools-unreachable', failureCode: 'WORKER_TOOLS_UNREACHABLE',
-      childId, workerRunning: false,
-      provider: this.modelControl.route(binding, 'worker').provider, model: this.modelControl.route(binding, 'worker').model,
-      next: 'This is a route/adapter mismatch, not a provider outage, quota limit or a model capability. The Worker route ran its own agent loop and only surfaces a tool call when the request also carries that adapter\'s own transport tool, so the Fusion tools this Host advertised were unreachable. Do not retry fusion_rework, do not take over and do not claim completion. Tell the user which Worker route failed, and that it must be configured to reach Host tools (for the antigravity/agy route: enable its mcpBridge and allowlist fusion_submit_result) or be replaced by a direct-call route in Settings → Fusion.' })
+    const route = this.modelControl.route(binding, 'worker')
+    this.#recordWorkerUnreachable(binding, childId, route)
+    return workerUnreachableReply(childId, route)
+  }
+
+  /**
+   * Record that this order's Worker can never report, so every later entry point
+   * agrees instead of waiting again. Without this the verdict lived only in the
+   * tool result: `fusion_wait` refused because the lease was gone, `fusion_rework`
+   * had no resident child to continue, and `fusion_delegate` refused because the
+   * order still "owned" the task, leaving the task in WORKER_RUNNING with no exit
+   * (session-16660dfd). The record is keyed by work order, so a replacement route
+   * under a new order is judged on its own dispatch.
+   */
+  #recordWorkerUnreachable(binding: SessionBinding, childId: string | undefined, route: { provider: string; model: string }): void {
+    const order = this.state(binding.taskId).currentWorkOrder
+    if (!order || !childId) return
+    const runtime = this.#runtime(binding.taskId)
+    const record = { workOrderId: order.id, childId, provider: route.provider, model: route.model }
+    if (digestOf(runtime.workerUnreachable ?? null) !== digestOf(record)) this.#saveRuntime({ ...runtime, workerUnreachable: record })
+  }
+
+  /** The recorded verdict for the current order, when it still owns the handoff. */
+  #workerUnreachable(binding: SessionBinding): RuntimeRecord['workerUnreachable'] {
+    // A task that has never delegated has no runtime record yet; that is simply
+    // "no verdict", not a broken record.
+    const row = this.store.readDocument(`runtime:${binding.taskId}`)?.value as RuntimeRecord | undefined
+    if (!row || row.schemaVersion !== 1 || row.taskId !== binding.taskId) return undefined
+    return workerUnreachableFor(this.state(binding.taskId).currentWorkOrder, row.workerUnreachable)
+      ? row.workerUnreachable : undefined
+  }
+
+  /**
+   * Stop the dead-end Worker and free its lease before the replacement order is
+   * frozen. The route never reached a tool, so nothing it did is pending; a child
+   * that is already gone is equally final. Refusing to wait here is the point:
+   * the alternative was a frontier Lead turn blocked until the CLI exited.
+   */
+  async #stopUnreachableWorker(agent: Agent, binding: SessionBinding): Promise<void> {
+    const childId = this.state(binding.taskId).acceptedChild
+    if (childId) {
+      const resident = this.ctx.agents.get(NativeSessionId(childId))
+      if (resident && resident.session.header.parentSession === agent.id) {
+        await this.#stopJobs(binding.taskId, () => this.transport.stop(agent, childId))
+      }
+    }
+    if (this.effects.pending(binding.taskId).length) throw new Error('An unreachable Worker still has unfinished native effects; reconcile it before replacing the work order')
+    this.#release(binding.taskId)
   }
 
   #clearWorkerFailure(taskId: TaskId): void {
@@ -1122,6 +1173,10 @@ export class FusionCoordinator {
     if (!state.currentWorkOrder || !state.acceptedChild) throw new Error('No Worker handoff is pending')
     if (state.phase === 'REVIEWING') throw new Error('The current report is ready; review it before another wait')
     if (this.#runtime(binding.taskId).takeover) throw new Error('Lead takeover must submit its own result')
+    // Re-report the recorded verdict instead of refusing a lease-less handoff:
+    // there is nothing to wait for, and the Lead must be able to read why.
+    const unreachable = this.#workerUnreachable(binding)
+    if (unreachable) return workerUnreachableReply(unreachable.childId, unreachable)
     const operation = readModelControl(this.store, binding)?.operation
     const resumeId = operation && `workflow-worker-resume:${binding.taskId}:${operation.id}`
     const child = this.ctx.agents.get(NativeSessionId(state.acceptedChild))
@@ -1162,7 +1217,13 @@ export class FusionCoordinator {
       throw new Error('Settle the current writer and effects before a new work order: wait for or stop your running commands (job_output, job_kill) and let pending tools finish, then delegate again')
     }
     const promoting = mode === 'implement' && priorState.currentWorkOrder?.mode === 'explore'
-    if (priorState.currentWorkOrder && !promoting) throw new Error('A Worker already owns this task; use fusion_rework with model-authored feedback (after a report it can also add allowedPaths with addAllowedPaths, or correct checks)')
+    // An order whose route can never report holds no useful handoff: it is a dead
+    // end, not a running Worker. Replacing it is the only way out of WORKER_RUNNING
+    // (session-16660dfd), so this is allowed exactly once the Host has recorded that
+    // verdict for this order — never for an ordinary in-flight Worker.
+    const replacesUnreachable = Boolean(this.#workerUnreachable(binding))
+    if (replacesUnreachable) await this.#stopUnreachableWorker(agent, binding)
+    if (priorState.currentWorkOrder && !promoting && !replacesUnreachable) throw new Error('A Worker already owns this task; use fusion_rework with model-authored feedback (after a report it can also add allowedPaths with addAllowedPaths, or correct checks)')
     const base: WorkspaceSnapshot = mode === 'text'
       ? { schemaVersion: 1, root: `text:${binding.sessionId}`, entries: [], excludedDirectoryNames: [], id: SnapshotId(`text:${binding.taskId}`) }
       : snapshotWorkspace(agent.session.header.cwd!)
@@ -1217,8 +1278,14 @@ export class FusionCoordinator {
       const prior = priorChild?.value as { parent?: string; taskId?: TaskId } | undefined
       if (!prior || prior.parent !== agent.id || !prior.taskId) throw new Error('Persistent Worker ownership requires reconciliation')
       const previous = this.state(prior.taskId)
+      // A dead-end order is not a completed one, but it is quiescent: the Worker
+      // was stopped and its lease released before this point, so reusing the same
+      // persistent identity for the replacement order is safe and does not strand
+      // the task in WORKER_RUNNING (session-16660dfd).
+      const replaceable = replacesUnreachable && previous.taskId === binding.taskId && previous.acceptedChild === childId
+        && previous.control.mode === 'running' && !previous.lease
       if (previous.acceptedChild !== childId || previous.parent !== SessionId(agent.id)
-        || (promoting ? previous.taskId !== binding.taskId || previous.control.mode !== 'running' : previous.control.mode !== 'completed')
+        || (promoting ? previous.taskId !== binding.taskId || previous.control.mode !== 'running' : previous.control.mode !== 'completed' && !replaceable)
         || previous.control.recovering || previous.control.outcomeUnknown || previous.lease
         || previous.profileDigest !== binding.profile.digest || (previous.currentWorkOrder?.mode !== 'text' && mode !== 'text' && this.#runtime(prior.taskId).root !== base.root)
         || resident && (resident.status !== 'idle' || resident.session.header.parentSession !== agent.id)) {
@@ -1398,6 +1465,9 @@ export class FusionCoordinator {
     if (!state.acceptedChild || !state.currentWorkOrder) throw new Error('No accepted Worker to continue')
     const childId = state.acceptedChild
     if (!feedback.trim()) throw new Error('Specific Lead-authored feedback is required')
+    // Feedback is the one thing that can still help a Worker whose previous turn
+    // merely stopped short (a truncated turn re-dispatches with zero calls so
+    // far), so this path deliberately does not consult the dead-end verdict.
     // The first pre-step can run before the native inbox message is appended.
     // Check its durable user source again before delivering model feedback.
     this.#acknowledgeUserRetry(agent, binding.taskId)

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { absentWorkerOutcome, unsettledContinuationError, workerNoReportCause, workerSettlementGuidance, workerStopExplanation } from '../src/host/worker-terminal.js'
+import { absentWorkerOutcome, unsettledContinuationError, workerNoReportCause, workerSettlementGuidance, workerStopExplanation, workerUnreachableFor, workerUnreachableReply } from '../src/host/worker-terminal.js'
 
 describe('settled Worker terminal status', () => {
   it('does not take a recovery lock when a disposed Worker left no unknown effects', () => {
@@ -49,5 +49,25 @@ describe('Worker no-report diagnosis', () => {
   it('never blames accessibility when no tool table was offered at all', () => {
     // A tool-less request proves nothing about reachability; do not guess.
     expect(workerNoReportCause({ requestedTools: 0, dispatchedToolCalls: 0 })).toBe('no-report')
+  })
+
+  it('scopes a recorded dead end to the order that produced it', () => {
+    // A replacement order must be judged on its own dispatch, never refused on a
+    // predecessor's evidence; only the same order is still a dead end.
+    expect(workerUnreachableFor({ id: 'order-1' }, { workOrderId: 'order-1' })).toBe(true)
+    expect(workerUnreachableFor({ id: 'order-2' }, { workOrderId: 'order-1' })).toBe(false)
+    expect(workerUnreachableFor(undefined, { workOrderId: 'order-1' })).toBe(false)
+    expect(workerUnreachableFor({ id: 'order-1' }, undefined)).toBe(false)
+  })
+
+  it('re-reports the same verdict at every entry point that can rediscover it', () => {
+    const reply = JSON.parse(workerUnreachableReply('fusion-worker-1', { provider: 'antigravity', model: 'gemini-3.8-flash' })) as Record<string, unknown>
+    expect(reply).toMatchObject({ reasonCode: 'worker-tools-unreachable', failureCode: 'WORKER_TOOLS_UNREACHABLE',
+      workerRunning: false, childId: 'fusion-worker-1', provider: 'antigravity', model: 'gemini-3.8-flash' })
+    // The Lead must not be told to retry feedback or take over, and must not be told
+    // this is an outage: it is a route that cannot reach Host tools.
+    expect(String(reply.next)).toContain('enable its mcpBridge')
+    expect(String(reply.next)).toContain('Do not retry fusion_rework')
+    expect(String(reply.next)).toContain('not a provider outage')
   })
 })

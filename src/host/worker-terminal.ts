@@ -53,6 +53,34 @@ export function workerNoReportCause(input: { requestedTools: number; dispatchedT
   return input.requestedTools > 0 && input.dispatchedToolCalls === 0 ? 'unreachable-tools' : 'no-report'
 }
 
+/**
+ * Whether the recorded unreachable route still speaks for the current order.
+ *
+ * The verdict is per work order: a new order must be judged on its own dispatch,
+ * so a replacement route is never refused on a predecessor's evidence. The task
+ * is only wedged while the same order that failed still owns the handoff.
+ */
+export function workerUnreachableFor(order: { id?: string } | undefined,
+  record: { workOrderId?: string } | undefined): boolean {
+  return Boolean(order?.id && record && record.workOrderId === order.id)
+}
+
+/**
+ * The one wording for a route that cannot reach Host tools, shared by every entry
+ * point that can rediscover the verdict, so a later `fusion_wait` says the same
+ * thing as the delegation that first failed.
+ */
+export function workerUnreachableReply(childId: string | undefined,
+  route: { provider: string; model: string }): string {
+  return JSON.stringify({
+    status: 'needs-decision',
+    reason: 'worker dispatched no tool call, so it could not reach fusion_submit_result',
+    reasonCode: 'worker-tools-unreachable', failureCode: 'WORKER_TOOLS_UNREACHABLE',
+    childId, workerRunning: false, provider: route.provider, model: route.model,
+    next: 'This is a route/adapter mismatch, not a provider outage, quota limit or a model capability. The Worker route ran its own agent loop and only surfaces a tool call when the request also carries that adapter\'s own transport tool, so the Fusion tools this Host advertised were unreachable. Do not retry fusion_rework, do not take over and do not claim completion. Tell the user which Worker route failed, and that it must be configured to reach Host tools (for the antigravity/agy route: enable its mcpBridge and allowlist fusion_submit_result) or be replaced by a direct-call route in Settings → Fusion.',
+  })
+}
+
 /** Continue/switch is refused before the route is written. Say so when a switch was requested. */
 export function unsettledContinuationError(switching: boolean): { zh: string; en: string } {
   return switching

@@ -1025,6 +1025,49 @@ describe('last admitted Worker request', () => {
   })
 })
 
+describe('unreachable Worker route', () => {
+  /**
+   * A Worker whose route never calls a tool it was offered cannot reach
+   * `fusion_submit_result`. The Host names that mismatch, and the task must not be
+   * left in WORKER_RUNNING with no exit: `fusion_wait` re-reports the verdict and a
+   * new `fusion_delegate` may replace the dead-end order (session-16660dfd).
+   */
+  it('re-reports the dead end and lets a new work order replace it', async () => {
+    // The Worker is offered its tool table but answers with plain text only: no
+    // tool/call is ever recorded, which is exactly the unreachable-route shape.
+    const { parent, coordinator, taskId, store } = await setup([
+      delegate(),
+      toolCallResponse('wait-dead', 'fusion_wait', {}),
+      textResponse('The route could not reach the Host tools.'),
+    ], [textResponse('Worker answers without calling tools.')])
+    parent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Fix addition.' }] }))
+    await parent.whenIdle()
+    const text = JSON.stringify(toolResults(parent))
+    expect(text).toContain('worker-tools-unreachable')
+    expect(text).toContain('WORKER_TOOLS_UNREACHABLE')
+    // The verdict is durable, so the handoff is no longer presented as a live Worker.
+    expect(store.readDocument(`runtime:${taskId}`)?.value).toMatchObject({
+      workerUnreachable: expect.objectContaining({ workOrderId: coordinator.state(taskId).currentWorkOrder!.id }),
+    })
+    // A later wait re-reports the same verdict instead of refusing the handoff.
+    expect(text.match(/worker-tools-unreachable/g)!.length).toBeGreaterThanOrEqual(2)
+  })
+
+  it('keeps an ordinary in-flight Worker from being replaced', async () => {
+    const { parent, coordinator, taskId, store } = await setup([
+      delegate(),
+      textResponse('The Worker finished its turn without a report.'),
+    ], [edit(), textResponse('Worker made the edit but never called the submit tool.')])
+    parent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Fix addition.' }] }))
+    await parent.whenIdle()
+    // This Worker DID call a tool (the edit), so it is an incomplete turn, not an
+    // unreachable route: no dead-end verdict may be recorded, and the task must not
+    // be replaceable on that basis.
+    expect(store.readDocument(`runtime:${taskId}`)?.value).not.toHaveProperty('workerUnreachable')
+    expect(JSON.stringify(toolResults(parent))).not.toContain('worker-tools-unreachable')
+  })
+})
+
 describe('exhausted Worker feedback', () => {
   it('does not interrupt or label the final admitted effect stopped while rejecting impossible feedback', async () => {
     const { parent, coordinator, adapter, taskId, store, ctx, workspace } = await setup([
