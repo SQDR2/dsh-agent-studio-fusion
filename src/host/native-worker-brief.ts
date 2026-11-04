@@ -86,9 +86,28 @@ export function captureWorkerBrief(store: SqliteFusionStore, taskId: TaskId, age
   store.writeDocument(id, 0, value)
 }
 
-export function workerToolBriefProblem(store: SqliteFusionStore, taskId: TaskId, exec: ToolExecution, revision: number): string | undefined {
-  const message = exec.agent?.session.snapshotEvents().findLast(event => event.type === 'assistant/message'
+/**
+ * Bind one non-read Worker tool to the brief its own request saw.
+ *
+ * A native call is identified by `rootCallId`, which is the id of the block the
+ * assistant message emitted. A bridge route (Antigravity's `agy`) instead runs
+ * the call inside its OWN loop and reports the step through its transport, so
+ * the bridged dispatch carries a bridge-local call id that never appears in this
+ * session (`agy-mcp-N`). Refusing it as "no native request" refused the one tool
+ * a bridge Worker exists to call — `fusion_submit_result` — and stranded the
+ * task (session-1d65b1d0). Such a call is still owned by a native request: it
+ * is dispatched synchronously while the transport call runs, so the enclosing
+ * assistant message is the one that emitted the transport. `transport` carries
+ * that name only for a role whose route really is a bridge.
+ */
+export function workerToolBriefProblem(store: SqliteFusionStore, taskId: TaskId, exec: ToolExecution, revision: number,
+  transport?: string): string | undefined {
+  const events = exec.agent?.session.snapshotEvents()
+  const native = events?.findLast(event => event.type === 'assistant/message'
     && event.data.message.content.some(block => block.type === 'tool-call' && block.id === exec.rootCallId))
+  const message = native ?? (transport === undefined ? undefined
+    : events?.findLast(event => event.type === 'assistant/message'
+      && event.data.message.content.some(block => block.type === 'tool-call' && block.name === transport)))
   if (!message || message.type !== 'assistant/message' || message.data.interrupted) return 'Worker tool requires a complete native model request'
   const row = store.readDocument(`worker-request:${exec.agent!.id}:${message.data.turn}:${message.data.step}`)?.value as {
     schemaVersion?: number; taskId?: string; sessionId?: string; turn?: number; step?: number; briefRevision?: number; workOrderId?: string

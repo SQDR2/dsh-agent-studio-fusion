@@ -894,7 +894,8 @@ export class FusionCoordinator {
     // (WORKER_TOOLS_UNREACHABLE).
     if (isRouteTransportName(exec.name) && this.#routeTransport(binding, role) === exec.name) return undefined
     if (role === 'worker' && !isRead(exec)) {
-      const problem = workerToolBriefProblem(this.store, binding.taskId, exec, this.#runtime(binding.taskId).briefRevision ?? 0)
+      const problem = workerToolBriefProblem(this.store, binding.taskId, exec, this.#runtime(binding.taskId).briefRevision ?? 0,
+        this.#routeTransport(binding, role))
       if (problem) return problem
     }
     if (role === 'worker' && state.currentWorkOrder?.mode === 'text' && !WORKER_FUSION_TOOLS.has(exec.name)) return 'Text delegation has no external tools; prepare the result from the supplied material'

@@ -57,4 +57,18 @@ export declare function compactHandoffs(projection: ReturnType<typeof workerHand
 export declare function assertWorkerBriefRequest(store: SqliteFusionStore, taskId: TaskId, request: GenerateOptions): void;
 /** Bind model-generated tools to the brief that their exact native request saw. */
 export declare function captureWorkerBrief(store: SqliteFusionStore, taskId: TaskId, agent: Agent, turn: number, step: number, revision: number): void;
-export declare function workerToolBriefProblem(store: SqliteFusionStore, taskId: TaskId, exec: ToolExecution, revision: number): string | undefined;
+/**
+ * Bind one non-read Worker tool to the brief its own request saw.
+ *
+ * A native call is identified by `rootCallId`, which is the id of the block the
+ * assistant message emitted. A bridge route (Antigravity's `agy`) instead runs
+ * the call inside its OWN loop and reports the step through its transport, so
+ * the bridged dispatch carries a bridge-local call id that never appears in this
+ * session (`agy-mcp-N`). Refusing it as "no native request" refused the one tool
+ * a bridge Worker exists to call — `fusion_submit_result` — and stranded the
+ * task (session-1d65b1d0). Such a call is still owned by a native request: it
+ * is dispatched synchronously while the transport call runs, so the enclosing
+ * assistant message is the one that emitted the transport. `transport` carries
+ * that name only for a role whose route really is a bridge.
+ */
+export declare function workerToolBriefProblem(store: SqliteFusionStore, taskId: TaskId, exec: ToolExecution, revision: number, transport?: string): string | undefined;

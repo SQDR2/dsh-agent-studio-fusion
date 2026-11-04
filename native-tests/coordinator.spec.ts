@@ -181,11 +181,23 @@ async function setup(script: Script, workerScript?: Script, options: {
   }
   const adapter = new ContextAdapter(script)
   ctx.llm.registerAdapter(options.bridgeTransport ? ['test-native', 'antigravity'] : ['test-native'], adapter)
+  // Faithful to dsh-agy-link: `agy` already ran the call in its own loop, and the
+  // bridge dispatches it here under a BRIDGE-LOCAL call id (`agy-mcp-N`), which is
+  // not the id of any block this session's assistant message emitted.
+  let bridgeSeq = 0
   const bridgeTool = defineTool({ name: 'agy_tool', description: 'Replays one recorded bridge tool step',
     parameters: { run: { type: 'string', required: true }, step: { type: 'number', required: true },
       tool: { type: 'string' }, input: { type: 'json' } },
     output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] },
-    execute: async () => 'replayed bridge step' })
+    execute: async (args, exec) => {
+      const step = args as { tool?: string; input?: unknown }
+      // `input` is what a real bridge forwards; without it the step is a plain
+      // replay, so a fixture that only asserts the ceiling stays inert.
+      if (step.tool === undefined || step.input === undefined) return 'replayed bridge step'
+      const result = await ctx.tools.execute({ name: step.tool, callId: ToolCallId(`agy-mcp-${++bridgeSeq}`),
+        arguments: step.input ?? {}, signal: exec.signal, ...(exec.agent ? { agent: exec.agent } : {}) })
+      return result.content.map(block => block.type === 'text' ? block.text : '').join('')
+    } })
   const bridgeDispose = options.bridgeTransport ? ctx.tools.register(bridgeTool) : undefined
   if (bridgeDispose) cleanups.push(async () => { bridgeDispose() })
   const parent = (await ctx.agents.create({ sessionId: SessionId('lead'), meta: options.noCwd ? {} : { cwd: workspace },
@@ -1106,6 +1118,31 @@ describe('bridge-route Worker', () => {
     expect(results).not.toContain('WORKER_TOOLS_UNREACHABLE')
     expect(coordinator.state(taskId), results).toMatchObject({ phase: 'COMPLETED', verification: 'verified' })
     expect(store.readDocument(`runtime:${taskId}`)?.value).not.toHaveProperty('workerUnreachable')
+  })
+
+  /**
+   * The bridged dispatch carries `agy-mcp-N`, a bridge-local id that appears in
+   * no assistant message of this session. Binding the brief gate to that id
+   * refused the report itself — `Worker tool requires a complete native model
+   * request` — and left the task running with nothing to settle it
+   * (session-1d65b1d0). A bridged call is still dispatched under the transport
+   * step that this session's own assistant message emitted, so that message owns
+   * its brief.
+   */
+  it('binds a bridged report to the native request that reported the step', async () => {
+    const { parent, coordinator, store, taskId } = await setup([
+      delegate(), review('accept'), textResponse('Verified.'),
+    ], [edit(), // `edit` reaches the Host through the bridge's own call id, then the report does too.
+      toolCallResponse('bridged-report', 'agy_tool', { run: 'run-1', step: 2, tool: 'fusion_submit_result',
+        input: { summary: 'Corrected add in calc.py.', status: 'completed', unresolved: [] } })],
+    { bridgeTransport: true })
+    parent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Fix addition and verify it.' }] }))
+    await parent.whenIdle()
+    const results = JSON.stringify(toolResults(parent))
+    expect(results).not.toContain('Worker tool requires a complete native model request')
+    expect(results).not.toContain('no captured brief identity')
+    expect(coordinator.state(taskId), results).toMatchObject({ phase: 'COMPLETED' })
+    expect(store.readDocument(`runtime:${taskId}`)?.value).not.toHaveProperty('workerFailure')
   })
 })
 
