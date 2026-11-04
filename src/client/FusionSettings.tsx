@@ -15,10 +15,12 @@ interface SettingsState {
   reason?: string
 }
 const styles = `
-.fusion-settings{max-width:680px;color:var(--dsw-alias-label-primary);display:flex;flex-direction:column;gap:18px}
+.fusion-page{box-sizing:border-box;width:100%;height:100%;min-width:0;min-height:0;flex:1 1 auto;overflow:auto;display:flex;flex-direction:column;align-items:center;scrollbar-gutter:stable;padding:0 clamp(24px,4vw,48px) 48px;--dsh-scrollbar-width:9px;--dsh-scrollbar-thumb-border:2px}
+.fusion-settings{box-sizing:border-box;width:100%;max-width:680px;margin:0 auto;color:var(--dsw-alias-label-primary);display:flex;flex-direction:column;gap:18px}
 .fusion-settings h2{margin:0;font-size:22px;line-height:30px;font-weight:600}
 .fusion-settings p{margin:0;font-size:13px;line-height:21px;color:var(--dsw-alias-label-secondary)}
-.fusion-settings header{display:flex;flex-direction:column;gap:8px}
+.fusion-settings header{display:flex;flex-direction:column;gap:8px;padding-top:28px}
+[data-platform='darwin'] .fusion-settings header{padding-top:calc(28px + var(--dsh-frame-top-clearance,0px))}
 .fusion-settings .fusion-card{padding:20px;border:1px solid var(--dsw-alias-border-l2);border-radius:12px;display:flex;flex-direction:column;gap:20px;background:var(--dsw-alias-bg-module-platform)}
 .fusion-settings fieldset{padding:0;margin:0;border:0;min-inline-size:0;display:flex;flex-direction:column;gap:10px}
 .fusion-settings legend{font-size:15px;font-weight:600;padding:0 0 4px}
@@ -38,7 +40,7 @@ const styles = `
 .fusion-cache{display:flex;flex-direction:column;gap:12px;border-top:1px solid var(--dsw-alias-border-l2);padding-top:20px}.fusion-cache h3{margin:0}.fusion-cache-model{display:flex;flex-direction:column;gap:8px;padding:14px;border:1px solid var(--dsw-alias-border-l2);border-radius:10px}.fusion-cache-model small{display:block;color:var(--dsw-alias-label-secondary);overflow-wrap:anywhere}.fusion-cache-controls{display:grid;grid-template-columns:minmax(0,2fr) minmax(0,1fr) auto;gap:10px;align-items:end}.fusion-cache-controls label{grid-template-columns:1fr;gap:4px}.fusion-cache a{color:var(--dsw-alias-brand-primary)}
 @media(max-width:560px){.fusion-cache-controls{grid-template-columns:1fr}}
 .fusion-history{display:flex;flex-direction:column;gap:12px;border-top:1px solid var(--dsw-alias-border-l2);padding-top:20px}.fusion-history table{width:100%;border-collapse:collapse;font-size:12px;text-align:left}.fusion-history :is(th,td){padding:8px;border-bottom:1px solid var(--dsw-alias-border-l2);font-weight:400;vertical-align:top}.fusion-history caption{text-align:left;font-size:13px;margin-bottom:8px}.fusion-history small{display:block;color:var(--dsw-alias-label-secondary);overflow-wrap:anywhere}.fusion-history ol{padding-left:20px;margin:0}.fusion-history li{padding:10px 0}.fusion-history h3{margin:8px 0 0}.fusion-history p{overflow-wrap:anywhere}
-@media(max-width:480px){.fusion-settings label{grid-template-columns:1fr;gap:6px}.fusion-settings .fusion-card{padding:16px}}
+@media(max-width:480px){.fusion-page{padding:0 16px 32px}.fusion-settings label{grid-template-columns:1fr;gap:6px}.fusion-settings .fusion-card{padding:16px}}
 `
 
 const key = (route: PhysicalRoute | undefined) => route ? JSON.stringify([route.provider, route.model]) : ''
@@ -109,41 +111,43 @@ export function FusionSettings() {
     } catch (error) { setError(error instanceof Error ? error.message : String(error)) }
     finally { setSaving(false) }
   }
-  return <div className="fusion-settings">
+  return <div className="fusion-page">
     <style>{styles}</style>
-    <header><h2>Fusion</h2><p>{tr(lang, '选择 Lead 和 Sidekick。Lead 处理日常请求、安排工作并审查结果；Sidekick 执行委派的任务。', 'Choose a Lead and a Sidekick. The Lead handles requests, plans and reviews; the Sidekick does the delegated work.')}</p>
-      <p><b>{tr(lang, '搭配建议', 'Pairing tip')}</b>: {tr(lang, 'Fusion 省钱靠的是 Sidekick 比 Lead 便宜得多。选一个强的前沿模型当 Lead，再选一个价格低很多（最好 5 倍以上）的模型当 Sidekick；两者价格越接近，越省不了钱。',
-        'Fusion saves money because the Sidekick is much cheaper than the Lead. Pick a strong frontier Lead and a Sidekick that costs far less (ideally 5× or more); the closer their prices, the smaller the saving.')}</p></header>
-    {error && <p role="alert">{error}</p>}
-    {!state && !error && <p role="status">{tr(lang, '正在读取模型…', 'Loading models…')}</p>}
-    {state && <>
-      <fieldset className="fusion-card" disabled={saving}>
-        <ModelChoice role="Lead" route={draft.lead} catalog={state.catalog} onChange={route => { if (route) chooseModel('lead', route) }} />
-        <ModelChoice role="Sidekick" route={draft.worker} catalog={state.catalog} onChange={route => { if (route) chooseModel('worker', route) }} />
-        <details><summary>{tr(lang, '上下文压缩模型 · 可选', 'Compaction model · optional')}</summary>
-          <div className="fusion-limits">
-            <p>{tr(lang, '默认由当前角色模型压缩。也可以单独选择已连接的模型；请求由所选账号计费。', 'By default each role compacts with its own model. You can pick another connected model; its account is billed.')}</p>
-            <ModelChoice role="compactor" route={draft.compactor?.route} catalog={state.catalog} onChange={route => setDraft(value => {
-              const { compactor, ...rest } = value
-              return route ? { ...rest, compactor: { route, maxOutputTokens: compactor?.maxOutputTokens ?? 8192 } } : rest
-            })} />
-            {draft.compactor && <label>{tr(lang, '输出 Token 上限', 'Output token limit')}<input aria-label={tr(lang, '压缩输出 Token 上限', 'Compaction output token limit')} type="number" min="1" max="128000"
-              value={draft.compactor.maxOutputTokens} onChange={event => { const maxOutputTokens = Number(event.target.value)
-                setDraft(value => value.compactor ? { ...value, compactor: { ...value.compactor, maxOutputTokens } } : value) }} /></label>}
-            <p>{tr(lang, '已选中的会话仍使用原配置。', 'Conversations already using Fusion keep their setup.')}</p>
-          </div>
-        </details>
-      </fieldset>
-      <div className="fusion-actions"><p>{tr(lang, '已选中的会话保留原组合；新选择使用新组合。额度耗尽后要换当前任务的 Sidekick，用该会话的 Fusion 恢复面板，而不是只改这里。', 'Conversations already using Fusion keep their pair; new selections use the new one. After a quota stop, switch this conversation\'s Sidekick from its Fusion recovery panel, not only here.')}</p>
-        <button disabled={saving || !draft.lead || !draft.worker || JSON.stringify(draft) === JSON.stringify(state.pair)} onClick={() => { void save() }}>{saving ? tr(lang, '正在保存…', 'Saving…') : tr(lang, '保存组合', 'Save pair')}</button>
-      </div>
-      {notice && <p role="status">{notice}</p>}
-      <p>{tr(lang, '输出参数跟随原生模型设置，Fusion 不额外限制请求次数或任务轮数。', 'Output settings follow the native model settings; Fusion adds no request or round limits.')}</p>
-      <p>{tr(lang, '保存即表示允许 Fusion 使用所选模型的现有账号；费用由这些账号计入，当前未提供可靠的实际账单金额。', 'Saving lets Fusion use the chosen models\' existing accounts; they are billed there, and no reliable billed amount is available here.')}</p>
-      {state.pair && !state.authorized && <p role="status">{tr(lang, '组合需要重新保存后才能使用', 'Save the pair again before use')}{state.reason ? `: ${state.reason}` : ''}</p>}
-      {state.managedAuthorization && <p>{tr(lang, '运行额度由外部授权配置管理。', 'Run limits are managed by an external authorization file.')}</p>}
-    </>}
-    <FusionCache refresh={state?.revision ?? 0} />
-    <FusionHistory />
+    <div className="fusion-settings">
+      <header data-window-drag><h2>Fusion</h2><p>{tr(lang, '选择 Lead 和 Sidekick。Lead 处理日常请求、安排工作并审查结果；Sidekick 执行委派的任务。', 'Choose a Lead and a Sidekick. The Lead handles requests, plans and reviews; the Sidekick does the delegated work.')}</p>
+        <p><b>{tr(lang, '搭配建议', 'Pairing tip')}</b>: {tr(lang, 'Fusion 省钱靠的是 Sidekick 比 Lead 便宜得多。选一个强的前沿模型当 Lead，再选一个价格低很多（最好 5 倍以上）的模型当 Sidekick；两者价格越接近，越省不了钱。',
+          'Fusion saves money because the Sidekick is much cheaper than the Lead. Pick a strong frontier Lead and a Sidekick that costs far less (ideally 5× or more); the closer their prices, the smaller the saving.')}</p></header>
+      {error && <p role="alert">{error}</p>}
+      {!state && !error && <p role="status">{tr(lang, '正在读取模型…', 'Loading models…')}</p>}
+      {state && <>
+        <fieldset className="fusion-card" disabled={saving}>
+          <ModelChoice role="Lead" route={draft.lead} catalog={state.catalog} onChange={route => { if (route) chooseModel('lead', route) }} />
+          <ModelChoice role="Sidekick" route={draft.worker} catalog={state.catalog} onChange={route => { if (route) chooseModel('worker', route) }} />
+          <details><summary>{tr(lang, '上下文压缩模型 · 可选', 'Compaction model · optional')}</summary>
+            <div className="fusion-limits">
+              <p>{tr(lang, '默认由当前角色模型压缩。也可以单独选择已连接的模型；请求由所选账号计费。', 'By default each role compacts with its own model. You can pick another connected model; its account is billed.')}</p>
+              <ModelChoice role="compactor" route={draft.compactor?.route} catalog={state.catalog} onChange={route => setDraft(value => {
+                const { compactor, ...rest } = value
+                return route ? { ...rest, compactor: { route, maxOutputTokens: compactor?.maxOutputTokens ?? 8192 } } : rest
+              })} />
+              {draft.compactor && <label>{tr(lang, '输出 Token 上限', 'Output token limit')}<input aria-label={tr(lang, '压缩输出 Token 上限', 'Compaction output token limit')} type="number" min="1" max="128000"
+                value={draft.compactor.maxOutputTokens} onChange={event => { const maxOutputTokens = Number(event.target.value)
+                  setDraft(value => value.compactor ? { ...value, compactor: { ...value.compactor, maxOutputTokens } } : value) }} /></label>}
+              <p>{tr(lang, '已选中的会话仍使用原配置。', 'Conversations already using Fusion keep their setup.')}</p>
+            </div>
+          </details>
+        </fieldset>
+        <div className="fusion-actions"><p>{tr(lang, '已选中的会话保留原组合；新选择使用新组合。额度耗尽后要换当前任务的 Sidekick，用该会话的 Fusion 恢复面板，而不是只改这里。', 'Conversations already using Fusion keep their pair; new selections use the new one. After a quota stop, switch this conversation\'s Sidekick from its Fusion recovery panel, not only here.')}</p>
+          <button disabled={saving || !draft.lead || !draft.worker || JSON.stringify(draft) === JSON.stringify(state.pair)} onClick={() => { void save() }}>{saving ? tr(lang, '正在保存…', 'Saving…') : tr(lang, '保存组合', 'Save pair')}</button>
+        </div>
+        {notice && <p role="status">{notice}</p>}
+        <p>{tr(lang, '输出参数跟随原生模型设置，Fusion 不额外限制请求次数或任务轮数。', 'Output settings follow the native model settings; Fusion adds no request or round limits.')}</p>
+        <p>{tr(lang, '保存即表示允许 Fusion 使用所选模型的现有账号；费用由这些账号计入，当前未提供可靠的实际账单金额。', 'Saving lets Fusion use the chosen models\' existing accounts; they are billed there, and no reliable billed amount is available here.')}</p>
+        {state.pair && !state.authorized && <p role="status">{tr(lang, '组合需要重新保存后才能使用', 'Save the pair again before use')}{state.reason ? `: ${state.reason}` : ''}</p>}
+        {state.managedAuthorization && <p>{tr(lang, '运行额度由外部授权配置管理。', 'Run limits are managed by an external authorization file.')}</p>}
+      </>}
+      <FusionCache refresh={state?.revision ?? 0} />
+      <FusionHistory />
+    </div>
   </div>
 }

@@ -11,7 +11,17 @@ export declare class NativeTaskContext {
     readonly store: SqliteFusionStore;
     readonly parent: (id: string) => Agent | undefined;
     constructor(store: SqliteFusionStore, parent: (id: string) => Agent | undefined);
-    begin(agent: Agent, taskId: TaskId): void;
+    /**
+     * Record where this task's user instructions begin. A task created by an automatic
+     * rollover continues the same conversation, so it inherits the boundary of the task
+     * it replaces: the user's instructions belong to the conversation, not to one
+     * accounting task. Narrowing it to the rollover point silently hid every earlier
+     * user message from `fusion_delegate`'s verbatim requirement check, which then
+     * rejected the Lead's own true quotes as fabricated.
+     */
+    begin(agent: Agent, taskId: TaskId, firstSeq?: number): void;
+    /** The recorded user-instruction boundary of a task, when it has one. */
+    originSeq(taskId: TaskId): number | undefined;
     /**
      * `compact` is appended on every changed step: it carries only state the
      * native history does not already hold, so the expensive Lead does not
