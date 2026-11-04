@@ -14,6 +14,7 @@ export declare class SqliteFusionStore implements FusionStore {
     listTaskIds(): readonly TaskId[];
     listDocumentIds(prefix: string): readonly string[];
     load(taskId: TaskId): TaskState | undefined;
+    deleteTask(taskId: string): void;
     events(taskId: TaskId): readonly FusionEvent[];
     replay(taskId: TaskId): TaskState;
     create(event: Extract<FusionEvent, {

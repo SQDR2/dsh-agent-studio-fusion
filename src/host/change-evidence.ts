@@ -11,6 +11,14 @@ export interface ChangeBase {
   schemaVersion: 1
   snapshot: SnapshotId
   contents: Record<string, ArtifactRef>
+  /**
+   * Paths the Lead widened the scope to only after they had already changed, so their
+   * delegation-time bytes are gone. Diffs carry no pre-image for them and the
+   * rewritten-test gate cannot compare original lines; the review must say so instead of
+   * pretending the file was untouched (`session-daa71a4a`: refusing to record them at all
+   * left the task with no admissible report and no admissible widening).
+   */
+  unavailable?: readonly string[]
 }
 
 /** Read only the exact leaf described by the snapshot, never its symlink target. */
@@ -54,6 +62,22 @@ export function captureChangeBase(store: SqliteFusionStore, taskId: TaskId, base
   const entries = base.entries.filter(entry => pathAllowed(entry.path, allowed))
   const refs = store.putArtifacts(taskId, entries.map(entry => ({ bytes: readEntry(base, entry), mediaType: 'application/octet-stream' })))
   return { schemaVersion: 1, snapshot: base.id, contents: Object.fromEntries(entries.map((entry, i) => [entry.path, refs[i]])) }
+}
+
+/**
+ * The same base bytes, for paths the Lead adds to the frozen scope after a report. A file the
+ * Worker (or the task's own build command) already changed no longer matches the snapshot, so
+ * its delegation-time bytes cannot be recorded: that path is reported as unavailable instead of
+ * failing, which would leave the task with no admissible report and no admissible widening.
+ */
+export function captureLaterChangeBase(store: SqliteFusionStore, taskId: TaskId, base: WorkspaceSnapshot, allowed: readonly string[]): ChangeBase {
+  const readable: { path: string; bytes: Buffer }[] = [], unavailable: string[] = []
+  for (const entry of base.entries.filter(entry => pathAllowed(entry.path, allowed))) {
+    try { readable.push({ path: entry.path, bytes: readEntry(base, entry) }) } catch { unavailable.push(entry.path) }
+  }
+  const refs = store.putArtifacts(taskId, readable.map(entry => ({ bytes: entry.bytes, mediaType: 'application/octet-stream' })))
+  return { schemaVersion: 1, snapshot: base.id, contents: Object.fromEntries(readable.map((entry, i) => [entry.path, refs[i]])),
+    ...(unavailable.length ? { unavailable } : {}) }
 }
 
 function quotePath(path: string): string {
@@ -109,7 +133,9 @@ export function saveChangeManifest(store: SqliteFusionStore, taskId: TaskId, bas
     const beforeRef = before && captured && Object.hasOwn(captured.contents, path) ? captured.contents[path] : undefined
     const oldBytes = beforeRef ? baseBytes.get(beforeRef.id) : undefined
     if (beforeRef && (!before || beforeRef.digest !== before.digest || sha256Hex(oldBytes!) !== before.digest)) throw new Error('Change evidence does not match the base file')
-    if (before && captured && !beforeRef) throw new Error('Frozen change evidence is missing the base file')
+    // A path the Lead widened the scope to after it had already changed has no recordable
+    // pre-image; it is reported as `unavailable-base` instead of blocking every report.
+    if (before && captured && !beforeRef && !captured.unavailable?.includes(path)) throw new Error('Frozen change evidence is missing the base file')
     const newBytes = after ? readEntry(candidate, after) : undefined
     const afterIndex = pending.length
     if (newBytes) pending.push({ bytes: newBytes, mediaType: 'application/octet-stream' })

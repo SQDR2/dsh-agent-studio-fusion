@@ -48,9 +48,9 @@ import { workspaceWriterDenial } from './workspace-guard.js'
 import { absentWorkerOutcome, workerNoReportCause, workerStopExplanation, workerUnreachableFor, workerUnreachableReply } from './worker-terminal.js'
 import { resolveModelOutputLimits } from './model-output.js'
 import { assertWorkerBriefRequest, captureWorkerBrief, workerToolBriefProblem } from './native-worker-brief.js'
-import { changedPaths, pathAllowed, snapshotWorkspace, workspacePath, workspaceRelative } from './workspace.js'
+import { changedPaths, grantOf, pathAllowed, snapshotWorkspace, workspacePath, workspaceRelative } from './workspace.js'
 import type { WorkspaceSnapshot } from './workspace.js'
-import { captureChangeBase, saveChangeManifest } from './change-evidence.js'
+import { captureChangeBase, captureLaterChangeBase, saveChangeManifest } from './change-evidence.js'
 import { CachePolicy } from './cache-policy.js'
 import type { ChangeBase } from './change-evidence.js'
 import { evidencePage } from './evidence-page.js'
@@ -192,14 +192,27 @@ const SEPARATED_LEAD_TOOLS: readonly string[] = [...new Set([...READ_TOOLS, nati
 /** Test files by common conventions (Python, JS/TS, Go, Rust and generic test directories). */
 const TEST_FILE = /(^|\/)(tests?|__tests__|specs?)\/|(^|\/)test_[^/]+\.py$|_test\.(py|go)$|\.(test|spec)\.[cm]?[jt]sx?$|(^|\/)conftest\.py$/i
 
+export interface RewrittenTest {
+  path: string
+  /** Original lines no longer present in the file. */
+  removedLines?: number
+  deleted?: boolean
+  /** Widened into scope after the change: no original bytes exist to compare against. */
+  unavailableBase?: boolean
+}
+
 /**
  * Existing test files whose original lines were removed or changed (pure additions are not listed). A Worker
  * that rewrites an old test to fit its change hides a regression the maintainers' test would catch
  * (round 4, canvasapi): the Lead must look at these before accepting.
  */
-export function rewrittenTests(store: SqliteFusionStore, taskId: TaskId, root: string, changeBase: ChangeBase | undefined, changes: readonly string[]) {
+export function rewrittenTests(store: SqliteFusionStore, taskId: TaskId, root: string, changeBase: ChangeBase | undefined, changes: readonly string[]): RewrittenTest[] {
   if (!changeBase) return []
-  return changes.filter(path => TEST_FILE.test(path) && Object.hasOwn(changeBase.contents, path)).flatMap(path => {
+  return changes.filter(path => TEST_FILE.test(path)
+    && (Object.hasOwn(changeBase.contents, path) || changeBase.unavailable?.includes(path))).flatMap((path): RewrittenTest[] => {
+    // Widened after the Worker had already changed it: there are no original lines to compare,
+    // so the Lead is told to look at the file instead of the Host silently clearing the gate.
+    if (!Object.hasOwn(changeBase.contents, path)) return [{ path, unavailableBase: true }]
     const original = Buffer.from(store.readArtifacts(taskId, [changeBase.contents[path]!.id])[0]!).toString('utf8')
     let current = ''
     try { current = readFileSync(workspacePath(root, path), 'utf8') } catch { return [{ path, removedLines: original.split('\n').filter(line => line.trim()).length, deleted: true }] }
@@ -1294,7 +1307,10 @@ export class FusionCoordinator {
       throw new Error('Wait for the completed read-only exploration on the unchanged workspace before sending an implementation plan')
     }
     if (mode === 'implement' && !args.allowedPaths.length) throw new Error('Explicit allowedPaths are required')
-    for (const path of args.allowedPaths) workspacePath(base.root, path)
+    // Grant validation happens before any Worker request: a wildcard the Host cannot honour
+    // would freeze scope that matches nothing and can never be widened afterwards.
+    const allowedPaths = args.allowedPaths.map(path => grantOf(path))
+    for (const path of allowedPaths) if (path !== '.') workspacePath(base.root, path)
     const origin = this.store.readDocument(`task-origin:${binding.taskId}`)?.value as { firstSeq: number } | undefined
     const source = agent.session.snapshotEvents().findLast(event => event.seq >= (origin?.firstSeq ?? 0) && event.type === 'user/message'
       && (event.data.source === undefined || event.data.source.kind === 'user'))
@@ -1309,7 +1325,7 @@ export class FusionCoordinator {
       goal: args.goal, constraints: [...args.constraints.map((text, i) => ({ id: `constraint-${i}`, text, mandatory: true, provenance: 'inferred' as const,
         source: { sessionId: SessionId(agent.id), eventSeq: source.seq, messageId: source.data.id } })),
       ...requirements.map((text, i) => ({ id: `requirement-${i}`, text, mandatory: true, provenance: 'user' as const,
-        source: { sessionId: SessionId(agent.id), eventSeq: source.seq, messageId: source.data.id } }))], acceptance: [], allowedPaths: args.allowedPaths,
+        source: { sessionId: SessionId(agent.id), eventSeq: source.seq, messageId: source.data.id } }))], acceptance: [], allowedPaths,
       forbiddenActions: [...(mode === 'explore' ? ['Write files or run commands during read-only exploration'] : []), 'Change unrelated paths', 'Weaken frozen acceptance checks', 'Bypass native tool permissions'], baseSnapshot: base.id,
       evidence: explored ? priorState.exploration!.sources.map(source => source.excerpt) : [], decisions: [], uncertainties: [], policy: {
         maxWorkerSteps: this.options.maxWorkerSteps ?? DEFAULT_POLICY.maxWorkerSteps, maxReworkRounds: this.options.maxReworkRounds ?? DEFAULT_POLICY.maxReworkRounds,
@@ -1344,7 +1360,7 @@ export class FusionCoordinator {
         throw new Error('Previous Worker task must be complete and quiescent under the same frozen profile and workspace')
       }
     } else if (priorChild || resident) throw new Error('New Worker identity is already in use')
-    const changeBase = mode === 'implement' ? captureChangeBase(this.store, binding.taskId, base, order.allowedPaths) : undefined
+    const changeBase = mode === 'implement' ? captureChangeBase(this.store, binding.taskId, base, allowedPaths) : undefined
     // A direct preparation step may become delegated work without completing
     // the user task. Preserve its lease on every preflight error, and release
     // only the verified Lead writer before acquiring the Worker's generation.
@@ -1444,8 +1460,11 @@ export class FusionCoordinator {
    * allowedPaths were too narrow (seen in a benchmark: a test file outside the
    * scope still encoded the old behaviour, and the task could only end
    * unfinished), the Lead may add paths between reports. Paths are only added.
-   * The added files still hold their delegation-time bytes, which become part
-   * of the change base so diffs and the rewritten-test gate cover them.
+   * Files that still hold their delegation-time bytes become part of the change
+   * base, so diffs and the rewritten-test gate cover them. A file the Worker (or
+   * the task's own build command) already changed cannot be recorded and is
+   * marked unavailable instead: refusing it left the task with no admissible
+   * report and no admissible widening (session-daa71a4a).
    */
   #expandScope(binding: SessionBinding, runtime: RuntimeRecord, feedback: string, paths: readonly string[], exec: ToolRunContext): string {
     const state = this.state(binding.taskId), order = state.currentWorkOrder!
@@ -1453,26 +1472,29 @@ export class FusionCoordinator {
     if (!runtime.submitted || state.lease || this.#held.get(binding.taskId) || this.effects.pending(binding.taskId).length) {
       throw new Error('Add allowedPaths only after the current Worker report, while the Worker is quiescent')
     }
-    for (const path of paths) workspacePath(runtime.root, path.trim())
+    const grants = paths.map(path => grantOf(path))
+    for (const path of grants) if (path !== '.') workspacePath(runtime.root, path)
     // Already allowed (for example a retry after a later step of the same rework failed): nothing to record.
-    const added = [...new Set(paths.map(path => path.trim()).filter(Boolean))].filter(path => !order.allowedPaths.includes(path))
+    const added = [...new Set(grants)].filter(path => !order.allowedPaths.includes(path))
     if (!added.length) return feedback
     const allowedPaths = [...order.allowedPaths, ...added]
     let changeBase = runtime.changeBase
     if (changeBase) {
       const known = changeBase.contents
       const fresh = { ...runtime.base, entries: runtime.base.entries.filter(entry => !Object.hasOwn(known, entry.path)) }
-      let extra: ChangeBase
-      try { extra = captureChangeBase(this.store, binding.taskId, fresh, added) } catch (error) {
-        throw new Error(`Files under the added paths already differ from the delegation base, so their original bytes cannot be recorded: ${(error as Error).message}. Inspect those changes before widening the scope.`)
-      }
-      changeBase = { ...changeBase, contents: { ...known, ...extra.contents } }
+      const extra = captureLaterChangeBase(this.store, binding.taskId, fresh, added)
+      changeBase = { ...changeBase, contents: { ...known, ...extra.contents },
+        unavailable: [...new Set([...(changeBase.unavailable ?? []), ...(extra.unavailable ?? [])])] }
     }
     this.store.writeDocument(`scope-expansion:${binding.taskId}:${randomUUID()}`, 0, { schemaVersion: 1, taskId: binding.taskId,
-      workOrderId: order.id, causeId: exec.callId, reason: feedback, before: order.allowedPaths, added, at: new Date().toISOString() })
+      workOrderId: order.id, causeId: exec.callId, reason: feedback, before: order.allowedPaths, added,
+      unavailable: changeBase?.unavailable ?? [], at: new Date().toISOString() })
     this.append(binding.taskId, 'work-order/scope-expanded', { workOrderId: order.id, allowedPaths, added, reason: feedback })
     this.#saveRuntime({ ...this.#runtime(binding.taskId), ...(changeBase ? { changeBase } : {}) })
+    // A file whose pre-image is gone changes how the report is judged, so say so in the brief.
+    const missingBase = (changeBase?.unavailable ?? []).filter(path => pathAllowed(path, added))
     return `${feedback}\n\nThe Lead added these paths to the frozen allowedPaths: ${JSON.stringify(added)}. You may now change: ${JSON.stringify(allowedPaths)}`
+      + (missingBase.length ? `\nAlready changed before this widening, so their original bytes are unavailable: ${JSON.stringify(missingBase)}. Their diffs carry no pre-image; the Lead reviews their current content.` : '')
   }
 
   /**
@@ -1722,6 +1744,7 @@ export class FusionCoordinator {
     const requirements = order.constraints.filter(item => item.provenance === 'user')
     const spans = this.#missingSpans(runtime.root, requirements, changes)
     const rewritten = rewrittenTests(this.store, binding.taskId, runtime.root, runtime.changeBase, changes)
+    const missingBase = changes.filter(path => runtime.changeBase?.unavailable?.includes(path))
     const knownFailures = checked.receipts.flatMap(receipt => receipt.counts?.knownFailures?.length ? [{
       check: runtime.checks.find(check => digestOf(check.plan) === receipt.planDigest)?.definition.id, preExisting: receipt.counts.knownFailures }] : [])
     return JSON.stringify({ status: 'review-ready', verification: checked.verdict, report: checked.report,
@@ -1733,6 +1756,8 @@ export class FusionCoordinator {
       ...(knownFailures.length ? { preExistingFailures: knownFailures } : {}),
       ...(rewritten.length ? { rewrittenTests: rewritten,
         testWarning: 'Existing tests lost or changed original lines. Check that the change extends them rather than rewriting an old expectation to fit the new behaviour; an accept must name each file in its reason.' } : {}),
+      ...(missingBase.length ? { unavailableBase: missingBase,
+        unavailableWarning: 'These paths changed before the Lead widened the frozen scope, so their delegation-time bytes are gone: their diffs carry no pre-image and the rewritten-test gate cannot compare them. Inspect their current content directly, and name each file in an accept reason.' } : {}),
       ...(runtime.checks.length ? {} : { reviewOnly: 'No automated acceptance check ran for this work order. Your review of the diff is the only verification; say so plainly in the final answer.' }),
       ...(unrunnable.length ? { checkDefinitionProblem: {
         checks: unrunnable, reason: 'The acceptance command could not execute on this host (program not found or not executable)',
@@ -2048,7 +2073,7 @@ export class FusionCoordinator {
       parameters: { goal: { type: 'string', description: 'The complete implementation outcome, including all planned stages.', required: true },
         brief: { type: 'string', description: 'The current stage plan. Put temporary deferrals and sequencing here; later feedback may advance this stage.', required: true },
         constraints: { ...optionalStringList, description: 'Default none. Only durable requirements that remain true across every planned implementation stage. Do not freeze a temporary deferral such as not implementing stage two yet.' },
-        allowedPaths: { ...stringList, description: 'Workspace-relative allowed changes for all planned stages, including regression tests. The Worker cannot expand this set; after a report you can add paths with fusion_rework addAllowedPaths.' },
+        allowedPaths: { ...stringList, description: 'Workspace-relative files or directories the Worker may change across all planned stages, including regression tests. A directory grants every file under it; a trailing /** is accepted as the same grant, other wildcards are refused. The Worker cannot expand this set; after a report you can add paths with fusion_rework addAllowedPaths.' },
         block: { type: 'boolean', description: 'Default true. False permits read-only Lead work while the Worker retains write ownership.' },
         checks: { type: 'array', required: true, items: checkItem, description: 'Acceptance commands the Host runs after the Worker reports; [] for review-only work.' },
         requirements: { ...optionalStringList, description: 'The user\'s hard requirements as exact quotes of their messages (required behaviour, names, strings, formats, acceptance criteria), 1-20 items. The Host verifies each quote against the user\'s words, freezes them for the Sidekick, and your accept must give one verdict per item.' } }, output: textOutput,
@@ -2057,7 +2082,7 @@ export class FusionCoordinator {
       // Orchestration includes human approval waits; leaf tools retain their
       // resource deadlines, but the wait itself must not expire.
       parameters: { feedback: { type: 'string', required: true }, block: { type: 'boolean', description: 'Default true. False returns after delivery; call fusion_wait for the report and checks.' },
-        addAllowedPaths: { ...optionalStringList, description: 'After a Worker report, when the task needs changes outside the frozen allowedPaths (for example an existing test elsewhere that encodes the old behaviour): workspace-relative paths to add. Paths are only added; the change is recorded and consumes this rework round.' },
+        addAllowedPaths: { ...optionalStringList, description: 'After a Worker report, when the task needs changes outside the frozen allowedPaths (for example an existing test elsewhere that encodes the old behaviour): workspace-relative files or directories to add. Paths are only added; the change is recorded and consumes this rework round. A file already changed before it was added cannot keep its original bytes, so its diff has no pre-image and the review must inspect it directly.' },
         checks: { type: 'array', items: checkItem, description: 'Omit to keep the frozen acceptance checks. Only when a frozen check itself is wrong (for example its interpreter does not exist on this host), pass the complete corrected set after the Worker report. Every existing definitionPath must stay protected; the amendment is recorded and consumes this rework round.' } }, output: textOutput,
       execute: (args, exec) => this.rework(agent, args.feedback, exec, args.block ?? true, args.checks && normalizeChecks(args.checks), args.addAllowedPaths) })))
     dispose.push(scope.tools.register(defineTool({ name: 'fusion_wait', description: 'Wait for the background Worker to become quiescent. Exploration returns source findings for planning; implementation runs its frozen native checks. Call sequentially after a handoff or feedback.',

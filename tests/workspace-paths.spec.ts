@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, realpathSync, symlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { normalizeRelativePath, pathAllowed, workspacePath, workspaceRelative } from '../src/host/workspace.js'
+import { grantOf, normalizeRelativePath, pathAllowed, workspacePath, workspaceRelative } from '../src/host/workspace.js'
 
 const win32 = process.platform === 'win32'
 
@@ -40,6 +40,22 @@ describe('workspace-relative allowlist paths', () => {
       expect(normalizeRelativePath('\\\\server\\share')).toBeUndefined()
       expect(pathAllowed('C:\\outside', ['.'])).toBe(false)
     }
+  })
+
+  it('reads `dir/**` as the directory grant and refuses other wildcards instead of freezing an empty scope', () => {
+    // session-daa71a4a: `lib/types/**` authorized nothing, so the task's own build output
+    // was reported outside scope forever and could not be widened either.
+    expect(pathAllowed('lib/types/host/history.d.ts', ['lib/types/**'])).toBe(true)
+    expect(pathAllowed('lib/types-other/x.d.ts', ['lib/types/**'])).toBe(false)
+    expect(pathAllowed('lib/types', ['lib/types/**'])).toBe(true)
+    expect(grantOf('lib/types/**')).toBe('lib/types')
+    expect(grantOf(' lib/types/ ')).toBe('lib/types')
+    expect(grantOf('.')).toBe('.')
+    expect(() => grantOf('lib/*.d.ts')).toThrow('not a wildcard')
+    expect(() => grantOf('**')).toThrow('not a wildcard')
+    expect(() => grantOf('')).toThrow('not a workspace-relative path')
+    expect(() => grantOf('../outside')).toThrow('not a workspace-relative path')
+    expect(() => grantOf('/absolute')).toThrow('not a workspace-relative path')
   })
 
   it('treats backslash as a separator only on Windows', () => {

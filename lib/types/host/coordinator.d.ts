@@ -85,15 +85,20 @@ interface DelegateInput {
 export declare const normalizeQuote: (text: string) => string;
 /** Literal code spans (`like this`) a requirement asks for; a candidate that omits them gets flagged. */
 export declare const literalSpans: (text: string) => string[];
+export interface RewrittenTest {
+    path: string;
+    /** Original lines no longer present in the file. */
+    removedLines?: number;
+    deleted?: boolean;
+    /** Widened into scope after the change: no original bytes exist to compare against. */
+    unavailableBase?: boolean;
+}
 /**
  * Existing test files whose original lines were removed or changed (pure additions are not listed). A Worker
  * that rewrites an old test to fit its change hides a regression the maintainers' test would catch
  * (round 4, canvasapi): the Lead must look at these before accepting.
  */
-export declare function rewrittenTests(store: SqliteFusionStore, taskId: TaskId, root: string, changeBase: ChangeBase | undefined, changes: readonly string[]): {
-    path: string;
-    removedLines: number;
-}[];
+export declare function rewrittenTests(store: SqliteFusionStore, taskId: TaskId, root: string, changeBase: ChangeBase | undefined, changes: readonly string[]): RewrittenTest[];
 /** Rework rounds after which a still-failing work order unlocks Lead takeover (enforced-v3). */
 export declare const ESCALATE_AFTER_REWORKS = 2;
 /** Lead takeover submissions allowed per escalated work order. */

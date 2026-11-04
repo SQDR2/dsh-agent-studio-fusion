@@ -38,4 +38,15 @@ export declare function changedPaths(before: WorkspaceSnapshot, after: Workspace
  * workspace-relative and never normalize.
  */
 export declare function normalizeRelativePath(path: string): string | undefined;
+/**
+ * One `allowedPaths` entry → the prefix it grants. `dir/**` is the conventional spelling of
+ * "this directory and everything under it", so it grants exactly what `dir` grants.
+ *
+ * A grant that matches nothing is not a narrow scope, it is an unrecoverable deadlock: the
+ * Host freezes it, the Worker's writes then fail the freeze check forever, and widening the
+ * scope needs the delegation-time bytes those writes already replaced (session-daa71a4a: a
+ * `lib/types/**` grant authorized nothing while the task's own build rewrote exactly those
+ * declarations). So a wildcard the Host cannot honour is refused when the Lead grants it.
+ */
+export declare function grantOf(raw: string): string;
 export declare function pathAllowed(path: string, allowed: readonly string[]): boolean;

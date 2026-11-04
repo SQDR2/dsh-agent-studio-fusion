@@ -7,11 +7,28 @@ import { dirname } from 'node:path'
 import type { ArtifactRef, FusionEvent, OutboxRow, OutboxState, TaskId } from '../contracts.js'
 import { ArtifactId } from '../contracts.js'
 import { digestOf, sha256Hex } from '../digest.js'
-import { CHECKSUM_MISMATCH, EVENT_CONFLICT, FusionError, REVISION_CONFLICT, STORE_MIGRATION_REQUIRED } from '../errors.js'
+import { CHECKSUM_MISMATCH, EVENT_CONFLICT, FusionError, REVISION_CONFLICT, STORE_MIGRATION_REQUIRED, TASK_BUSY, TASK_NOT_FOUND } from '../errors.js'
 import { reduce, reduceAll } from './reducer.js'
 import type { PersistedTask, TaskState } from './state.js'
 import { decodeStoreSnapshot, STORE_PROJECTION_VERSION } from './store.js'
 import type { ArtifactRecord, DiskSnapshot, FusionStore } from './store.js'
+
+/**
+ * Every document family whose id embeds the owning task as its second segment
+ * (`family:<taskId>:...`). Deleting a task sweeps exactly these plus the documents
+ * that name it in `taskId`, and never touches the session-scoped families
+ * (`binding:`, `model-control:`, `sandbox-intent:`), which outlive any one task.
+ * Keep this list in step with the `writeDocument` call sites in src/host/.
+ */
+const TASK_DOCUMENT_FAMILIES = [
+  'acceptance-amendment', 'activity', 'activity-link', 'brief', 'check', 'check-invocation',
+  'context-recovery', 'context-request', 'effects', 'effects-receipt', 'keepalive',
+  'lead-direct', 'lead-takeover', 'native-approval', 'native-effect', 'native-usage', 'progress',
+  'restore-index', 'runtime', 'scope-expansion', 'task-activity', 'task-checkpoint', 'task-compaction',
+  'task-context', 'task-index', 'task-origin', 'text', 'worker-delivery', 'worker-notice', 'worker-request',
+  'workflow-check-repair', 'workflow-effect-denied', 'workflow-progress', 'workflow-replan', 'workflow-stop',
+  'workflow-worker-resume', 'usage', 'usage-index',
+] as const
 
 /** Durable Host backend. Every read is fresh; CAS and outbox writes share one transaction. */
 export class SqliteFusionStore implements FusionStore {
@@ -88,6 +105,61 @@ export class SqliteFusionStore implements FusionStore {
   }
 
   load(taskId: TaskId): TaskState | undefined { return this.#read(taskId)?.persisted.state }
+
+  deleteTask(taskId: string): void {
+    this.#transaction(() => {
+      const current = this.load(taskId as TaskId)
+      if (!current) throw new FusionError(TASK_NOT_FOUND, 'task not found')
+      // A live Worker, lease or unfinished handoff would keep writing into rows this deletes.
+      if (current.control.mode === 'running' || current.control.mode === 'stop-requested'
+        || current.phase === 'WORKER_RUNNING' || current.phase === 'DIRECT'
+        || current.phase === 'PLANNING' || current.phase === 'REVIEWING' || current.phase === 'REWORK') {
+        throw new FusionError(TASK_BUSY, 'Cannot delete a running task')
+      }
+      this.#db.prepare('DELETE FROM artifacts WHERE task_id = ?').run(taskId)
+      this.#db.prepare('DELETE FROM tasks WHERE id = ?').run(taskId)
+
+      // Documents that belong to this task either carry it as the second id segment
+      // (`family:<taskId>:...`) or hold it in a documented field. Both are swept, so a
+      // deleted task cannot leave a report, evidence row or progress window behind to
+      // be re-read by a later task that reuses nothing but the same id shape.
+      // Session-scoped documents (binding:, model-control:, sandbox-intent:) are never
+      // deleted here: they belong to the conversation, not to the task.
+      for (const prefix of TASK_DOCUMENT_FAMILIES) {
+        // Both the two-segment form (`task-index:<taskId>`) and the rest (`usage:<taskId>:<id>`).
+        this.#db.prepare("DELETE FROM documents WHERE id = ? || ':' || ? OR id LIKE ? || ':' || ? || ':%'")
+          .run(prefix, taskId, prefix, taskId)
+      }
+      this.#db.prepare('DELETE FROM documents WHERE id = ?').run(taskId)
+      this.#db.prepare(`
+        DELETE FROM documents
+        WHERE id NOT LIKE 'binding:%' AND id NOT LIKE 'model-control:%' AND id NOT LIKE 'sandbox-intent:%'
+          AND (json_extract(json, '$.taskId') = ? OR json_extract(json, '$.ticket.subject.taskId') = ?)
+      `).run(taskId, taskId)
+
+      this.#db.prepare('DELETE FROM fusion_status_facts_v1 WHERE task = ?').run(taskId)
+      this.#db.prepare('DELETE FROM fusion_status_totals_v1 WHERE task = ?').run(taskId)
+      for (const kind of TASK_DOCUMENT_FAMILIES) {
+        this.#db.prepare("DELETE FROM fusion_status_dirty_v1 WHERE id LIKE ? || ':' || ? || ':%'").run(kind, taskId)
+      }
+
+      const bindingDocs = this.#db.prepare("SELECT id, json, revision FROM documents WHERE id LIKE 'binding:%'").all()
+      for (const row of bindingDocs) {
+        if (typeof row.json === 'string' && typeof row.revision === 'number') {
+          try {
+            const data = JSON.parse(row.json) as { taskId?: unknown; selected?: boolean }
+            if (data.taskId === taskId && data.selected) {
+              const updated = { ...data, selected: false }
+              const json = JSON.stringify(updated)
+              const revision = row.revision + 1
+              this.#db.prepare('UPDATE documents SET revision = ?, json = ?, checksum = ? WHERE id = ?')
+                .run(revision, json, sha256Hex(Buffer.from(json)), row.id as string)
+            }
+          } catch { /* ignore */ }
+        }
+      }
+    })
+  }
 
   events(taskId: TaskId): readonly FusionEvent[] { return this.#require(taskId).persisted.events }
 

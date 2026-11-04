@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { SqliteFusionStore } from '../src/task/sqlite-store.js'
-import { captureChangeBase, saveChangeManifest } from '../src/host/change-evidence.js'
+import { captureChangeBase, captureLaterChangeBase, saveChangeManifest } from '../src/host/change-evidence.js'
 import type { ChangeDiff } from '../src/host/change-evidence.js'
 import { snapshotWorkspace } from '../src/host/workspace.js'
 import { SnapshotId, TaskId } from '../src/contracts.js'
@@ -119,8 +119,7 @@ describe('durable complete change evidence', () => {
     expect(store.artifacts(TASK)).toEqual([])
   })
 
-  it('marks legacy missing before bytes explicitly and still records newly added files', () => {
-    const { project, store, manifest, read } = fixture()
+  it('marks legacy missing before bytes explicitly and still records newly added files', () => {    const { project, store, manifest, read } = fixture()
     writeFileSync(join(project, 'old'), 'original')
     const base = snapshotWorkspace(project)
     writeFileSync(join(project, 'old'), 'changed'); writeFileSync(join(project, 'new'), 'new\n')
@@ -129,5 +128,26 @@ describe('durable complete change evidence', () => {
     expect(legacy.status).toBe('unavailable-base'); expect(legacy.before!.content).toBeUndefined(); expect(legacy.patch).toBeUndefined()
     expect(read(legacy.after!.content.id).toString()).toBe('changed')
     expect(result.diffs.find(item => item.path === 'new')!.patch).toBeDefined()
+  })
+
+  it('still records a widened scope when the added files were already changed', () => {
+    // session-daa71a4a: the task's own build rewrote files the Lead then had to add to scope.
+    const { project, store, manifest, read } = fixture()
+    writeFileSync(join(project, 'kept'), 'kept\n')
+    writeFileSync(join(project, 'built'), 'generated v1\n')
+    writeFileSync(join(project, 'later'), 'altered\n')
+    const base = snapshotWorkspace(project)
+    const initial = captureChangeBase(store, TASK, base, ['kept'])
+    writeFileSync(join(project, 'built'), 'generated v2\n')
+    const widened = captureLaterChangeBase(store, TASK, base, ['kept', 'built', 'later'])
+    expect(Object.keys(widened.contents)).toEqual(['kept', 'later'])
+    expect(widened.unavailable).toEqual(['built'])
+    const result = manifest(saveChangeManifest(store, TASK, base, snapshotWorkspace(project), widened).id)
+    const built = result.diffs.find(item => item.path === 'built')!
+    expect(built.status).toBe('unavailable-base')
+    expect(built.before!.content).toBeUndefined(); expect(built.patch).toBeUndefined()
+    expect(read(built.after!.content.id).toString()).toBe('generated v2\n')
+    // A file whose bytes still match keeps its exact pre-image.
+    expect(Object.keys(initial.contents)).toEqual(['kept'])
   })
 })

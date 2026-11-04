@@ -9,7 +9,8 @@ import { completeProfile } from '../src/profile/resolve.js'
 import { loadPromptBundle } from '../src/prompts.js'
 import { billFromNativeUsage, type NativeUsageRecord } from '../src/host/native-usage.js'
 import { newLedger, ingestDurable } from '../src/usage/ledger.js'
-import { created, envelope, TASK, PARENT } from './helpers.js'
+import { TASK_BUSY, TASK_NOT_FOUND } from '../src/errors.js'
+import { created, envelope, TASK, PARENT, SNAP } from './helpers.js'
 
 const cleanup: (() => void)[] = []
 afterEach(() => { cleanup.splice(0).reverse().forEach(fn => fn()) })
@@ -166,5 +167,166 @@ describe('history projection', () => {
       { id, expectedRevision: 0, value: {} }])).toThrow()
     expect(store.readDocument('new-index')).toBeUndefined()
     expect(readHistory(store).totals.calls).toBe(1)
+  })
+
+  it('reports totalOutput and reasoning in HistoryTotals', () => {
+    const { store } = setup()
+    store.writeDocument(`usage:${TASK}:one`, 0, usage('1', 'final', 10))
+    backfillHistory(store)
+    let result = readHistory(store)
+    expect(result.totals.totalOutput).toBeDefined()
+    expect(result.totals.reasoning).toBeDefined()
+    // When reasoning is unknown, totalOutput is unknown:
+    expect(result.totals.totalOutput.reported).toBe(0)
+    expect(result.totals.output.known).toBeGreaterThanOrEqual(2)
+
+    // With explicit reasoning:
+    const key = { provider: 'actual-provider', model: 'actual-model', requestId: '2', attemptId: '2', contractDigest: 'native' }
+    let ledger = newLedger(key)
+    ledger = ingestDurable(ledger, { id: '2:latest', key, sequence: 1, mode: 'final',
+      bill: billFromNativeUsage({ inputTokens: 10, outputTokens: 20, reasoningTokens: 30, cacheReadTokens: 0 }) })
+    store.writeDocument(`usage:${TASK}:two`, 0, {
+      ...usage('2', 'none'), ledger,
+    })
+    backfillHistory(store)
+    result = readHistory(store)
+    expect(result.totals.totalOutput.known).toBe(50)
+    expect(result.totals.reasoning.known).toBe(30)
+  })
+})
+
+describe('task deletion', () => {
+  it('refuses to delete a running task', () => {
+    const { store } = setup()
+    expect(() => store.deleteTask(TASK)).toThrow('Cannot delete a running task')
+  })
+
+  it('safely deletes a completed task and all its associated documents, artifacts, and indexes atomically', () => {
+    const { store, bindings } = setup()
+    store.append(TASK, 1, [
+      envelope('intent/chosen', 3, { intent: 'DIRECT' }),
+      envelope('task/completed', 4, { snapshot: SNAP, verification: 'unverified' }),
+    ])
+    const art = store.putArtifact(TASK, Buffer.from('evidence content'), 'text/plain')
+    store.writeDocument(`usage:${TASK}:one`, 0, usage('1', 'final', 30))
+    store.writeDocument(`lead-takeover:${TASK}:wo1`, 0, { taskId: TASK, reason: 'checks-still-failing' })
+    store.writeDocument(`check-invocation:${TASK}:call-1`, 0, { schemaVersion: 1, taskId: TASK })
+    store.writeDocument('child:worker-child', 0, { parent: PARENT, taskId: TASK })
+    backfillHistory(store)
+
+    let history = readHistory(store)
+    expect(history.totalTasks).toBe(1)
+    expect(history.totals.calls).toBe(1)
+    expect(history.takeovers.total).toBe(1)
+    expect(bindings.read(PARENT)?.binding.selected).toBe(true)
+
+    store.deleteTask(TASK)
+
+    expect(store.load(TASK)).toBeUndefined()
+    expect(store.listTaskIds()).not.toContain(TASK)
+    expect(() => store.readArtifact(TASK, art.digest)).toThrow()
+    expect(store.readDocument(`task-index:${TASK}`)).toBeUndefined()
+    expect(store.readDocument(`usage:${TASK}:one`)).toBeUndefined()
+    expect(store.readDocument(`usage-index:${TASK}:one`)).toBeUndefined()
+    expect(store.readDocument(`lead-takeover:${TASK}:wo1`)).toBeUndefined()
+    expect(store.readDocument(`check-invocation:${TASK}:call-1`)).toBeUndefined()
+    expect(store.readDocument('child:worker-child')).toBeUndefined()
+
+    expect(bindings.read(PARENT)?.binding.selected).toBe(false)
+
+    history = readHistory(store)
+    expect(history.totalTasks).toBe(0)
+    expect(history.tasks).toHaveLength(0)
+    expect(history.totals.calls).toBe(0)
+    expect(history.totals.input.known).toBe(0)
+    expect(history.takeovers.total).toBe(0)
+    expect(history.takeovers.tasks).toBe(0)
+  })
+
+  it('deletes documents that only name the task inside their id or ticket', () => {
+    const { store } = setup()
+    store.append(TASK, 1, [
+      envelope('intent/chosen', 3, { intent: 'DIRECT' }),
+      envelope('task/completed', 4, { snapshot: SNAP, verification: 'unverified' }),
+    ])
+    // These families carry the task only in the id (workflow-progress, workflow-stop) or in a
+    // nested review ticket, so a sweep that trusts a top-level taskId leaves them behind.
+    store.writeDocument(`workflow-progress:${TASK}:worker-1`, 0, { schemaVersion: 1, milestone: 'm', recent: [] })
+    store.writeDocument(`workflow-stop:${TASK}:worker-1:m`, 0, { schemaVersion: 1, role: 'lead', at: '2026-09-20T00:00:00Z' })
+    store.writeDocument(`check-invocation:${TASK}:call-1`, 0, { check: { plan: { id: 'p' } }, evidence: { state: 'started' } })
+    store.writeDocument(`review-request:${PARENT}:1:2`, 0, { schemaVersion: 1, sessionId: PARENT, turn: 1, step: 2,
+      ticket: { id: 't1', subject: { taskId: TASK, workOrderId: 'wo-1', revision: 1, reportId: 'r', reportDigest: 'd', snapshot: SNAP } } })
+    store.writeDocument(`model-control:${PARENT}`, 0, { schemaVersion: 1, sessionId: PARENT, epoch: 0, routes: {}, waits: {} })
+
+    store.deleteTask(TASK)
+
+    expect(store.readDocument(`workflow-progress:${TASK}:worker-1`)).toBeUndefined()
+    expect(store.readDocument(`workflow-stop:${TASK}:worker-1:m`)).toBeUndefined()
+    expect(store.readDocument(`check-invocation:${TASK}:call-1`)).toBeUndefined()
+    expect(store.readDocument(`review-request:${PARENT}:1:2`)).toBeUndefined()
+    // Session-scoped state belongs to the conversation and must survive a task deletion.
+    expect(store.readDocument(`model-control:${PARENT}`)).toBeDefined()
+    expect(store.readDocument(`binding:${PARENT}`)).toBeDefined()
+  })
+
+  it('reports a missing task and a live task as distinct codes, not by message text', () => {
+    const { store } = setup()
+    // The HTTP layer maps these codes to 404 and 409; a translated message must not decide the status.
+    expect(() => store.deleteTask('non-existent-task')).toThrow(expect.objectContaining({ code: TASK_NOT_FOUND }))
+    expect(() => store.deleteTask(TASK)).toThrow(expect.objectContaining({ code: TASK_BUSY }))
+  })
+
+  it('does not accidentally delete another task or similar task id', () => {
+    const { store, bindings } = setup()
+    const TASK_A = TASK
+    const TASK_B = (TASK + '-sim') as typeof TASK
+    const PARENT_B = 'parent-session-b' as typeof PARENT
+
+    store.append(TASK_A, 1, [
+      envelope('intent/chosen', 3, { intent: 'DIRECT' }),
+      envelope('task/completed', 4, { snapshot: SNAP, verification: 'unverified' }),
+    ])
+
+    store.create(created(TASK_B))
+    store.append(TASK_B, 1, [
+      envelope('intent/chosen', 2, { intent: 'DIRECT' }, { taskId: TASK_B }),
+      envelope('task/completed', 3, { snapshot: SNAP, verification: 'unverified' }, { taskId: TASK_B }),
+    ])
+    bindings.select(PARENT_B, TASK_B, { profile: bindings.read(PARENT)!.binding.profile, prompts: loadPromptBundle() })
+
+    const artA = store.putArtifact(TASK_A, Buffer.from('artifact A'), 'text/plain')
+    const artB = store.putArtifact(TASK_B, Buffer.from('artifact B'), 'text/plain')
+
+    expect(store.readDocument(`task-index:${TASK_A}`)).toBeDefined()
+    expect(store.readDocument(`task-index:${TASK_B}`)).toBeDefined()
+
+    store.writeDocument(`usage:${TASK_A}:1`, 0, { ...usage('1', 'final', 10), taskId: TASK_A })
+    store.writeDocument(`usage:${TASK_B}:1`, 0, { ...usage('2', 'final', 20), taskId: TASK_B })
+
+    store.writeDocument(`scope-expansion:${TASK_A}:exp1`, 0, { taskId: TASK_A })
+    store.writeDocument(`scope-expansion:${TASK_B}:exp1`, 0, { taskId: TASK_B })
+
+    store.writeDocument('child:child-a', 0, { parent: PARENT, taskId: TASK_A })
+    store.writeDocument('child:child-b', 0, { parent: PARENT_B, taskId: TASK_B })
+
+    store.deleteTask(TASK_A)
+
+    expect(store.load(TASK_A)).toBeUndefined()
+    expect(store.listTaskIds()).not.toContain(TASK_A)
+    expect(() => store.readArtifact(TASK_A, artA.digest)).toThrow()
+    expect(store.readDocument(`task-index:${TASK_A}`)).toBeUndefined()
+    expect(store.readDocument(`usage:${TASK_A}:1`)).toBeUndefined()
+    expect(store.readDocument(`scope-expansion:${TASK_A}:exp1`)).toBeUndefined()
+    expect(store.readDocument('child:child-a')).toBeUndefined()
+    expect(bindings.read(PARENT)?.binding.selected).toBe(false)
+
+    expect(store.load(TASK_B)).toBeDefined()
+    expect(store.listTaskIds()).toContain(TASK_B)
+    expect(Buffer.from(store.readArtifact(TASK_B, artB.digest))).toEqual(Buffer.from('artifact B'))
+    expect(store.readDocument(`task-index:${TASK_B}`)).toBeDefined()
+    expect(store.readDocument(`usage:${TASK_B}:1`)).toBeDefined()
+    expect(store.readDocument(`scope-expansion:${TASK_B}:exp1`)).toBeDefined()
+    expect(store.readDocument('child:child-b')).toBeDefined()
+    expect(bindings.read(PARENT_B)?.binding.selected).toBe(true)
   })
 })

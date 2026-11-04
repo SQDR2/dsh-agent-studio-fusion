@@ -26,6 +26,8 @@ export interface UsageSummary {
     authority: 'none' | 'provisional' | 'final';
     input: Count;
     output: Count;
+    reasoning: Count;
+    totalOutput: Count;
     cacheRead: Count;
 }
 export declare function usageSummary(row: NativeUsageRecord): UsageSummary;
@@ -41,6 +43,14 @@ export interface HistoryTotals {
         reported: number;
     };
     output: {
+        known: number;
+        reported: number;
+    };
+    reasoning: {
+        known: number;
+        reported: number;
+    };
+    totalOutput: {
         known: number;
         reported: number;
     };

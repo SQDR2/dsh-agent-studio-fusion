@@ -22,3 +22,7 @@ export declare const REVIEW_RESULT_CONFLICT = "REVIEW_RESULT_CONFLICT";
 export declare const REVIEW_TICKET_REQUIRED = "REVIEW_TICKET_REQUIRED";
 export declare const WORK_ORDER_CONFLICT = "WORK_ORDER_CONFLICT";
 export declare const STORE_MIGRATION_REQUIRED = "STORE_MIGRATION_REQUIRED";
+/** No task carries this id (or it was already deleted). */
+export declare const TASK_NOT_FOUND = "TASK_NOT_FOUND";
+/** Deleting it would strand a live Worker, lease or unfinished handoff. */
+export declare const TASK_BUSY = "TASK_BUSY";

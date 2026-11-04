@@ -24,12 +24,15 @@ export interface UsageOwner { readonly taskId: TaskId; readonly role: Role }
 export function billFromNativeUsage(usage: TokenUsage | undefined): CanonicalBill {
   const count = (value: number | undefined | null) =>
     value === undefined || value === null || !Number.isFinite(value) ? unknown() : known(value)
+  const reasoningTokens = count(usage?.reasoningTokens)
   return {
     uncachedInput: count(usage?.inputTokens), cacheRead: count(usage?.cacheReadTokens), output: count(usage?.outputTokens),
     cacheWrite: usage?.cacheWriteTokens === undefined || usage.cacheWriteTokens === null
       || !Number.isFinite(usage.cacheWriteTokens) ? { kind: 'unknown' }
       : { kind: 'aggregate', rateKey: 'provider-cache-write-rate-unknown', tokens: known(usage.cacheWriteTokens) },
-    reasoning: { kind: 'unknown', tokens: count(usage?.reasoningTokens) },
+    reasoning: reasoningTokens.state === 'known'
+      ? { kind: 'separate', tokens: reasoningTokens }
+      : { kind: 'unknown', tokens: unknown() },
   }
 }
 

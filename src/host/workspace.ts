@@ -139,13 +139,46 @@ export function normalizeRelativePath(path: string): string | undefined {
   return segments.join('/')
 }
 
+/** Wildcards other than a trailing `/**` would authorize an unpredictable set of files. */
+const WILDCARD = /[*?[\]{}]/
+
+/**
+ * One `allowedPaths` entry → the prefix it grants. `dir/**` is the conventional spelling of
+ * "this directory and everything under it", so it grants exactly what `dir` grants.
+ *
+ * A grant that matches nothing is not a narrow scope, it is an unrecoverable deadlock: the
+ * Host freezes it, the Worker's writes then fail the freeze check forever, and widening the
+ * scope needs the delegation-time bytes those writes already replaced (session-daa71a4a: a
+ * `lib/types/**` grant authorized nothing while the task's own build rewrote exactly those
+ * declarations). So a wildcard the Host cannot honour is refused when the Lead grants it.
+ */
+export function grantOf(raw: string): string {
+  const trimmed = raw.trim().replace(/\/+$/, '')
+  const prefix = trimmed.endsWith('/**') ? trimmed.slice(0, -3) : trimmed
+  if (WILDCARD.test(prefix)) {
+    throw new Error(`allowedPaths takes a workspace-relative file or directory, not a wildcard: ${JSON.stringify(raw)} grants nothing. `
+      + 'Name the directory (a directory grant covers every file under it, so `lib/types` already means `lib/types/**`) or name each file.')
+  }
+  const normalized = prefix === '' ? undefined : normalizeRelativePath(prefix)
+  if (normalized === undefined) throw new Error(`allowedPaths entry ${JSON.stringify(raw)} is not a workspace-relative path`)
+  // `'.'` is the legitimate whole-workspace grant; keep its spelling so it survives a round trip.
+  return normalized === '' ? '.' : normalized
+}
+
+/** The prefix a stored grant matches by, tolerating `dir/**` spelling from older work orders. */
+function grantPrefix(raw: string): string | undefined {
+  const trimmed = raw.trim().replace(/\/+$/, '')
+  if (!trimmed) return undefined
+  return normalizeRelativePath(trimmed.endsWith('/**') ? trimmed.slice(0, -3) : trimmed)
+}
+
 export function pathAllowed(path: string, allowed: readonly string[]): boolean {
   const normalized = normalizeRelativePath(path)
   if (normalized === undefined) return false
   // `'.'` normalizes to the root: it is the legitimate whole-workspace grant. An empty
   // or absolute allowed entry instead fails normalization above and never authorizes.
   return allowed.some(raw => {
-    const prefix = normalizeRelativePath(raw)
+    const prefix = grantPrefix(raw)
     return prefix !== undefined && (prefix === '' || normalized === prefix || normalized.startsWith(`${prefix}/`))
   })
 }

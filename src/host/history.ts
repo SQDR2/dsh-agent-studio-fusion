@@ -13,14 +13,31 @@ export function taskSummary(state: TaskState, createdAt: string, updatedAt: stri
 }
 export interface UsageSummary {
   id: string; taskId: string; role: string; provider: string; model: string; purpose: string; startedAt: string
-  outcome: string; authority: 'none' | 'provisional' | 'final'; input: Count; output: Count; cacheRead: Count
+  outcome: string; authority: 'none' | 'provisional' | 'final'; input: Count; output: Count
+  reasoning: Count; totalOutput: Count; cacheRead: Count
 }
 export function usageSummary(row: NativeUsageRecord): UsageSummary {
   const projection = projectLedger(restoreLedger(row.ledger))
+  const bill = projection.bill
+  const input = bill?.uncachedInput ?? { state: 'unknown' }
+  const output = bill?.output ?? { state: 'unknown' }
+  const cacheRead = bill?.cacheRead ?? { state: 'unknown' }
+  const reasoning = bill?.reasoning?.tokens ?? { state: 'unknown' }
+
+  let totalOutput: Count = { state: 'unknown' }
+  if (output.state === 'known') {
+    if (bill?.reasoning?.kind === 'included') {
+      totalOutput = { state: 'known', tokens: output.tokens }
+    } else if (reasoning.state === 'known') {
+      totalOutput = { state: 'known', tokens: output.tokens + reasoning.tokens }
+    } else {
+      totalOutput = { state: 'unknown' }
+    }
+  }
+
   return { id: row.nativeInvocationId, taskId: row.taskId, role: row.role, provider: row.ledger.key.provider, model: row.ledger.key.model,
     purpose: row.purpose ?? 'conversation', startedAt: row.startedAt, outcome: row.outcome, authority: projection.authority,
-    input: projection.bill?.uncachedInput ?? { state: 'unknown' }, output: projection.bill?.output ?? { state: 'unknown' },
-    cacheRead: projection.bill?.cacheRead ?? { state: 'unknown' } }
+    input, output, reasoning, totalOutput, cacheRead }
 }
 
 /** Once at plugin startup; GET never writes, starts agents, or scans full task/usage snapshots. */
@@ -32,19 +49,31 @@ export function backfillHistory(store: SqliteFusionStore) {
   }
   for (const id of store.listDocumentIds('usage:')) {
     const projectionId = `usage-index:${id.slice(6)}`
-    if (store.readDocument(projectionId)) continue
-    store.writeDocument(projectionId, 0, usageSummary(store.readDocument(id)!.value as NativeUsageRecord))
+    const existing = store.readDocument(projectionId)
+    if (existing && (existing.value as UsageSummary).totalOutput !== undefined) continue
+    const usageDoc = store.readDocument(id)
+    if (usageDoc) {
+      store.writeDocument(projectionId, existing?.revision ?? 0, usageSummary(usageDoc.value as NativeUsageRecord))
+    }
   }
 }
 export interface HistoryTotals { calls: number; final: number; provisional: number; unreported: number;
-  input: { known: number; reported: number }; output: { known: number; reported: number }; cacheRead: { known: number; reported: number } }
+  input: { known: number; reported: number }; output: { known: number; reported: number }
+  reasoning: { known: number; reported: number }; totalOutput: { known: number; reported: number }; cacheRead: { known: number; reported: number } }
 const empty = (): HistoryTotals => ({ calls: 0, final: 0, provisional: 0, unreported: 0,
-  input: { known: 0, reported: 0 }, output: { known: 0, reported: 0 }, cacheRead: { known: 0, reported: 0 } })
+  input: { known: 0, reported: 0 }, output: { known: 0, reported: 0 },
+  reasoning: { known: 0, reported: 0 }, totalOutput: { known: 0, reported: 0 }, cacheRead: { known: 0, reported: 0 } })
 function add(total: HistoryTotals, row: UsageSummary) {
   total.calls++; total[row.authority === 'none' ? 'unreported' : row.authority]++
-  for (const key of ['input', 'output', 'cacheRead'] as const) {
+  for (const key of ['input', 'output', 'reasoning', 'totalOutput', 'cacheRead'] as const) {
     const count = row[key]
-    if (count.state === 'known') { total[key].known += count.tokens; total[key].reported++ }
+    if (count && count.state === 'known') { total[key].known += count.tokens; total[key].reported++ }
+  }
+  if (!row.totalOutput && row.output && row.output.state === 'known') {
+    if (row.reasoning && row.reasoning.state === 'known') {
+      total.totalOutput.known += row.output.tokens + row.reasoning.tokens
+      total.totalOutput.reported++
+    }
   }
 }
 /** How often the Host unlocked Lead takeover (enforced-v3), by reason. */

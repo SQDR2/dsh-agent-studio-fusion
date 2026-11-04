@@ -1,4 +1,5 @@
 import { bi } from './bilingual.js'
+import { FusionError, TASK_BUSY, TASK_NOT_FOUND } from './errors.js'
 import { backfillHistory, readHistory } from './host/history.js'
 import { homedir } from 'node:os'
 import { isAbsolute, join } from 'node:path'
@@ -182,6 +183,20 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
         const state = binding && store.load(binding.taskId)
         return json(res, 200, { selected: Boolean(binding && binding.selected), available, ...(reason ? { reason } : {}),
           ...(state ? { task: { id: state.taskId, phase: state.phase, verification: state.verification, workerId: state.acceptedChild } } : {}) })
+      }
+      if (req.method === 'DELETE') {
+        const taskId = url.searchParams.get('taskId')
+        if (!taskId) return json(res, 400, { error: bi('缺少任务标识', 'Missing task id') })
+        try {
+          store.deleteTask(taskId)
+          return json(res, 200, { ok: true, taskId })
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error)
+          // Decide on the stored code, not on message text: a translated message would silently become a 500.
+          if (error instanceof FusionError && error.code === TASK_NOT_FOUND) return json(res, 404, { error: message })
+          if (error instanceof FusionError && error.code === TASK_BUSY) return json(res, 409, { error: message })
+          return json(res, 500, { error: message })
+        }
       }
       if (req.method !== 'POST') return json(res, 405, { error: 'method not allowed' })
       const body = await readJson(req)

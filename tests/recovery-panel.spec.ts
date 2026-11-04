@@ -3,6 +3,7 @@ import { act, create } from 'react-test-renderer'
 import { describe, expect, it } from 'vitest'
 import { FusionRecovery } from '../src/client/FusionRecovery.js'
 import type { FusionStatus } from '../src/status.js'
+import { pinLanguage } from './client-locale.js'
 
 function task(over: { recovering?: boolean; outcomeUnknown?: boolean } = {}): NonNullable<FusionStatus['task']> {
   return {
@@ -32,6 +33,7 @@ function render(value: NonNullable<FusionStatus['task']>) {
 
 describe('Fusion recovery panel', () => {
   it('shows the inspection gate and disables continue while recovering', () => {
+    pinLanguage('en-US')
     const root = render(task({ recovering: true }))
     const text = JSON.stringify(root.toJSON())
     expect(text).toContain('/fusion recover')
@@ -42,6 +44,7 @@ describe('Fusion recovery panel', () => {
   })
 
   it('leaves continue available when the task is not recovering', () => {
+    pinLanguage('en-US')
     const root = render(task())
     const text = JSON.stringify(root.toJSON())
     expect(text).not.toContain('does not change the model')
