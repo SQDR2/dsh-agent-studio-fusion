@@ -134,4 +134,149 @@ describe('FusionSettings layout after sidebar integration', () => {
     const restoredClearBtn = root.root.findByProps({ 'aria-label': '清除任务 Test Task' })
     expect(restoredClearBtn).toBeDefined()
   })
+
+  it('displays row-level error feedback and allows retry/cancel when deletion fails with 409', async () => {
+    pinLanguage('zh-CN')
+    const mockData = {
+      totalTasks: 1,
+      totals: {
+        calls: 1, final: 1, provisional: 0, unreported: 0,
+        input: { known: 10, reported: 1 },
+        output: { known: 20, reported: 1 },
+        reasoning: { known: 0, reported: 0 },
+        totalOutput: { known: 0, reported: 0 },
+        cacheRead: { known: 0, reported: 0 },
+      },
+      tasks: [{
+        id: 'task-running-1',
+        title: 'Running Task',
+        createdAt: '2026-11-04T00:00:00Z',
+        mode: 'running',
+        phase: 'WORKER_RUNNING',
+        usage: {
+          calls: 1, final: 1, provisional: 0, unreported: 0,
+          input: { known: 10, reported: 1 },
+          output: { known: 20, reported: 1 },
+          reasoning: { known: 0, reported: 0 },
+          totalOutput: { known: 0, reported: 0 },
+          cacheRead: { known: 0, reported: 0 },
+        },
+        takeovers: 0,
+        sessionId: 's1',
+        verification: 'unverified',
+      }],
+      groups: [],
+    }
+
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+      if (init?.method === 'DELETE') {
+        return {
+          ok: false,
+          status: 409,
+          json: async () => ({ error: 'Cannot delete a running task' }),
+        }
+      }
+      if (url.includes('view=history')) {
+        return { ok: true, json: async () => mockData }
+      }
+      return { ok: true, json: async () => ({}) }
+    }))
+
+    const { FusionHistory } = await import('../src/client/FusionHistory.js')
+    let root!: ReactTestRenderer
+    await act(async () => { root = create(React.createElement(FusionHistory)) })
+    roots.push(root)
+
+    const clearBtn = root.root.findByProps({ 'aria-label': '清除任务 Running Task' })
+    await act(async () => { clearBtn.props.onClick() })
+
+    const confirmBtn = root.root.findAllByType('button').find(b => b.children.includes('确认'))
+    expect(confirmBtn).toBeDefined()
+
+    // Trigger delete which fails with 409
+    await act(async () => { confirmBtn!.props.onClick() })
+
+    // Row-level error feedback is shown
+    const rowError = root.root.findByProps({ className: 'fusion-history-row-error' })
+    expect(rowError).toBeDefined()
+    expect(rowError.props.role).toBe('alert')
+    expect(rowError.children.join('')).toContain('当前任务仍在运行或尚未安全终止，无法清除')
+
+    // Task is not removed from the list
+    expect(root.root.findAllByType('li')).toHaveLength(1)
+
+    // User can cancel and clear the row error
+    const cancelBtn = root.root.findByProps({ className: 'fusion-btn-subtle' })
+    await act(async () => { cancelBtn.props.onClick() })
+    expect(root.root.findAllByProps({ className: 'fusion-history-row-error' })).toHaveLength(0)
+    expect(root.root.findByProps({ 'aria-label': '清除任务 Running Task' })).toBeDefined()
+  })
+
+  it('optimistically converges state and refreshes without full-page loading flicker when deletion succeeds', async () => {
+    pinLanguage('zh-CN')
+    let historyCallCount = 0
+    const mockDataInitial = {
+      totalTasks: 1,
+      totals: {
+        calls: 1, final: 1, provisional: 0, unreported: 0,
+        input: { known: 10, reported: 1 },
+        output: { known: 20, reported: 1 },
+        reasoning: { known: 0, reported: 0 },
+        totalOutput: { known: 0, reported: 0 },
+        cacheRead: { known: 0, reported: 0 },
+      },
+      tasks: [{
+        id: 'task-done-1',
+        title: 'Finished Task',
+        createdAt: '2026-11-04T00:00:00Z',
+        mode: 'completed',
+        phase: 'COMPLETED',
+        usage: {
+          calls: 1, final: 1, provisional: 0, unreported: 0,
+          input: { known: 10, reported: 1 },
+          output: { known: 20, reported: 1 },
+          reasoning: { known: 0, reported: 0 },
+          totalOutput: { known: 0, reported: 0 },
+          cacheRead: { known: 0, reported: 0 },
+        },
+        takeovers: 0,
+        sessionId: 's1',
+        verification: 'verified',
+      }],
+      groups: [],
+    }
+    const mockDataAfterDelete = {
+      ...mockDataInitial,
+      totalTasks: 0,
+      tasks: [],
+    }
+
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+      if (init?.method === 'DELETE') {
+        return { ok: true, json: async () => ({ ok: true, taskId: 'task-done-1' }) }
+      }
+      if (url.includes('view=history')) {
+        historyCallCount++
+        return { ok: true, json: async () => historyCallCount > 1 ? mockDataAfterDelete : mockDataInitial }
+      }
+      return { ok: true, json: async () => ({}) }
+    }))
+
+    const { FusionHistory } = await import('../src/client/FusionHistory.js')
+    let root!: ReactTestRenderer
+    await act(async () => { root = create(React.createElement(FusionHistory)) })
+    roots.push(root)
+
+    expect(root.root.findAllByType('li')).toHaveLength(1)
+
+    const clearBtn = root.root.findByProps({ 'aria-label': '清除任务 Finished Task' })
+    await act(async () => { clearBtn.props.onClick() })
+
+    const confirmBtn = root.root.findAllByType('button').find(b => b.children.includes('确认'))
+    await act(async () => { confirmBtn!.props.onClick() })
+
+    // Task is removed and no full-page loading message flickers
+    expect(root.root.findAllByType('li')).toHaveLength(0)
+    expect(root.root.findAllByProps({ role: 'status' })).toHaveLength(0)
+  })
 })

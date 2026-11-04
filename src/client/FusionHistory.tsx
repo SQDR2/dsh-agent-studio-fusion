@@ -55,6 +55,7 @@ export function FusionHistory() {
   const [loading, setLoading] = useState(false)
   const [confirmingId, setConfirmingId] = useState<string | null>(null)
   const [deletingId, setDeletingId] = useState<string | null>(null)
+  const [rowError, setRowError] = useState<{ id: string; message: string } | null>(null)
 
   useEffect(() => {
     const abort = new AbortController()
@@ -79,7 +80,7 @@ export function FusionHistory() {
 
   const handleDelete = async (taskId: string) => {
     setDeletingId(taskId)
-    setLoading(true)
+    setRowError(null)
     setError('')
     try {
       const res = await fetch(`/api/model-fusion?taskId=${encodeURIComponent(taskId)}`, {
@@ -88,16 +89,25 @@ export function FusionHistory() {
       })
       if (!res.ok) {
         const data = await res.json().catch(() => null) as { error?: string } | null
-        throw new Error(data?.error || tr(lang, '清除任务失败', 'Failed to delete task'))
+        const raw = data?.error || ''
+        const msg = raw === 'Cannot delete a running task'
+          ? tr(lang, '当前任务仍在运行或尚未安全终止，无法清除', 'Cannot delete a running task')
+          : (raw || tr(lang, '清除任务失败', 'Failed to delete task'))
+        throw new Error(msg)
       }
+      setPage(prev => prev ? {
+        ...prev,
+        totalTasks: Math.max(0, prev.totalTasks - 1),
+        tasks: prev.tasks.filter(task => task.id !== taskId),
+      } : prev)
       setConfirmingId(null)
+      setRowError(null)
       if (cursor === taskId) setCursor('')
       setRefresh(v => v + 1)
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
+      setRowError({ id: taskId, message: err instanceof Error ? err.message : String(err) })
     } finally {
       setDeletingId(null)
-      setLoading(false)
     }
   }
 
@@ -106,7 +116,7 @@ export function FusionHistory() {
     <p>{tr(lang, '按实际模型请求汇总，包含任务、压缩、保活及已有标题请求。未报告的用量不算作 0；金额与节省率尚无可靠数据。',
       'Totals of actual model requests: tasks, compaction, keepalive and title requests. Unreported usage is not counted as 0; no reliable billed amount or saving rate is available.')}</p>
     <button disabled={loading} onClick={() => setRefresh(value => value + 1)}>{tr(lang, '刷新记录', 'Refresh')}</button>
-    {error && <p role="alert">{error}</p>}{loading && <p role="status">{tr(lang, '正在读取记录…', 'Loading…')}</p>}
+    {error && <p role="alert">{error}</p>}{loading && !page && <p role="status">{tr(lang, '正在读取记录…', 'Loading…')}</p>}
     {page && <>
       <p>{tr(lang, `${page.totalTasks} 项任务 · ${page.totals.calls} 次原生请求 · ${page.totals.final} 次用量定稿 · ${page.totals.provisional} 次暂报 · ${page.totals.unreported} 次未提供`,
         `${page.totalTasks} tasks · ${page.totals.calls} native requests · ${page.totals.final} final usage · ${page.totals.provisional} provisional · ${page.totals.unreported} unreported`)}</p>
@@ -139,7 +149,7 @@ export function FusionHistory() {
                 <span className="fusion-history-confirm-text">{tr(lang, '确定清除？', 'Delete?')}</span>
                 <button
                   type="button"
-                  disabled={loading || deletingId === task.id}
+                  disabled={Boolean(deletingId)}
                   onClick={() => void handleDelete(task.id)}
                 >
                   {deletingId === task.id ? tr(lang, '正在清除…', 'Deleting…') : tr(lang, '确认', 'Confirm')}
@@ -147,8 +157,8 @@ export function FusionHistory() {
                 <button
                   type="button"
                   className="fusion-btn-subtle"
-                  disabled={loading || deletingId === task.id}
-                  onClick={() => setConfirmingId(null)}
+                  disabled={Boolean(deletingId)}
+                  onClick={() => { setConfirmingId(null); setRowError(null) }}
                 >
                   {tr(lang, '取消', 'Cancel')}
                 </button>
@@ -156,8 +166,8 @@ export function FusionHistory() {
             ) : (
               <button
                 type="button"
-                disabled={loading || deletingId === task.id}
-                onClick={() => { setError(''); setConfirmingId(task.id) }}
+                disabled={Boolean(deletingId)}
+                onClick={() => { setError(''); setRowError(null); setConfirmingId(task.id) }}
                 aria-label={tr(lang, `清除任务 ${task.title}`, `Delete task ${task.title}`)}
               >
                 {tr(lang, '清除记录', 'Clear')}
@@ -165,6 +175,11 @@ export function FusionHistory() {
             )}
           </div>
         </div>
+        {rowError?.id === task.id && (
+          <p role="alert" className="fusion-history-row-error" style={{ color: 'var(--dsw-alias-state-error-primary, #e5484d)', margin: '6px 0 0', fontSize: '12px' }}>
+            {rowError.message}
+          </p>
+        )}
         <details><summary>{tr(lang, '记录详情', 'Details')}</summary><p>{tr(lang, '任务', 'Task')}: {task.id}</p><p>{tr(lang, '会话', 'Session')}: {task.sessionId}</p>
           <p>{tr(lang, `验证状态：${task.verification}。历史运行状态不代表当前仍在执行。`, `Verification: ${task.verification}. A recorded state does not mean it is still running.`)}</p>
           <p>{tr(lang, '输入', 'Input')} {tokens(lang, task.usage.input, task.usage.calls)} · {tr(lang, '缓存读取', 'cache read')} {tokens(lang, task.usage.cacheRead, task.usage.calls)} · {tr(lang, '总输出', 'Total output')} {outputTokens(lang, task.usage, task.usage.calls)} Token</p>

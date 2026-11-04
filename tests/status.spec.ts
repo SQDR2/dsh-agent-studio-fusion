@@ -10,7 +10,7 @@ import { loadPromptBundle } from '../src/prompts.js'
 import { billFromNativeUsage, type NativeUsageRecord } from '../src/host/native-usage.js'
 import { newLedger, ingestDurable } from '../src/usage/ledger.js'
 import { TASK_BUSY, TASK_NOT_FOUND } from '../src/errors.js'
-import { created, envelope, TASK, PARENT, SNAP } from './helpers.js'
+import { created, envelope, TASK, PARENT, SNAP, CHILD, order } from './helpers.js'
 
 const cleanup: (() => void)[] = []
 afterEach(() => { cleanup.splice(0).reverse().forEach(fn => fn()) })
@@ -273,6 +273,18 @@ describe('task deletion', () => {
     const { store } = setup()
     // The HTTP layer maps these codes to 404 and 409; a translated message must not decide the status.
     expect(() => store.deleteTask('non-existent-task')).toThrow(expect.objectContaining({ code: TASK_NOT_FOUND }))
+    expect(() => store.deleteTask(TASK)).toThrow(expect.objectContaining({ code: TASK_BUSY }))
+  })
+
+  it('preserves deletion protection for tasks in uncompleted running phases', () => {
+    const { store } = setup()
+    const currentOrder = order()
+    store.append(TASK, 1, [
+      envelope('intent/chosen', 3, { intent: 'DELEGATE' }),
+      envelope('work-order/prepared', 4, { order: currentOrder, reservedChild: CHILD }),
+      envelope('child/accepted', 5, { operationId: currentOrder.operationId, child: CHILD, messageId: 'm1' }),
+    ])
+    expect(store.load(TASK)?.phase).toBe('WORKER_RUNNING')
     expect(() => store.deleteTask(TASK)).toThrow(expect.objectContaining({ code: TASK_BUSY }))
   })
 
