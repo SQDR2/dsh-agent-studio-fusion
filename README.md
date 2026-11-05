@@ -176,6 +176,8 @@ Windows 开发环境需将 PowerShell 7（`pwsh`）、Node 和 Python 加入运�
 
 插件只使用 DSH 公开的插件接口，不修改 DSH 源码。适配新版本 DSH 的做法见 [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)。
 
+发版流程（改版本号、重建 `lib/`、打 tag、CI 经 OIDC 发到 npm）见 [RELEASING.zh.md](RELEASING.zh.md)。
+
 ## 许可
 
 Apache-2.0。上游 fork 自 [`aa2246740/dsh-model-fusion`](https://github.com/aa2246740/dsh-model-fusion)，同样以 Apache-2.0 发布。

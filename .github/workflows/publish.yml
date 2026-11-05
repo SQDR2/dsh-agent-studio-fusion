@@ -10,7 +10,11 @@ name: Publish to npm
 # name that has never been published does not have. For the very first publish
 # of a new name, publish once by hand with a granular token, then add the
 # trusted publisher (owner SQDR2, repository dsh-fusion, workflow publish.yml,
-# permission "allow npm publish") and let tags do the rest.
+# permission "allow npm publish") and let tags do the rest. A trusted publisher
+# must complete its first publish within 2 days or it expires unvalidated.
+#
+# Actions are disabled by default on forks: if a tag push creates no run at all,
+# enable them on the Actions tab first. Full maintainer notes: RELEASING.md.
 on:
   push:
     tags:

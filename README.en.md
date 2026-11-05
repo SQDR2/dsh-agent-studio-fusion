@@ -186,6 +186,8 @@ For Windows development, put PowerShell 7 (`pwsh`), Node and Python on the test 
 
 The plugin uses only DSH's public plugin APIs and never modifies DSH itself. How to adapt it to a new DSH release: [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md).
 
+How to cut a release (bump the version, rebuild `lib/`, push a tag, let CI publish over OIDC): [RELEASING.md](RELEASING.md).
+
 ## License
 
 Apache-2.0. Forked from [`aa2246740/dsh-model-fusion`](https://github.com/aa2246740/dsh-model-fusion), also under Apache-2.0.
