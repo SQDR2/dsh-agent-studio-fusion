@@ -2,6 +2,12 @@
 
 [中文](README.md) · [Install](INSTALL.md) · [安装](INSTALL.zh.md)
 
+> **This repository is a fork of [`aa2246740/dsh-model-fusion`](https://github.com/aa2246740/dsh-model-fusion), published as `dsh-fusion`.**
+> Every upstream capability, algorithm and measurement is kept. This fork does three things: it moves the entry from
+> Settings to the left sidebar, it makes the agy route
+> ([`dsh-agy-worker`](https://github.com/SQDR2/dsh-agy-worker)) work as a Sidekick, and it removes a few ways a frozen
+> scope or a stale task record could dead-end a run. See [What this fork changes](#what-this-fork-changes).
+
 In DeepSeek Harness (DSH), Fusion is one entry in the model menu: **Fusion · auto**. Behind it are two models you choose:
 
 - **Lead**: a strong frontier model. It reads the request and the code, briefs the work and reviews the result.
@@ -70,6 +76,54 @@ After contaminated attempts were excluded, four tasks were clean in every condit
   - it returns to read-only afterwards.
 - **Quota or provider errors:** handled per role. Switch a model or schedule a continuation; progress is kept.
 
+## Using agy as the Sidekick (dsh-agy-worker)
+
+[`dsh-agy-worker`](https://github.com/SQDR2/dsh-agy-worker), a fork of `dsh-agy-link`, brings Google Antigravity's
+models into DSH, so one can be the Sidekick. This route is not like a plain provider: **three conditions must hold at
+the same time**, and each one fails silently on its own.
+
+| Condition | Why | Without it |
+|---|---|---|
+| `mcpBridge: true` | agy must be able to **execute** DSH tools | tools are listed but never run |
+| `permissionMode: 'skip'` | headless mode cannot prompt for the MCP permission | agy aborts: `a tool required the "mcp" permission that headless mode cannot prompt for` |
+| the allowlist admits `fusion_*` | the Sidekick must **report back** | it can diagnose but never submit |
+
+You do **not** write the `agy_tool` transport into the ceiling yourself. When this Host has the `antigravity` route
+registered, the plugin unions that transport into both the Lead's and the Sidekick's tool surface
+(`src/host/route-transport.ts`). That is one of the bugs this fork fixes: before it, agy's adapter could only report a
+step as `agy_tool`, the ceiling never carried that name, the whole turn degraded to prose, and the Host reported
+`WORKER_TOOLS_UNREACHABLE`.
+
+Recommended configuration:
+
+```yaml
+- id: dsh-agy-worker
+  config:
+    mcpBridge: true
+    permissionMode: skip
+    mcpConfigScope: global
+    mcpToolAllowlist: "fusion_submit_result,fusion_read_state,fusion_read_evidence,bash,read,write,edit,glob,grep,job_output,job_kill"
+```
+
+> On Windows use `pwsh` instead of `bash`, and follow any change you made to `workerTools`. For the full configuration
+> surface, verification steps and troubleshooting, see
+> [dsh-agy-worker's MCP bridge guide](https://github.com/SQDR2/dsh-agy-worker/blob/main/docs/MCP-BRIDGE-SETUP.md).
+
+## What this fork changes
+
+Against upstream `dsh-model-fusion`, in commit order:
+
+| Change | What it fixes |
+|---|---|
+| **User constraints survive a rollover** | after an automatic compaction, the hard requirements in the user's own words stay in the task's scope, so a compaction never drops the basis for acceptance |
+| **A dead-end task has an exit** | when a Sidekick route cannot reach the tools at all, the verdict is recorded on the runtime record: `fusion_wait` re-reports the same reason and `fusion_delegate` may replace the dead order, so the task no longer sits in `WORKER_RUNNING` forever |
+| **The entry moved to the left sidebar** | Fusion is its own panel (default below Memory System) instead of a section buried in Settings, and the main slot scrolls instead of clipping a form |
+| **The agy route can be a Sidekick** | the `agy_tool` transport is unioned into the tool ceiling (see above) |
+| **A bridged route can report back** | agy runs the call inside its own loop under a bridge-local id (`agy-mcp-N`) that appears in no assistant message here, so every non-read Worker tool was refused as "requires a complete native model request", including `fusion_submit_result`. A bridged call now belongs to the message that emitted the transport; the native path is unchanged and still preferred |
+| **A frozen scope no longer deadlocks** | a glob such as `allowedPaths: ['lib/types/**']` matched nothing, so "changes outside the frozen scope" and "files already differ under the added path" locked each other. Globs match now, widening is compared against the delegation base, and the scope can be cleared |
+| **Task records can be deleted** | deletion read persisted state only: a task whose owning process had been replaced stayed `running` forever, while a live Agent could be cleared out from under itself. Deletion asks the coordinator (`liveWork`) and the 409 names the resource that held the task |
+| **Collapsible panels** | usage, the task list, cache keepalive and history are separate boxes, collapsed by default, so the model pair no longer scrolls off the page |
+
 ## Cache keepalive
 
 While the Lead waits for the Sidekick, often for several minutes, the model's prompt cache can expire. The next request then re-reads the whole conversation at full price. Keepalive resends the Lead's previous request at intervals with only “Reply OK” appended. The prefix is identical, so the provider serves it from cache and the cache lifetime is renewed; the model answers OK, and the reply is discarded: it never enters the conversation and no tool call runs.
@@ -88,7 +142,7 @@ While the Lead waits for the Sidekick, often for several minutes, the model's pr
 ## Support
 
 - **DSH version:** **0.2.0-rc.2** and **0.2.1-rc.2**, desktop app or Web. Other versions are not guaranteed; new releases will be adapted separately.
-- **Models:** DSH's built-in providers, plus the subscription routes of [dsh-oauth-login](https://github.com/aa2246740/dsh-oauth-login) and dsh-antigravity-oauth. Other third-party model plugins are untested.
+- **Models:** DSH's built-in providers, plus the subscription routes of [dsh-oauth-login](https://github.com/aa2246740/dsh-oauth-login) and dsh-antigravity-oauth, and the Antigravity route of [dsh-agy-worker](https://github.com/SQDR2/dsh-agy-worker). Other third-party model plugins are untested.
 - **Operating systems:**
   - **macOS:** verified (Seatbelt sandbox).
   - **Windows:** `v0.2.1` supports native `pwsh` and has been verified on Windows Server 2022 with PowerShell 7.6.6. Make sure `pwsh` is on the PATH used to launch DSH. Windows 10/11 remain unverified. Windows ACL enforcement is partial: it can restrict ordinary file writes, but does not restrict reads or networking.
@@ -107,7 +161,8 @@ The real PowerShell ACL test denied the Lead's `Set-Content probe.txt test` comm
 
 ## Data
 
-- **Fusion's own records:** briefs, check results, usage, cache statistics and settings live in `$DSH_HOME/plugins/dsh-model-fusion/state.sqlite`. `DSH_HOME` defaults to `~/.dsh`.
+- **Fusion's own records:** briefs, check results, usage, cache statistics and settings live in `$DSH_HOME/plugins/dsh-fusion/state.sqlite`. `DSH_HOME` defaults to `~/.dsh`.
+- **Upgrading from the old name:** the previous release was `dsh-model-fusion`, and its whole directory (`$DSH_HOME/plugins/dsh-model-fusion/`) is **migrated** to the new name on first start, so existing tasks, usage and settings survive. Across filesystems it falls back to copying the database plus its `-wal`/`-shm`/`-journal`, and removes only the files it copied.
 - **The conversations themselves:** stored by DSH. Fusion uploads nothing else.
 - **To clear Fusion's records:** quit DSH and delete that file. Settings go with it; choose the pair again next time.
 
@@ -133,4 +188,4 @@ The plugin uses only DSH's public plugin APIs and never modifies DSH itself. How
 
 ## License
 
-Apache-2.0
+Apache-2.0. Forked from [`aa2246740/dsh-model-fusion`](https://github.com/aa2246740/dsh-model-fusion), also under Apache-2.0.

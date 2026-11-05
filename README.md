@@ -2,6 +2,11 @@
 
 [English](README.en.md) · [安装](INSTALL.zh.md) · [Install (English)](INSTALL.md)
 
+> **本仓库是 [`aa2246740/dsh-model-fusion`](https://github.com/aa2246740/dsh-model-fusion) 的 fork，包名 `dsh-fusion`。**
+> 上游的能力、算法和实测数据全部保留；本 fork 专注于三件事：把入口从「设置」搬到左侧边栏、
+> 让 agy 线路（[`dsh-agy-worker`](https://github.com/SQDR2/dsh-agy-worker)）真的能当 Sidekick、
+> 以及修掉冻结范围与任务记录上几个会卡住流程的问题。改动清单见 [本 fork 做了什么](#本-fork-做了什么)。
+
 Fusion 在 DeepSeek Harness（DSH）的模型菜单里是一个普通模型：**Fusion · 自动**。背后是两个你自己选的模型：
 
 - **Lead**：一个强的前沿模型。负责理解需求、看代码、写任务说明、审查结果。
@@ -68,6 +73,47 @@ Fusion 在 DeepSeek Harness（DSH）的模型菜单里是一个普通模型：**
   - 任务结束后恢复只读。
 - **额度用完或出错**：Lead、Sidekick 各自处理。可以换模型继续，也可以定时继续；进度保留。
 
+## 用 agy 当 Sidekick（dsh-agy-worker）
+
+[`dsh-agy-worker`](https://github.com/SQDR2/dsh-agy-worker)（`dsh-agy-link` 的 fork）把 Google Antigravity 的模型接进 DSH，可以当 Sidekick 用。这条路和普通模型线路不一样，**必须三个条件同时成立**，缺任何一条都会静默失败：
+
+| 条件 | 为什么 | 缺了会怎样 |
+|---|---|---|
+| `mcpBridge: true` | agy 要能真的**执行** DSH 工具 | 工具看得见，但调不动 |
+| `permissionMode: 'skip'` | headless 下 MCP 调用要被自动允许 | agy 直接拒绝：`a tool required the "mcp" permission that headless mode cannot prompt for` |
+| 白名单里有 `fusion_*` | Sidekick 要能**交回结果** | 只能诊断，永远交不回 |
+
+工具天花板里的回传通道 `agy_tool` **不需要你手写**：本插件在检测到 `antigravity` 线路已注册时，会自动把它并进 Lead 和 Sidekick 的工具面（`src/host/route-transport.ts`）。这是本 fork 修掉的问题之一——在此之前，agy 的适配器只能以 `agy_tool` 回传，而天花板里没有这个名字，整轮就退化成纯文本，宿主报 `WORKER_TOOLS_UNREACHABLE`。
+
+推荐配置：
+
+```yaml
+- id: dsh-agy-worker
+  config:
+    mcpBridge: true
+    permissionMode: skip
+    mcpConfigScope: global
+    mcpToolAllowlist: "fusion_submit_result,fusion_read_state,fusion_read_evidence,bash,read,write,edit,glob,grep,job_output,job_kill"
+```
+
+> Windows 把 `bash` 换成 `pwsh`；改过 `workerTools` 就跟着改。完整配置面、验证步骤与排障对照见
+> [dsh-agy-worker 的 MCP 桥接文档](https://github.com/SQDR2/dsh-agy-worker/blob/main/docs/MCP-BRIDGE-SETUP.md)。
+
+## 本 fork 做了什么
+
+相对上游 `dsh-model-fusion`，本 fork 的改动（按提交时间）：
+
+| 内容 | 解决了什么 |
+|---|---|
+| **用户约束跨压缩保留** | 对话被自动压缩（rollover）后，用户原话里的硬性要求仍在任务范围内，不会因为一次压缩就丢掉验收依据 |
+| **死路任务有出口** | 当 Sidekick 线路根本够不到工具时，判定会被记在运行记录上：`fusion_wait` 复述同一个原因，`fusion_delegate` 允许替换这条死单并复用常驻身份，不再把任务卡在 `WORKER_RUNNING` |
+| **入口搬到左侧边栏** | Fusion 从「设置 → Fusion」变成左侧边栏的独立面板（默认落在记忆系统下方），主区域有真正的滚动面，不再是塞在设置页里的一段表单 |
+| **agy 线路真的能当 Sidekick** | `agy_tool` 回传通道自动并进工具天花板（见上一节） |
+| **桥接线路能交回结果** | agy 在自己的循环里执行调用，用的是 `agy-mcp-N` 这种桥内 id，本 Host 的 assistant 消息里没有它，于是所有非只读 Worker 工具都被判成「缺少完整的原生模型请求」——包括唯一要紧的 `fusion_submit_result`。现在桥接调用归属到发出回传通道的那条消息上，原生路径不变且优先 |
+| **冻结范围不再死锁** | `allowedPaths: ['lib/types/**']` 这类 glob 之前一条都不匹配，导致「改动落在冻结范围外」和「加范围时文件已变更」互相锁死。现在 glob 正常匹配，加范围改为按提交基点比较，并且可以显式清空 |
+| **任务记录可以删了** | 删除只看持久化状态：进程换过的任务永远 `running` 删不掉，而真在跑的 Agent 又可能被从底下抽走。现在删除先问协调者（`liveWork`），409 会说明是哪一个资源占着 |
+| **面板折叠** | 用量统计、任务列表、缓存保活、历史各自成为独立的折叠区块，默认收起，模型组合不再被挤到屏幕外 |
+
 ## 缓存保活
 
 Lead 等 Sidekick 干活时，可能要等好几分钟。模型的输入缓存过期后，下一次请求就要按全价重读整段对话。保活会在等待期间，定时把 Lead 上一次的请求原样再发一遍，末尾只加一句“Reply OK”。前缀和上次完全相同，厂商就从缓存读取，缓存的寿命也就续上了；模型只回一个 OK，回复直接丢弃，不进对话，也不会执行工具调用。
@@ -86,7 +132,7 @@ Lead 等 Sidekick 干活时，可能要等好几分钟。模型的输入缓存�
 ## 支持范围
 
 - **DSH 版本：** 支持 **0.2.0-rc.2** 和 **0.2.1-rc.2**，桌面版和 Web 版都可以。其他版本不保证可用；新版本发布后会另行适配。
-- **模型：** DSH 官方自带的模型线路，以及 [dsh-oauth-login](https://github.com/aa2246740/dsh-oauth-login)、dsh-antigravity-oauth 提供的订阅登录线路。其他第三方模型插件未经测试。
+- **模型：** DSH 官方自带的模型线路，以及 [dsh-oauth-login](https://github.com/aa2246740/dsh-oauth-login)、dsh-antigravity-oauth 提供的订阅登录线路，还有 [dsh-agy-worker](https://github.com/SQDR2/dsh-agy-worker) 的 Antigravity 线路。其他第三方模型插件未经测试。
 - **系统：**
   - **macOS：** 已验证（Seatbelt 沙盒）。
   - **Windows：** `v0.2.1` 已适配原生 `pwsh`，在 Windows Server 2022、PowerShell 7.6.6 上通过验证。启动 DSH 的进程 PATH 中需要有 `pwsh`。Windows 10/11 尚未验证。Windows ACL 仅提供部分隔离，普通路径写入可受限制，读取和网络不在该限制内。
@@ -105,7 +151,8 @@ Lead 等 Sidekick 干活时，可能要等好几分钟。模型的输入缓存�
 
 ## 数据存在哪里
 
-- **Fusion 自己的记录：** 任务说明、检查结果、用量、缓存统计和设置，都存在 `$DSH_HOME/plugins/dsh-model-fusion/state.sqlite`。`DSH_HOME` 默认是 `~/.dsh`。
+- **Fusion 自己的记录：** 任务说明、检查结果、用量、缓存统计和设置，都存在 `$DSH_HOME/plugins/dsh-fusion/state.sqlite`。`DSH_HOME` 默认是 `~/.dsh`。
+- **从旧名字升级：** 上一版叫 `dsh-model-fusion`，它的整个数据目录（`$DSH_HOME/plugins/dsh-model-fusion/`）会在首次启动时**整体迁移**到新名字，已有的任务、用量和设置都还在。跨文件系统时会退化成复制数据库和它的 `-wal`/`-shm`/`-journal`，只删除自己复制过的文件。
 - **会话本身：** 由 DSH 保存，Fusion 不另外上传任何数据。
 - **想清空 Fusion 的记录：** 退出 DSH 后删除这个文件。设置也会一起清掉，下次打开时重新选组合即可。
 
@@ -131,4 +178,4 @@ Windows 开发环境需将 PowerShell 7（`pwsh`）、Node 和 Python 加入运�
 
 ## 许可
 
-Apache-2.0
+Apache-2.0。上游 fork 自 [`aa2246740/dsh-model-fusion`](https://github.com/aa2246740/dsh-model-fusion)，同样以 Apache-2.0 发布。
