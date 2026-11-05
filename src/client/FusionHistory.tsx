@@ -64,6 +64,7 @@ export function FusionHistory() {
   const [confirmingId, setConfirmingId] = useState<string | null>(null)
   const [deletingId, setDeletingId] = useState<string | null>(null)
   const [rowError, setRowError] = useState<{ id: string; message: string } | null>(null)
+  const [tasksOpen, setTasksOpen] = useState(false)
 
   useEffect(() => {
     const abort = new AbortController()
@@ -121,82 +122,106 @@ export function FusionHistory() {
   }
 
   return <section className="fusion-history" aria-label={tr(lang, 'Fusion 历史与统计', 'Fusion history and statistics')} data-ud-check="fusion-history">
-    <h2>{tr(lang, '历史与统计', 'History and statistics')}</h2>
-    <p>{tr(lang, '按实际模型请求汇总，包含任务、压缩、保活及已有标题请求。未报告的用量不算作 0；金额与节省率尚无可靠数据。',
-      'Totals of actual model requests: tasks, compaction, keepalive and title requests. Unreported usage is not counted as 0; no reliable billed amount or saving rate is available.')}</p>
-    <button disabled={loading} onClick={() => setRefresh(value => value + 1)}>{tr(lang, '刷新记录', 'Refresh')}</button>
+    <div className="fusion-history-header">
+      <div>
+        <h2>{tr(lang, '历史与统计', 'History and statistics')}</h2>
+        <p>{tr(lang, '按实际模型请求汇总，包含任务、压缩、保活及已有标题请求。未报告的用量不算作 0；金额与节省率尚无可靠数据。',
+          'Totals of actual model requests: tasks, compaction, keepalive and title requests. Unreported usage is not counted as 0; no reliable billed amount or saving rate is available.')}</p>
+      </div>
+      <button disabled={loading} onClick={() => setRefresh(value => value + 1)}>{tr(lang, '刷新记录', 'Refresh')}</button>
+    </div>
     {error && <p role="alert">{error}</p>}{loading && !page && <p role="status">{tr(lang, '正在读取记录…', 'Loading…')}</p>}
     {page && <>
-      <p>{tr(lang, `${page.totalTasks} 项任务 · ${page.totals.calls} 次原生请求 · ${page.totals.final} 次用量定稿 · ${page.totals.provisional} 次暂报 · ${page.totals.unreported} 次未提供`,
-        `${page.totalTasks} tasks · ${page.totals.calls} native requests · ${page.totals.final} final usage · ${page.totals.provisional} provisional · ${page.totals.unreported} unreported`)}</p>
-      <p>{tr(lang, '未缓存输入', 'Uncached input')} {tokens(lang, page.totals.input, page.totals.calls)} · {tr(lang, '缓存读取', 'cache read')} {tokens(lang, page.totals.cacheRead, page.totals.calls)} · {tr(lang, '总输出', 'Total output')} {outputTokens(lang, page.totals, page.totals.calls)} Token</p>
-      <p>{tr(lang, `Lead 接手改代码 ${page.takeovers?.total ?? 0} 次（${page.takeovers?.tasks ?? 0} 项任务）`, `Lead takeovers: ${page.takeovers?.total ?? 0} (${page.takeovers?.tasks ?? 0} tasks)`)}
-        {page.takeovers?.total ? `: ${Object.entries(page.takeovers.reasons).map(([reason, count]) => `${takeoverReason(lang, reason)} ${count}`).join(', ')}` : ''}
-        {tr(lang, '。只有 Sidekick 确实完成不了时，程序才会解锁接手。', '. The Host unlocks a takeover only when the Sidekick demonstrably cannot finish.')}</p>
-      <div style={{ overflowX: 'auto' }} tabIndex={0} aria-label={tr(lang, '按实际模型统计', 'By actual model')}>
-        <table><caption>{tr(lang, '按角色、实际模型和请求用途', 'By role, actual model and purpose')}</caption><thead><tr>
-          <th scope="col">{tr(lang, '角色 / 模型', 'Role / model')}</th><th scope="col">{tr(lang, '用途', 'Purpose')}</th><th scope="col">{tr(lang, '请求', 'Requests')}</th><th scope="col">{tr(lang, '总输出 Token（可见 / 推理）', 'Total output tokens (visible / reasoning)')}</th></tr></thead>
-          <tbody>{page.groups.map(group => <tr key={JSON.stringify([group.role, group.provider, group.model, group.purpose])}>
-            <th scope="row">{group.role === 'lead' ? 'Lead' : 'Sidekick'} · {group.model}<small>{group.provider}</small></th>
-            <td>{purpose(lang, group.purpose)}</td><td>{group.calls}</td><td>{outputTokens(lang, group, group.calls)}</td>
-          </tr>)}</tbody>
-        </table>
-      </div>
-      <h3>{tr(lang, '任务记录', 'Tasks')}</h3>
-      {!page.tasks.length && <p>{tr(lang, '还没有 Fusion 任务。', 'No Fusion tasks yet.')}</p>}
-      <ol>{page.tasks.map(task => <li key={task.id}>
-        <div className="fusion-history-item-header">
-          <div>
-            <strong>{task.title}</strong>
-            <small>
-              {new Date(task.createdAt).toLocaleString()} · {task.mode === 'completed' ? tr(lang, '已结束', 'finished') : task.phase} · {tr(lang, `${task.usage.calls} 次请求`, `${task.usage.calls} requests`)}{task.takeovers ? tr(lang, ` · Lead 接手 ${task.takeovers} 次`, ` · ${task.takeovers} Lead takeovers`) : ''}
-            </small>
-          </div>
-          <div className="fusion-history-actions">
-            {confirmingId === task.id ? (
-              <>
-                <span className="fusion-history-confirm-text">{tr(lang, '确定清除？', 'Delete?')}</span>
-                <button
-                  type="button"
-                  disabled={Boolean(deletingId)}
-                  onClick={() => void handleDelete(task.id)}
-                >
-                  {deletingId === task.id ? tr(lang, '正在清除…', 'Deleting…') : tr(lang, '确认', 'Confirm')}
-                </button>
-                <button
-                  type="button"
-                  className="fusion-btn-subtle"
-                  disabled={Boolean(deletingId)}
-                  onClick={() => { setConfirmingId(null); setRowError(null) }}
-                >
-                  {tr(lang, '取消', 'Cancel')}
-                </button>
-              </>
-            ) : (
-              <button
-                type="button"
-                disabled={Boolean(deletingId)}
-                onClick={() => { setError(''); setRowError(null); setConfirmingId(task.id) }}
-                aria-label={tr(lang, `清除任务 ${task.title}`, `Delete task ${task.title}`)}
-              >
-                {tr(lang, '清除记录', 'Clear')}
-              </button>
-            )}
-          </div>
+      <div className="fusion-history-panel fusion-history-usage" aria-label={tr(lang, '用量统计', 'Usage statistics')}>
+        <h3>{tr(lang, '用量统计', 'Usage statistics')}</h3>
+        <p>{tr(lang, `${page.totalTasks} 项任务 · ${page.totals.calls} 次原生请求 · ${page.totals.final} 次用量定稿 · ${page.totals.provisional} 次暂报 · ${page.totals.unreported} 次未提供`,
+          `${page.totalTasks} tasks · ${page.totals.calls} native requests · ${page.totals.final} final usage · ${page.totals.provisional} provisional · ${page.totals.unreported} unreported`)}</p>
+        <p>{tr(lang, '未缓存输入', 'Uncached input')} {tokens(lang, page.totals.input, page.totals.calls)} · {tr(lang, '缓存读取', 'cache read')} {tokens(lang, page.totals.cacheRead, page.totals.calls)} · {tr(lang, '总输出', 'Total output')} {outputTokens(lang, page.totals, page.totals.calls)} Token</p>
+        <p>{tr(lang, `Lead 接手改代码 ${page.takeovers?.total ?? 0} 次（${page.takeovers?.tasks ?? 0} 项任务）`, `Lead takeovers: ${page.takeovers?.total ?? 0} (${page.takeovers?.tasks ?? 0} tasks)`)}
+          {page.takeovers?.total ? `: ${Object.entries(page.takeovers.reasons).map(([reason, count]) => `${takeoverReason(lang, reason)} ${count}`).join(', ')}` : ''}
+          {tr(lang, '。只有 Sidekick 确实完成不了时，程序才会解锁接手。', '. The Host unlocks a takeover only when the Sidekick demonstrably cannot finish.')}</p>
+        <div style={{ overflowX: 'auto' }} tabIndex={0} aria-label={tr(lang, '按实际模型统计', 'By actual model')}>
+          <table><caption>{tr(lang, '按角色、实际模型和请求用途', 'By role, actual model and purpose')}</caption><thead><tr>
+            <th scope="col">{tr(lang, '角色 / 模型', 'Role / model')}</th><th scope="col">{tr(lang, '用途', 'Purpose')}</th><th scope="col">{tr(lang, '请求', 'Requests')}</th><th scope="col">{tr(lang, '总输出 Token（可见 / 推理）', 'Total output tokens (visible / reasoning)')}</th></tr></thead>
+            <tbody>{page.groups.map(group => <tr key={JSON.stringify([group.role, group.provider, group.model, group.purpose])}>
+              <th scope="row">{group.role === 'lead' ? 'Lead' : 'Sidekick'} · {group.model}<small>{group.provider}</small></th>
+              <td>{purpose(lang, group.purpose)}</td><td>{group.calls}</td><td>{outputTokens(lang, group, group.calls)}</td>
+            </tr>)}</tbody>
+          </table>
         </div>
-        {rowError?.id === task.id && (
-          <p role="alert" className="fusion-history-row-error" style={{ color: 'var(--dsw-alias-state-error-primary, #e5484d)', margin: '6px 0 0', fontSize: '12px' }}>
-            {rowError.message}
-          </p>
-        )}
-        <details><summary>{tr(lang, '记录详情', 'Details')}</summary><p>{tr(lang, '任务', 'Task')}: {task.id}</p><p>{tr(lang, '会话', 'Session')}: {task.sessionId}</p>
-          <p>{tr(lang, `验证状态：${task.verification}。历史运行状态不代表当前仍在执行。`, `Verification: ${task.verification}. A recorded state does not mean it is still running.`)}</p>
-          <p>{tr(lang, '输入', 'Input')} {tokens(lang, task.usage.input, task.usage.calls)} · {tr(lang, '缓存读取', 'cache read')} {tokens(lang, task.usage.cacheRead, task.usage.calls)} · {tr(lang, '总输出', 'Total output')} {outputTokens(lang, task.usage, task.usage.calls)} Token</p>
-        </details>
-      </li>)}</ol>
-      <div className="fusion-actions"><button disabled={loading || !cursor} onClick={() => setCursor('')}>{tr(lang, '最新记录', 'Newest')}</button>
-        <button disabled={loading || !page.nextCursor} onClick={() => setCursor(page.nextCursor!)}>{tr(lang, '更早记录', 'Older')}</button></div>
-      <p>{tr(lang, `更新于 ${new Date(page.observedAt).toLocaleString()}。供应商内部重试次数未知。`, `Updated ${new Date(page.observedAt).toLocaleString()}. Provider-internal retries are unknown.`)}</p>
+        <p><small>{tr(lang, `更新于 ${new Date(page.observedAt).toLocaleString()}。供应商内部重试次数未知。`, `Updated ${new Date(page.observedAt).toLocaleString()}. Provider-internal retries are unknown.`)}</small></p>
+      </div>
+      <details
+        className="fusion-history-panel fusion-history-tasks"
+        {...(tasksOpen ? { open: true } : {})}
+        onToggle={event => setTasksOpen(event.currentTarget.open)}
+      >
+        <summary className="fusion-history-tasks-summary">
+          <span className="fusion-history-tasks-title">
+            <strong>{tr(lang, '任务记录', 'Tasks')}</strong>{' '}
+            <span className="fusion-history-count">({page.totalTasks})</span>
+          </span>
+          <span className="fusion-history-tasks-indicator">
+            <small>{tasksOpen ? tr(lang, '点击收起', 'Collapse') : tr(lang, '点击展开', 'Expand')}</small>
+            <span className="fusion-history-tasks-chevron" aria-hidden="true" />
+          </span>
+        </summary>
+        <div className="fusion-history-tasks-content">
+          {!page.tasks.length && <p>{tr(lang, '还没有 Fusion 任务。', 'No Fusion tasks yet.')}</p>}
+          <ol>{page.tasks.map(task => <li key={task.id}>
+            <div className="fusion-history-item-header">
+              <div>
+                <strong>{task.title}</strong>
+                <small>
+                  {new Date(task.createdAt).toLocaleString()} · {task.mode === 'completed' ? tr(lang, '已结束', 'finished') : task.phase} · {tr(lang, `${task.usage.calls} 次请求`, `${task.usage.calls} requests`)}{task.takeovers ? tr(lang, ` · Lead 接手 ${task.takeovers} 次`, ` · ${task.takeovers} Lead takeovers`) : ''}
+                </small>
+              </div>
+              <div className="fusion-history-actions">
+                {confirmingId === task.id ? (
+                  <>
+                    <span className="fusion-history-confirm-text">{tr(lang, '确定清除？', 'Delete?')}</span>
+                    <button
+                      type="button"
+                      disabled={Boolean(deletingId)}
+                      onClick={() => void handleDelete(task.id)}
+                    >
+                      {deletingId === task.id ? tr(lang, '正在清除…', 'Deleting…') : tr(lang, '确认', 'Confirm')}
+                    </button>
+                    <button
+                      type="button"
+                      className="fusion-btn-subtle"
+                      disabled={Boolean(deletingId)}
+                      onClick={() => { setConfirmingId(null); setRowError(null) }}
+                    >
+                      {tr(lang, '取消', 'Cancel')}
+                    </button>
+                  </>
+                ) : (
+                  <button
+                    type="button"
+                    disabled={Boolean(deletingId)}
+                    onClick={() => { setError(''); setRowError(null); setConfirmingId(task.id) }}
+                    aria-label={tr(lang, `清除任务 ${task.title}`, `Delete task ${task.title}`)}
+                  >
+                    {tr(lang, '清除记录', 'Clear')}
+                  </button>
+                )}
+              </div>
+            </div>
+            {rowError?.id === task.id && (
+              <p role="alert" className="fusion-history-row-error" style={{ color: 'var(--dsw-alias-state-error-primary, #e5484d)', margin: '6px 0 0', fontSize: '12px' }}>
+                {rowError.message}
+              </p>
+            )}
+            <details><summary>{tr(lang, '记录详情', 'Details')}</summary><p>{tr(lang, '任务', 'Task')}: {task.id}</p><p>{tr(lang, '会话', 'Session')}: {task.sessionId}</p>
+              <p>{tr(lang, `验证状态：${task.verification}。历史运行状态不代表当前仍在执行。`, `Verification: ${task.verification}. A recorded state does not mean it is still running.`)}</p>
+              <p>{tr(lang, '输入', 'Input')} {tokens(lang, task.usage.input, task.usage.calls)} · {tr(lang, '缓存读取', 'cache read')} {tokens(lang, task.usage.cacheRead, task.usage.calls)} · {tr(lang, '总输出', 'Total output')} {outputTokens(lang, task.usage, task.usage.calls)} Token</p>
+            </details>
+          </li>)}</ol>
+          <div className="fusion-actions"><button disabled={loading || !cursor} onClick={() => setCursor('')}>{tr(lang, '最新记录', 'Newest')}</button>
+            <button disabled={loading || !page.nextCursor} onClick={() => setCursor(page.nextCursor!)}>{tr(lang, '更早记录', 'Older')}</button></div>
+        </div>
+      </details>
     </>}
   </section>
 }

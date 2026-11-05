@@ -39,7 +39,28 @@ const styles = `
 .fusion-settings .fusion-consent{display:flex;align-items:flex-start;gap:8px;font-size:12px;line-height:18px}
 .fusion-cache{display:flex;flex-direction:column;gap:12px;border-top:1px solid var(--dsw-alias-border-l2);padding-top:20px}.fusion-cache h3{margin:0}.fusion-cache-model{display:flex;flex-direction:column;gap:8px;padding:14px;border:1px solid var(--dsw-alias-border-l2);border-radius:10px}.fusion-cache-model small{display:block;color:var(--dsw-alias-label-secondary);overflow-wrap:anywhere}.fusion-cache-controls{display:grid;grid-template-columns:minmax(0,2fr) minmax(0,1fr) auto;gap:10px;align-items:end}.fusion-cache-controls label{grid-template-columns:1fr;gap:4px}.fusion-cache a{color:var(--dsw-alias-brand-primary)}
 @media(max-width:560px){.fusion-cache-controls{grid-template-columns:1fr}}
-.fusion-history{display:flex;flex-direction:column;gap:12px;border-top:1px solid var(--dsw-alias-border-l2);padding-top:20px}.fusion-history table{width:100%;border-collapse:collapse;font-size:12px;text-align:left}.fusion-history :is(th,td){padding:8px;border-bottom:1px solid var(--dsw-alias-border-l2);font-weight:400;vertical-align:top}.fusion-history caption{text-align:left;font-size:13px;margin-bottom:8px}.fusion-history small{display:block;color:var(--dsw-alias-label-secondary);overflow-wrap:anywhere}.fusion-history ol{padding-left:20px;margin:0}.fusion-history li{padding:10px 0}.fusion-history h3{margin:8px 0 0}.fusion-history p{overflow-wrap:anywhere}
+.fusion-history{display:flex;flex-direction:column;gap:16px;border-top:1px solid var(--dsw-alias-border-l2);padding-top:20px}
+.fusion-history-header{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap}
+.fusion-history-panel{box-sizing:border-box;width:100%;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;background:var(--dsw-alias-bg-module-platform);padding:16px;display:flex;flex-direction:column;gap:12px}
+.fusion-history-usage h3{margin:0;font-size:14px;font-weight:600}
+.fusion-history table{width:100%;border-collapse:collapse;font-size:12px;text-align:left}
+.fusion-history :is(th,td){padding:8px;border-bottom:1px solid var(--dsw-alias-border-l2);font-weight:400;vertical-align:top}
+.fusion-history caption{text-align:left;font-size:13px;margin-bottom:8px}
+.fusion-history small{display:block;color:var(--dsw-alias-label-secondary);overflow-wrap:anywhere}
+.fusion-history ol{padding-left:20px;margin:0}
+.fusion-history li{padding:10px 0;border-bottom:1px solid var(--dsw-alias-border-l2)}
+.fusion-history li:last-child{border-bottom:0}
+.fusion-history h3{margin:0;font-size:14px;font-weight:600}
+.fusion-history p{overflow-wrap:anywhere}
+.fusion-history-tasks-summary{cursor:pointer;font-weight:600;font-size:14px;display:flex;align-items:center;justify-content:space-between;list-style:none;user-select:none;padding:2px 0}
+.fusion-history-tasks-summary::-webkit-details-marker{display:none}
+.fusion-history-tasks-summary:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px;border-radius:4px}
+.fusion-history-tasks-title{display:inline-flex;align-items:center;gap:6px}
+.fusion-history-count{font-size:13px;font-weight:400;color:var(--dsw-alias-label-secondary)}
+.fusion-history-tasks-indicator{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:400;color:var(--dsw-alias-label-secondary)}
+.fusion-history-tasks-chevron{display:inline-block;width:7px;height:7px;border-right:2px solid var(--dsw-alias-label-secondary);border-bottom:2px solid var(--dsw-alias-label-secondary);transform:rotate(-45deg);transition:transform .15s ease;margin-left:2px}
+.fusion-history-tasks[open] .fusion-history-tasks-chevron{transform:rotate(45deg)}
+.fusion-history-tasks-content{display:flex;flex-direction:column;gap:12px;padding-top:12px;border-top:1px solid var(--dsw-alias-border-l2);margin-top:4px}
 .fusion-history-item-header{display:flex;align-items:center;justify-content:space-between;gap:12px}
 .fusion-history-item-header h3{margin:0;font-size:14px;font-weight:600}
 .fusion-history-actions{display:flex;align-items:center;gap:8px;flex-shrink:0}

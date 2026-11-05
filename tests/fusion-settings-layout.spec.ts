@@ -65,6 +65,121 @@ describe('FusionSettings layout after sidebar integration', () => {
     expect(css).toMatch(/\.fusion-history-item-header\{[^}]*display:\s*flex/)
     expect(css).toMatch(/\.fusion-history-actions\{[^}]*display:\s*flex/)
     expect(css).toMatch(/\.fusion-history-confirm-text\{/)
+
+    // Bordered panel containers with <= 8px radius
+    expect(css).toMatch(/\.fusion-history-panel\{[^}]*border:\s*1px solid var\(--dsw-alias-border-l2\)/)
+    expect(css).toMatch(/\.fusion-history-panel\{[^}]*border-radius:\s*8px/)
+    expect(css).toMatch(/\.fusion-history-tasks-summary\{[^}]*display:\s*flex/)
+    expect(css).toMatch(/\.fusion-history-tasks-chevron\{/)
+  })
+
+  it('renders usage statistics and tasks as two distinct bordered panels with tasks collapsed by default and accessible after expanding', async () => {
+    pinLanguage('zh-CN')
+    const mockData = {
+      totalTasks: 2,
+      totals: {
+        calls: 5, final: 5, provisional: 0, unreported: 0,
+        input: { known: 100, reported: 5 },
+        output: { known: 200, reported: 5 },
+        reasoning: { known: 50, reported: 5 },
+        totalOutput: { known: 250, reported: 5 },
+        cacheRead: { known: 10, reported: 5 },
+      },
+      tasks: [
+        {
+          id: 'task-panel-1',
+          title: 'Panel Task 1',
+          createdAt: '2026-11-04T00:00:00Z',
+          mode: 'completed',
+          phase: 'COMPLETED',
+          usage: {
+            calls: 2, final: 2, provisional: 0, unreported: 0,
+            input: { known: 40, reported: 2 },
+            output: { known: 80, reported: 2 },
+            reasoning: { known: 0, reported: 0 },
+            totalOutput: { known: 80, reported: 2 },
+            cacheRead: { known: 0, reported: 0 },
+          },
+          takeovers: 0,
+          sessionId: 's1',
+          verification: 'verified',
+        },
+        {
+          id: 'task-panel-2',
+          title: 'Panel Task 2',
+          createdAt: '2026-11-04T01:00:00Z',
+          mode: 'running',
+          phase: 'WORKER_RUNNING',
+          usage: {
+            calls: 3, final: 3, provisional: 0, unreported: 0,
+            input: { known: 60, reported: 3 },
+            output: { known: 120, reported: 3 },
+            reasoning: { known: 50, reported: 3 },
+            totalOutput: { known: 170, reported: 3 },
+            cacheRead: { known: 10, reported: 3 },
+          },
+          takeovers: 1,
+          sessionId: 's2',
+          verification: 'unverified',
+        },
+      ],
+      groups: [],
+    }
+
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      if (url.includes('view=history')) {
+        return { ok: true, json: async () => mockData }
+      }
+      return { ok: true, json: async () => ({}) }
+    }))
+
+    const { FusionHistory } = await import('../src/client/FusionHistory.js')
+    let root!: ReactTestRenderer
+    await act(async () => { root = create(React.createElement(FusionHistory)) })
+    roots.push(root)
+
+    // Two distinct bordered containers
+    const usagePanel = root.root.findByProps({ className: 'fusion-history-panel fusion-history-usage' })
+    expect(usagePanel).toBeDefined()
+    expect(usagePanel.findByType('h3').children).toContain('用量统计')
+
+    const tasksPanel = root.root.findByProps({ className: 'fusion-history-panel fusion-history-tasks' })
+    expect(tasksPanel).toBeDefined()
+    expect(tasksPanel.type).toBe('details')
+
+    // Task records are collapsed by default (no open attribute on the details element)
+    expect(tasksPanel.props.open).toBeUndefined()
+
+    // Summary displays "任务记录" and task count clearly
+    const summary = tasksPanel.findByProps({ className: 'fusion-history-tasks-summary' })
+    const title = summary.findByProps({ className: 'fusion-history-tasks-title' })
+    expect(title.findByType('strong').children).toContain('任务记录')
+    expect(title.findByProps({ className: 'fusion-history-count' }).children.join('')).toBe('(2)')
+    expect(summary.findByType('small').children).toContain('点击展开')
+
+    // Expansion indicator exists
+    const chevron = summary.findByProps({ className: 'fusion-history-tasks-chevron' })
+    expect(chevron).toBeDefined()
+
+    // Expanding the details panel reveals tasks and their full functionality
+    await act(async () => {
+      tasksPanel.props.onToggle({ currentTarget: { open: true } })
+    })
+    expect(tasksPanel.props.open).toBe(true)
+
+    // Both tasks are present
+    const taskItems = tasksPanel.findAllByType('li')
+    expect(taskItems).toHaveLength(2)
+
+    // Clear buttons and per-task details remain accessible
+    const clearBtn1 = tasksPanel.findByProps({ 'aria-label': '清除任务 Panel Task 1' })
+    expect(clearBtn1).toBeDefined()
+    const clearBtn2 = tasksPanel.findByProps({ 'aria-label': '清除任务 Panel Task 2' })
+    expect(clearBtn2).toBeDefined()
+
+    // Pagination actions are present
+    const pagination = tasksPanel.findByProps({ className: 'fusion-actions' })
+    expect(pagination).toBeDefined()
   })
 
   it('renders history delete buttons and toggles secondary confirmation on click', async () => {
@@ -111,6 +226,12 @@ describe('FusionSettings layout after sidebar integration', () => {
     let root!: ReactTestRenderer
     await act(async () => { root = create(React.createElement(FusionHistory)) })
     roots.push(root)
+
+    // Expand overall tasks panel before accessing task actions
+    const tasksPanel = root.root.findByProps({ className: 'fusion-history-panel fusion-history-tasks' })
+    if (tasksPanel?.props.onToggle) {
+      await act(async () => { tasksPanel.props.onToggle({ currentTarget: { open: true } }) })
+    }
 
     // Find the clear button
     const clearBtn = root.root.findByProps({ 'aria-label': '清除任务 Test Task' })
@@ -186,6 +307,11 @@ describe('FusionSettings layout after sidebar integration', () => {
     let root!: ReactTestRenderer
     await act(async () => { root = create(React.createElement(FusionHistory)) })
     roots.push(root)
+
+    const tasksPanel = root.root.findByProps({ className: 'fusion-history-panel fusion-history-tasks' })
+    if (tasksPanel?.props.onToggle) {
+      await act(async () => { tasksPanel.props.onToggle({ currentTarget: { open: true } }) })
+    }
 
     const clearBtn = root.root.findByProps({ 'aria-label': '清除任务 Running Task' })
     await act(async () => { clearBtn.props.onClick() })
@@ -267,6 +393,11 @@ describe('FusionSettings layout after sidebar integration', () => {
     let root!: ReactTestRenderer
     await act(async () => { root = create(React.createElement(FusionHistory)) })
     roots.push(root)
+
+    const tasksPanel = root.root.findByProps({ className: 'fusion-history-panel fusion-history-tasks' })
+    if (tasksPanel?.props.onToggle) {
+      await act(async () => { tasksPanel.props.onToggle({ currentTarget: { open: true } }) })
+    }
 
     expect(root.root.findAllByType('li')).toHaveLength(1)
 
