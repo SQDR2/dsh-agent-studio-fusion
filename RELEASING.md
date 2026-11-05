@@ -72,16 +72,21 @@ action`. This step is browser-only by design.
 first step.
 
 ```sh
-# 1. Bump the version in package.json (and nowhere else).
+# 1. Bump the version in package.json (and nowhere else), and add the entry at
+#    the top of CHANGELOG.md. That section becomes the GitHub release body.
 # 2. Rebuild lib/ — it is tracked in git and shipped in the tarball, so a stale
 #    lib/ publishes code that does not match the tagged source.
 DSHX_HARNESS=/path/to/deepseek-harness-0.2.0-rc.2 pnpm build
 pnpm typecheck && pnpm test
-# 3. Commit the source and the rebuilt lib/ together.
+# 3. Commit the source, the rebuilt lib/ and CHANGELOG.md together.
 git add -A && git commit -m "chore(release): 0.3.1"
 # 4. Tag and push both.
 git tag v0.3.1 && git push origin main v0.3.1
 ```
+
+[`CHANGELOG.md`](CHANGELOG.md) is the only place release notes live. Do not add a `RELEASE-*.md` per version: a
+directory of near-identical files that nothing links to stops being readable within a few releases, and the notes belong
+under one version heading each.
 
 The workflow then runs `pnpm install`, `pnpm build`, `pnpm test` and, on a tag, `npm publish --access public`.
 A published version also gets a provenance attestation, so `npm view` can point at the commit it was built from.

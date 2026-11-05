@@ -1,6 +1,6 @@
 # Fusion · a DSH plugin
 
-[中文](README.md) · [Install](INSTALL.md) · [安装](INSTALL.zh.md)
+[中文](README.md) · [Install](INSTALL.md) · [安装](INSTALL.zh.md) · [Changelog](CHANGELOG.md)
 
 > **This repository is a fork of [`aa2246740/dsh-model-fusion`](https://github.com/aa2246740/dsh-model-fusion), published as `@sqdr2/dsh-fusion`.**
 > Every upstream capability, algorithm and measurement is kept. This fork does three things: it moves the entry from

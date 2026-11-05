@@ -64,16 +64,20 @@ npm CLI 建不了信任配置：`npm trust github` 需要交互式 2FA 凭据，
 版本号的唯一真源是 `package.json`。tag 必须与它完全一致，否则 workflow 会在第一步退出。
 
 ```sh
-# 1. 改 package.json 里的版本号（别处不要改）。
+# 1. 改 package.json 里的版本号（别处不要改），并在 CHANGELOG.md 顶部加一条。
+#    这一节就是 GitHub Release 的正文。
 # 2. 重建 lib/ —— 它纳入版本库并随包发布，lib/ 陈旧等于发布了
 #    与 tag 源码不一致的代码。
 DSHX_HARNESS=/path/to/deepseek-harness-0.2.0-rc.2 pnpm build
 pnpm typecheck && pnpm test
-# 3. 源码和重建后的 lib/ 一起提交。
+# 3. 源码、重建后的 lib/ 和 CHANGELOG.md 一起提交。
 git add -A && git commit -m "chore(release): 0.3.1"
 # 4. 打 tag 并一起推。
 git tag v0.3.1 && git push origin main v0.3.1
 ```
+
+发布说明只有 [`CHANGELOG.md`](CHANGELOG.md) 一处。不要再每个版本加一个 `RELEASE-*.md`：
+一堆无人引用、名字几乎相同的文件，几个版本之后就没法读了；同一个版本的内容应该按版本标题归在这一个文件里。
 
 workflow 随后依次执行 `pnpm install`、`pnpm build`、`pnpm test`，在 tag 上再执行 `npm publish --access public`。
 发布出来的版本还带 provenance 证明，可以用 `npm view` 追溯它是从哪个 commit 构建的。
