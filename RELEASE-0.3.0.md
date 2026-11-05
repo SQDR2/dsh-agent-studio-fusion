@@ -52,8 +52,11 @@ the plugin is not installed or activated in a running Host by this preparation.
 
 ## Install
 
+Not on npm yet, so install from the repository:
+
 ```sh
-dsh plugin --profile web add github:SQDR2/dsh-fusion#v0.3.0
+dsh plugin --profile web add github:SQDR2/dsh-fusion
 ```
 
-See [English instructions](INSTALL.md) or [中文安装说明](INSTALL.zh.md).
+See [English instructions](INSTALL.md) or [中文安装说明](INSTALL.zh.md). When an npm release is published,
+`dsh-fusion@0.3.0` will work from the desktop app and the CLI alike.

@@ -13,12 +13,11 @@ Requires **DeepSeek Harness 0.2.0-rc.2 or 0.2.1-rc.2**. Other versions are not s
 The repository ships the built `lib/`, so nothing is compiled locally.
 
 ```sh
-# Latest from the Git repository
 dsh plugin --profile web add github:SQDR2/dsh-fusion
-
-# Or pin a release
-dsh plugin --profile web add github:SQDR2/dsh-fusion#v0.3.0
 ```
+
+That installs the default branch. Once this release is tagged, you can pin it instead with
+`github:SQDR2/dsh-fusion#v0.3.0`.
 
 If `dsh` is not on PATH, pin one supported CLI:
 

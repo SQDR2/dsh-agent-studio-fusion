@@ -12,12 +12,11 @@
 仓库里带着构建好的 `lib/`，不需要自己编译。
 
 ```sh
-# 从 Git 仓库安装最新版
 dsh plugin --profile web add github:SQDR2/dsh-fusion
-
-# 或钉住某个 release
-dsh plugin --profile web add github:SQDR2/dsh-fusion#v0.3.0
 ```
+
+这装的是默认分支。等这个版本打了 tag 之后，可以改成钉住版本：
+`github:SQDR2/dsh-fusion#v0.3.0`。
 
 `dsh` 不在 PATH 里时，指定一个受支持的 CLI：
 

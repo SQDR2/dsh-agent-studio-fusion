@@ -4,6 +4,13 @@ name: Publish to npm
 # Auth is npm Trusted Publishing (OIDC) - no NPM_TOKEN needed.
 # Manual run with dry_run=true installs, builds, tests and packs only (nothing is published).
 # A version that is already on npm is skipped, so re-runs are safe.
+#
+# The package name must already exist on npm before this workflow can publish:
+# a trusted publisher is configured on the package's own settings page, which a
+# name that has never been published does not have. For the very first publish
+# of a new name, publish once by hand with a granular token, then add the
+# trusted publisher (owner SQDR2, repository dsh-fusion, workflow publish.yml,
+# permission "allow npm publish") and let tags do the rest.
 on:
   push:
     tags:
