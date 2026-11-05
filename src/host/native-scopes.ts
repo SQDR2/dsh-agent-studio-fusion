@@ -7,6 +7,7 @@ import { requestOutputReservation } from '../context/guard.js'
 import type { PhysicalRoute, Role } from '../contracts.js'
 import type { SessionBinding } from './bindings.js'
 import { digestOf } from '../digest.js'
+import { FUSION_SELECTION_LABELS } from '../identity.js'
 import { fusionToolDiagnostic, projectRoleTools } from './tool-table.js'
 
 export interface FusionScopeCallbacks {
@@ -118,8 +119,11 @@ export class NativeFusionScopes {
       const taskContext = this.callbacks.taskContext?.(agent, entry.binding, role)
       // Native selection compares the virtual menu route to the physical
       // request header. That is not a new model change on every Fusion step.
-      return { ...decision, messages: [...decision.messages.filter(message => !(message.source?.kind === 'model-selection' && message.source.form === 'notice'
-        && message.source.summary.endsWith('dsh-model-fusion/auto'))).map(message =>
+      return { ...decision, messages: [...decision.messages.filter(message => {
+        const source = message.source
+        return !(source?.kind === 'model-selection' && source.form === 'notice'
+          && FUSION_SELECTION_LABELS.some(label => source.summary.endsWith(label)))
+      }).map(message =>
         this.callbacks.projectMessage?.(agent, entry.binding, role, message) ?? message), ...(taskContext ? [taskContext] : [])] }
     }, { prepend: true }))
     entry.dispose.push(scope.systemPrompt.section({ name: 'fusion-role', order: 90, text: entry.binding.prompts[role] }))

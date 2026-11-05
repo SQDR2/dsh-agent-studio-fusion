@@ -6,6 +6,7 @@ import type { Role } from '../contracts.js'
 import type { SqliteFusionStore } from '../task/sqlite-store.js'
 import type { SessionBinding } from './bindings.js'
 import { isShellTool } from './shell.js'
+import { FUSION_SOURCE_KIND } from '../message-source.js'
 
 export const enforcedWorkflow = (binding: SessionBinding) => binding.profile.workflowPolicy === 'enforced-v1' || binding.profile.workflowPolicy === 'enforced-v2' || binding.profile.workflowPolicy === 'enforced-v3'
 /** v3 keeps every v2 mechanism and adds role separation (see native-role-sandbox). */
@@ -77,7 +78,7 @@ export class NativeWorkflow {
     this.store.writeDocument(id, 0, { schemaVersion: 1, role, at: new Date().toISOString() })
     const progressId = `workflow-progress:${binding.taskId}:${agent.id}`, row = this.store.readDocument(progressId)
     this.store.writeDocument(progressId, row?.revision ?? 0, { schemaVersion: 1, milestone: this.milestone(binding), recent: [] })
-    agent.send(createUserMessage({ source: { kind: 'plugin:dsh-model-fusion', form: 'notice', summary: 'Fusion 检测到重复结果，正在调整执行方式' },
+    agent.send(createUserMessage({ source: { kind: FUSION_SOURCE_KIND, form: 'notice', summary: 'Fusion 检测到重复结果，正在调整执行方式' },
       content: [{ type: 'text', text: 'The runtime detected repeated unchanged tool results. Use the evidence already collected and change the approach instead of repeating those calls. Continue the current task; delegate broad work if useful. Another unchanged cycle will pause this role without discarding progress.' }] }), 'next-step', false)
     return true
   }
@@ -95,7 +96,7 @@ export class NativeWorkflow {
     const id = `workflow-stop:${binding.taskId}:${agent.id}:${this.milestone(binding)}`
     if (this.store.readDocument(id)) return false
     this.store.writeDocument(id, 0, { schemaVersion: 1, role, at: new Date().toISOString() })
-    agent.send(createUserMessage({ source: { kind: 'plugin:dsh-model-fusion', form: 'notice', summary: 'Fusion 工作流尚未完成' },
+    agent.send(createUserMessage({ source: { kind: FUSION_SOURCE_KIND, form: 'notice', summary: 'Fusion 工作流尚未完成' },
       content: [{ type: 'text', text: instruction }] }), 'next-step', false)
     return true
   }

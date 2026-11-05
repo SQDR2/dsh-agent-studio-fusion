@@ -28,7 +28,7 @@ export function installCompactionRouting(ctx: Context, input: {
     const registry = child.get('compactionRoutes') as Registry
     if (registry.apiVersion !== 1 || typeof registry.register !== 'function')
       throw new Error('Unsupported public compaction routing contract')
-    child.effect(() => registry.register('dsh-model-fusion', agent => {
+    child.effect(() => registry.register('dsh-fusion', agent => {
       if (!active) return undefined
       const owner = input.owner(agent)
       if (!owner) return undefined

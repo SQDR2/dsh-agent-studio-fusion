@@ -5,13 +5,11 @@ import type { GenerateOptions, LlmModelInfo, LlmResolvedModelInfo, ModelModality
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-api-session-controller/types'
 import type { PhysicalRoute } from '../contracts.js'
+import { FUSION_MODEL, FUSION_PROVIDER, isCurrentFusionSelection, isFusionSelection } from '../identity.js'
 import type { ResolvedProfile } from '../profile/resolve.js'
 import type { FusionCoordinator } from './coordinator.js'
 
-export const FUSION_PROVIDER = 'dsh-model-fusion'
-export const FUSION_MODEL = 'auto'
-export const isFusionSelection = (route: { provider?: string; model?: string } | undefined): boolean =>
-  route?.provider === FUSION_PROVIDER && route.model === FUSION_MODEL
+export { FUSION_MODEL, FUSION_PROVIDER, isFusionSelection }
 
 /** Resolves the configured Lead's declared input modalities; undefined means unconfigured or unverifiable. */
 export type LeadInputModalities = () => Promise<readonly ModelModality[] | undefined>
@@ -58,8 +56,11 @@ export function installNativeFusionSelection(ctx: Context, input: {
         // A saved Host default need not emit model/selection. Persist that
         // already-chosen intent before physical headers reach the native menu's
         // projection, otherwise it starts displaying the Lead as the selection.
+        // A session that named the entry before the rename keeps its task, but
+        // the route it stored no longer has an adapter; rewrite the intent so
+        // the next assembly dispatches under the registered name.
         const intent = agent.session.snapshotEvents().findLast(event => event.type === 'model/selection')
-        if (!isFusionSelection(intent?.data)) agent.session.append('model/selection', {
+        if (!isCurrentFusionSelection(intent?.data)) agent.session.append('model/selection', {
           provider: FUSION_PROVIDER, model: FUSION_MODEL,
         })
         failures.delete(agent.id)

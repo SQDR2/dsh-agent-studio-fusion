@@ -20,7 +20,7 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
   }
 }
 
-export const name = 'dsh-model-fusion/client'
+export const name = 'dsh-fusion/client'
 export const inject = ['slots']
 export const FUSION_PANEL_ID = 'fusion'
 

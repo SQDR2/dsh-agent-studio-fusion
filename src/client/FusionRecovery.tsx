@@ -4,6 +4,7 @@ import type { FusionStatus } from '../status.js'
 import type { PhysicalRoute } from '../contracts.js'
 import type { SettingsCatalog } from '../host/settings.js'
 import { ModelChoice } from './FusionSettings.js'
+import { FUSION_API_PATH, isFusionProvider } from '../identity.js'
 
 export function FusionRecovery({ sessionId, task }: { sessionId: string; task: NonNullable<FusionStatus['task']> }) {
   const lang = useLang()
@@ -18,7 +19,7 @@ export function FusionRecovery({ sessionId, task }: { sessionId: string; task: N
   const action = async (name: string) => {
     setBusy(true); setError(''); setNotice('')
     try {
-      const response = await fetch('/api/model-fusion', { method: 'POST', credentials: 'same-origin',
+      const response = await fetch(FUSION_API_PATH, { method: 'POST', credentials: 'same-origin',
         headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action: name, sessionId, taskId: task.id,
           revision: control.revision, role, route, ...(dueAt ? { dueAt: new Date(dueAt).toISOString() } : {}) }) })
       const result = await response.json() as { error?: string }
@@ -30,10 +31,10 @@ export function FusionRecovery({ sessionId, task }: { sessionId: string; task: N
   const loadCatalog = async () => {
     setError('')
     try {
-      const response = await fetch('/api/model-fusion?view=catalog', { credentials: 'same-origin', cache: 'no-store' })
+      const response = await fetch(`${FUSION_API_PATH}?view=catalog`, { credentials: 'same-origin', cache: 'no-store' })
       if (!response.ok) throw new Error(tr(lang, '无法读取模型列表', 'Cannot read the model list'))
       const value = await response.json() as SettingsCatalog
-      setCatalog({ ...value, groups: value.groups.filter(group => group.id !== 'dsh-model-fusion') })
+      setCatalog({ ...value, groups: value.groups.filter(group => !isFusionProvider(group.id)) })
     } catch (error) { setError(String(error)) }
   }
   return <section className="fusion-recovery" aria-label={tr(lang, 'Fusion 恢复操作', 'Fusion recovery')}>

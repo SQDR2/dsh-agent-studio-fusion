@@ -2,7 +2,7 @@ import { bi } from '../bilingual.js'
 import type { PairProfile, PhysicalRoute } from '../contracts.js'
 import { keepaliveChoice } from '../profile/keepalive.js'
 import { compactorChoice } from '../profile/compactor.js'
-import { FUSION_PROVIDER } from './native-selection.js'
+import { isFusionProvider } from '../identity.js'
 
 export interface PairChoice {
   lead: PhysicalRoute
@@ -23,7 +23,7 @@ export function savedLeadRoute(value: unknown): { provider: string; model: strin
   const route = (value as Record<string, unknown>).lead
   if (!route || typeof route !== 'object' || Array.isArray(route)) return undefined
   const provider = (route as Record<string, unknown>).provider, model = (route as Record<string, unknown>).model
-  if (typeof provider !== 'string' || typeof model !== 'string' || provider === FUSION_PROVIDER) return undefined
+  if (typeof provider !== 'string' || typeof model !== 'string' || isFusionProvider(provider)) return undefined
   return { provider, model }
 }
 
@@ -34,7 +34,7 @@ export function validatePairChoice(value: unknown, catalog: SettingsCatalog): Pa
   const route = (role: string, candidate: unknown): PhysicalRoute => {
     const item = candidate as Record<string, unknown> | undefined
     if (!item || typeof item.provider !== 'string' || typeof item.model !== 'string') throw new Error(bi(`请选择 ${role} 模型`, `Choose the ${role} model`))
-    if (item.provider === FUSION_PROVIDER) throw new Error(bi('Fusion 必须选择真实模型', 'Fusion needs real models, not Fusion itself'))
+    if (isFusionProvider(item.provider)) throw new Error(bi('Fusion 必须选择真实模型', 'Fusion needs real models, not Fusion itself'))
     const group = catalog.groups.find(group => group.id === item.provider)
     const model = group?.models.find(model => model.id === item.model)
     if (!model) throw new Error(bi(`${role} 模型已不可用，请刷新后重选`, `The ${role} model is no longer available; refresh and choose again`))

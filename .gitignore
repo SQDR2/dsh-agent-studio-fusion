@@ -4,7 +4,7 @@ node_modules/
 .env
 .env.*
 .dshx/
-.dsh-model-fusion/
+.dsh-fusion/
 coverage/
 dist/
 __pycache__/

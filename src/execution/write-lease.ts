@@ -17,7 +17,44 @@ export function canonicalWorkspace(cwd: string): string {
   return fs.realpathSync.native(cwd)
 }
 
-const DURABLE_LEASE_ROOT = path.join(os.homedir(), '.local', 'state', 'dsh-model-fusion', 'leases')
+const DURABLE_LEASE_ROOT = path.join(os.homedir(), '.local', 'state', 'dsh-fusion', 'leases')
+/** Where this plugin kept durable leases before it was renamed from `dsh-model-fusion`. */
+const LEGACY_LEASE_ROOT = path.join(os.homedir(), '.local', 'state', 'dsh-model-fusion', 'leases')
+
+/**
+ * Move a pre-rename lease registry to its current name.
+ *
+ * The registry outlives a single process, so a rename must carry it: a fresh
+ * empty directory beside a lock nobody reads would report the workspace as
+ * free while a previous holder believes it still owns the write lease. A move
+ * keeps that holder visible to the next process; a cross-device install copies
+ * the directory instead, and a failed copy removes only what it created.
+ *
+ * @param next - registry directory the current release uses.
+ * @param legacy - registry directory the previous name used.
+ * @returns whether a legacy registry was adopted.
+ */
+export function adoptLegacyLeaseRoot(next: string, legacy = LEGACY_LEASE_ROOT): boolean {
+  if (fs.existsSync(next) || !fs.existsSync(legacy)) return false
+  try {
+    fs.renameSync(legacy, next)
+    return true
+  } catch {
+    // Cross-device or a locked file: fall back to a copy, then drop the source.
+  }
+  try {
+    fs.cpSync(legacy, next, { recursive: true })
+  } catch {
+    fs.rmSync(next, { recursive: true, force: true })
+    return false
+  }
+  try {
+    fs.rmSync(legacy, { recursive: true, force: true })
+  } catch {
+    // The new copy is complete; a leftover legacy directory is harmless.
+  }
+  return true
+}
 
 export function leasePath(workspaceId: string, root = DURABLE_LEASE_ROOT): string {
   const key = createHash('sha256').update(workspaceId).digest('hex').slice(0, 24)
@@ -27,6 +64,7 @@ export function leasePath(workspaceId: string, root = DURABLE_LEASE_ROOT): strin
 export class WorkspaceWriteLease {
   constructor(private readonly root = DURABLE_LEASE_ROOT) {
     if (!path.isAbsolute(root)) throw new TypeError('lease registry directory must be absolute')
+    adoptLegacyLeaseRoot(root)
   }
 
   acquire(input: {
@@ -109,7 +147,11 @@ export class WorkspaceWriteLease {
     const legacy = leasePath(workspaceId, this.root)
     fs.mkdirSync(path.dirname(legacy), { recursive: true, mode: 0o700 })
     const oldTemporary = leasePath(workspaceId, path.join(fs.existsSync('/tmp') ? '/tmp' : os.tmpdir(), 'dsh-model-fusion-leases'))
-    for (const lock of new Set([legacy, oldTemporary])) {
+    // A lock written under the pre-rename registry, or by the pre-rename
+    // temporary one, still names a writer: refuse rather than take the
+    // workspace out from under it.
+    const oldDurable = leasePath(workspaceId, LEGACY_LEASE_ROOT)
+    for (const lock of new Set([legacy, oldDurable, oldTemporary])) {
       try {
         fs.lstatSync(lock)
         throw new FusionError(LEASE_BUSY, 'legacy writer lock requires explicit reconciliation')

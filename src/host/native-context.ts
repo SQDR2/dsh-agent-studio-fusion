@@ -12,6 +12,7 @@ import { digestOf } from '../digest.js'
 import { FUSION_CONTEXT_BUDGET } from '../errors.js'
 import type { SqliteFusionStore } from '../task/sqlite-store.js'
 import type { SessionBinding } from './bindings.js'
+import { FUSION_SOURCE_KIND, isFusionSourceKind } from '../message-source.js'
 import { nativeRequestAgent } from './native-request.js'
 import { FUSION_TASK_CONTEXT, type NativeTaskContext } from './native-task-context.js'
 import type { NativeAuxiliaryRequests } from './native-auxiliary.js'
@@ -60,10 +61,10 @@ export class NativeContextGuard {
     // on the current surface. Charge it too. JSON tool schemas use the public
     // message estimator with extra framing, rather than a private meter import.
     const text = (value: string) => meter.estimateMessage(createUserMessage({ content: [{ type: 'text', text: value }],
-      source: { kind: 'plugin:dsh-model-fusion' } }))
+      source: { kind: FUSION_SOURCE_KIND } }))
     const fixed = (system ? text(system) : 0) + (tools?.length ? text(JSON.stringify(tools)) : 0)
-    const actual = messages.reduce((total, message) => total + meter.estimateMessage(message.id ? message : createUserMessage({ content: message.content, source: { kind: 'plugin:dsh-model-fusion' } })), 0) + fixed
-    const pinned = messages.flatMap(message => message.source?.kind === 'plugin:dsh-model-fusion'
+    const actual = messages.reduce((total, message) => total + meter.estimateMessage(message.id ? message : createUserMessage({ content: message.content, source: { kind: FUSION_SOURCE_KIND } })), 0) + fixed
+    const pinned = messages.flatMap(message => isFusionSourceKind(message.source?.kind)
       && message.source.form === 'snapshot' ? message.source.sections.filter(section => section.name === FUSION_TASK_CONTEXT) : []).at(-1)
     // A summary cannot shrink the required current task snapshot, system prompt
     // or tool schemas. Reject an impossible restore before charging a summary.

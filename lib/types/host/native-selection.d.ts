@@ -3,14 +3,10 @@ import type { Agent } from '@deepseek-ai/dsh-agent';
 import { LlmAdapter } from '@deepseek-ai/dsh-llm';
 import type { GenerateOptions, LlmModelInfo, LlmResolvedModelInfo, ModelModality, StreamChunk } from '@deepseek-ai/dsh-llm';
 import type { PhysicalRoute } from '../contracts.js';
+import { FUSION_MODEL, FUSION_PROVIDER, isFusionSelection } from '../identity.js';
 import type { ResolvedProfile } from '../profile/resolve.js';
 import type { FusionCoordinator } from './coordinator.js';
-export declare const FUSION_PROVIDER = "dsh-model-fusion";
-export declare const FUSION_MODEL = "auto";
-export declare const isFusionSelection: (route: {
-    provider?: string;
-    model?: string;
-} | undefined) => boolean;
+export { FUSION_MODEL, FUSION_PROVIDER, isFusionSelection };
 /** Resolves the configured Lead's declared input modalities; undefined means unconfigured or unverifiable. */
 export type LeadInputModalities = () => Promise<readonly ModelModality[] | undefined>;
 /** Catalog-only local adapter; the native request is physically routed before dispatch. */

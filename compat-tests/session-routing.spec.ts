@@ -23,7 +23,7 @@ import { BindingRepository } from '../src/host/bindings.js'
 import { completeProfile } from '../src/profile/resolve.js'
 import { readModelControl } from '../src/host/native-model-control.js'
 import { TaskId } from '../src/contracts.js'
-import { FusionCatalogAdapter } from '../src/host/native-selection.js'
+import { FusionCatalogAdapter, FUSION_PROVIDER } from '../src/host/native-selection.js'
 
 const cleanups: (() => Promise<void>)[] = []
 const supplementalResults: unknown[] = []
@@ -93,7 +93,7 @@ async function fixture(options: { distinctCompactors?: boolean; workerOwner?: bo
     }
   }
   ctx.llm.registerAdapter(['physical'], new Adapter())
-  ctx.llm.registerAdapter(['dsh-model-fusion'], new FusionCatalogAdapter())
+  ctx.llm.registerAdapter([FUSION_PROVIDER], new FusionCatalogAdapter())
   const owner = (agent: any) => {
     const isWorker = options.workerOwner && agent.id === 'compat-b'
     const binding = bindings.read(isWorker ? 'compat-a' : agent.id)?.binding
@@ -125,7 +125,7 @@ async function fixture(options: { distinctCompactors?: boolean; workerOwner?: bo
     for (const text of ['Synthetic requirement and frozen test. '.repeat(700), 'Recent constraint remains authoritative. '.repeat(400)]) {
       agent.followup(createUserMessage({ content: [{ type: 'text', text }] })); await agent.whenIdle()
     }
-    agent.session.append('model/selection', { provider: 'dsh-model-fusion', model: 'auto' })
+    agent.session.append('model/selection', { provider: FUSION_PROVIDER, model: 'auto' })
     agents.push(agent)
   }
   cleanups.push(async () => { stopRouting(); stopGuard() })
@@ -142,7 +142,7 @@ it('Fusion and Saviour plan with session-frozen metadata and dispatch the same b
   expect(f.controller.current(b)).toMatchObject({ model: 'lead-small' })
   expect(await f.controller.context(a.id)).toMatchObject({ contextWindow: 96_000 })
   expect(await f.controller.context(b.id)).toMatchObject({ contextWindow: 48_000 })
-  expect(await f.ctx.llm.resolveModelInfo('dsh-model-fusion', 'auto')).not.toHaveProperty('context')
+  expect(await f.ctx.llm.resolveModelInfo(FUSION_PROVIDER, 'auto')).not.toHaveProperty('context')
   f.resolved.length = 0
   await a.ctx.get('compaction')!.compactNow(a, new AbortController().signal)
   const summaries = f.requests.filter(request => request.purpose === 'compaction')

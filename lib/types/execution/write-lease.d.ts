@@ -6,6 +6,20 @@ export interface LeaseRecord extends WriteLease {
     readonly liveProcessRefs: readonly number[];
 }
 export declare function canonicalWorkspace(cwd: string): string;
+/**
+ * Move a pre-rename lease registry to its current name.
+ *
+ * The registry outlives a single process, so a rename must carry it: a fresh
+ * empty directory beside a lock nobody reads would report the workspace as
+ * free while a previous holder believes it still owns the write lease. A move
+ * keeps that holder visible to the next process; a cross-device install copies
+ * the directory instead, and a failed copy removes only what it created.
+ *
+ * @param next - registry directory the current release uses.
+ * @param legacy - registry directory the previous name used.
+ * @returns whether a legacy registry was adopted.
+ */
+export declare function adoptLegacyLeaseRoot(next: string, legacy?: string): boolean;
 export declare function leasePath(workspaceId: string, root?: string): string;
 export declare class WorkspaceWriteLease {
     #private;

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useSyncExternalStore } from 'react'
 import type { FusionStatus } from '../status.js'
+import { FUSION_API_PATH } from '../identity.js'
 
 interface Snapshot { sessionId: string; status?: FusionStatus; failed: boolean }
 interface Entry {
@@ -36,7 +37,7 @@ function subscribe(sessionId: string, listener: () => void, expanded: () => bool
         abort.abort()
       }, 10000)
       try {
-        const response = await fetch(`/api/model-fusion?view=status&sessionId=${encodeURIComponent(sessionId)}`,
+        const response = await fetch(`${FUSION_API_PATH}?view=status&sessionId=${encodeURIComponent(sessionId)}`,
           { credentials: 'same-origin', cache: 'no-store', signal: abort.signal })
         if (!response.ok) throw new Error('unavailable')
         const status = await response.json() as FusionStatus

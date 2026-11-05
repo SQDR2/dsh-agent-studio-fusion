@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import type { HistoryView, HistoryTotals } from '../host/history.js'
 import { tr, useLang, type Lang } from './i18n.js'
+import { FUSION_API_PATH } from '../identity.js'
 
 export function formatCompact(tokens: number): string {
   if (tokens < 1000) return `${tokens}`
@@ -70,7 +71,7 @@ export function FusionHistory() {
   useEffect(() => {
     const abort = new AbortController()
     setLoading(true); setError('')
-    void fetch(`/api/model-fusion?view=history&cursor=${encodeURIComponent(cursor)}`, { credentials: 'same-origin', cache: 'no-store', signal: abort.signal })
+    void fetch(`${FUSION_API_PATH}?view=history&cursor=${encodeURIComponent(cursor)}`, { credentials: 'same-origin', cache: 'no-store', signal: abort.signal })
       .then(async response => {
         if (!response.ok) {
           const body = await response.json().catch(() => null) as { error?: string } | null
@@ -93,7 +94,7 @@ export function FusionHistory() {
     setRowError(null)
     setError('')
     try {
-      const res = await fetch(`/api/model-fusion?taskId=${encodeURIComponent(taskId)}`, {
+      const res = await fetch(`${FUSION_API_PATH}?taskId=${encodeURIComponent(taskId)}`, {
         method: 'DELETE',
         credentials: 'same-origin',
       })

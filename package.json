@@ -1,6 +1,6 @@
 {
-  "name": "dsh-model-fusion",
-  "version": "0.2.9",
+  "name": "dsh-fusion",
+  "version": "0.3.0",
   "publishConfig": {
     "access": "public",
     "registry": "https://registry.npmjs.org/"
@@ -9,7 +9,7 @@
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/aa2246740/dsh-model-fusion.git"
+    "url": "git+https://github.com/SQDR2/dsh-fusion.git"
   },
   "keywords": [
     "dsh",
@@ -36,8 +36,8 @@
   ],
   "exports": {
     ".": {
-      "types": "./lib/types/dsh-model-fusion.d.ts",
-      "import": "./lib/dsh-model-fusion.js"
+      "types": "./lib/types/dsh-fusion.d.ts",
+      "import": "./lib/dsh-fusion.js"
     },
     "./client": {
       "types": "./lib/types/client/index.d.ts",

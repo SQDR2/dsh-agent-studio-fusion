@@ -7,6 +7,7 @@ import { digestOf } from '../digest.js'
 import type { SqliteFusionStore } from '../task/sqlite-store.js'
 import type { SessionBinding } from './bindings.js'
 import { workerSettlementGuidance } from './worker-terminal.js'
+import { FUSION_SOURCE_KIND } from '../message-source.js'
 
 interface NoticeProjection {
   schemaVersion: 1
@@ -46,7 +47,7 @@ export class NativeWorkerNotices {
     // available through owned evidence. This projection claims no task success.
     const artifact = this.store.putArtifact(binding.taskId, Buffer.from(JSON.stringify(original)), 'application/vnd.dsh-fusion.worker-notice+json')
     const submitted = Boolean((this.store.readDocument(`runtime:${binding.taskId}`)?.value as { submitted?: unknown } | undefined)?.submitted)
-    const message = createUserMessage({ source: { kind: 'plugin:dsh-model-fusion', form: 'notice', summary: source.summary },
+    const message = createUserMessage({ source: { kind: FUSION_SOURCE_KIND, form: 'notice', summary: source.summary },
       content: [{ type: 'text', text: `${source.summary}\n${workerSettlementGuidance(submitted)} Closing transcript is archived rather than repeated here. For missing failure details use fusion_read_evidence with id ${artifact.id}.\n${JSON.stringify({ childId: source.senderSessionId, originalMessageId: original.id, artifact })}` }] })
     this.store.writeDocument(id, 0, { schemaVersion: 1, taskId: binding.taskId, parentId: agent.id,
       childId: source.senderSessionId, originalMessageId: original.id, originalDigest, artifact, message } satisfies NoticeProjection)

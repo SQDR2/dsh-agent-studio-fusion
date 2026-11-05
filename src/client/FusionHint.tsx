@@ -4,13 +4,15 @@ import type { ModelDirectoryState } from '@deepseek-ai/dsh-client-ui-model-selec
 import type { ObservableSnapshot } from '@deepseek-ai/dsh-client-store'
 import { onSettingsChanged } from './settings-events.js'
 import { FusionStatus } from './FusionStatus.js'
+import { FUSION_API_PATH, isFusionSelection } from '../identity.js'
 
 export interface FusionHintProps { sessionId: string; directory: ObservableSnapshot<ModelDirectoryState>; load(): void }
 
 /** Additive composer hint. The original selector and its selection state stay native. */
 export function FusionHint({ sessionId, directory, load }: FusionHintProps) {
   const selected = useSyncExternalStore(directory.subscribe, directory.getSnapshot).current
-  const fusion = selected?.provider === 'dsh-model-fusion' && selected.model === 'auto'
+  // A session that selected Fusion before the rename stored the old route.
+  const fusion = isFusionSelection(selected ?? undefined)
   const lang = useLang()
   const [message, setMessage] = useState<string>()
   useEffect(() => { load() }, [load])
@@ -19,7 +21,7 @@ export function FusionHint({ sessionId, directory, load }: FusionHintProps) {
     let active = true
     const abort = new AbortController()
     const refresh = () => {
-      void fetch('/api/model-fusion?view=settings', { credentials: 'same-origin', cache: 'no-store', signal: abort.signal })
+      void fetch(`${FUSION_API_PATH}?view=settings`, { credentials: 'same-origin', cache: 'no-store', signal: abort.signal })
         .then(async response => { if (!response.ok) throw new Error('unavailable'); return response.json() as Promise<{ pair: unknown; authorized: boolean }> })
         .then(state => { if (active) setMessage(!state.pair ? tr(lang, 'Fusion 尚未配置模型，请前往设置 → Fusion 选择 Lead 和 Sidekick。', 'Fusion has no models yet: open Settings → Fusion and choose a Lead and a Sidekick.')
           : !state.authorized ? tr(lang, 'Fusion 当前配置未就绪，请前往设置 → Fusion 查看。', 'The Fusion setup is not ready: see Settings → Fusion.') : undefined) })

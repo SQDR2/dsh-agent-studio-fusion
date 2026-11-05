@@ -4,6 +4,7 @@ import type { FusionActivity, FusionActivityPage } from '../activity.js'
 import { activityRows } from './activity-model.js'
 import { tr, useLang } from './i18n.js'
 import { ActivityCard, activityStyles } from './ActivityRows.js'
+import { FUSION_API_PATH } from '../identity.js'
 
 export const fusionControlTools = ['fusion_read_state', 'fusion_delegate_text', 'fusion_explore', 'fusion_delegate', 'fusion_rework', 'fusion_wait', 'fusion_review_result',
   'fusion_submit_result', 'fusion_takeover', 'fusion_finish_direct', 'fusion_read_evidence'] as const
@@ -27,7 +28,7 @@ export function FusionTool({ block, sessionId, callId, toolName, cwd, openFile }
       const deadline = setTimeout(() => abort?.abort(), 10000)
       let again = true, delay = 2000
       try {
-        const response = await fetch(`/api/model-fusion?view=activity&sessionId=${encodeURIComponent(sessionId)}&callId=${encodeURIComponent(callId)}&after=${cursor}`,
+        const response = await fetch(`${FUSION_API_PATH}?view=activity&sessionId=${encodeURIComponent(sessionId)}&callId=${encodeURIComponent(callId)}&after=${cursor}`,
           { credentials: 'same-origin', cache: 'no-store', signal: abort.signal })
         if (!response.ok) throw new Error('Activity unavailable')
         const page = await response.json() as FusionActivityPage

@@ -13,7 +13,7 @@ import { FusionSettings } from '../src/client/FusionSettings.js'
 
 describe('Fusion sidebar entry client registration', () => {
   it('exports valid client plugin metadata', () => {
-    expect(name).toBe('dsh-model-fusion/client')
+    expect(name).toBe('dsh-fusion/client')
     expect(inject).toContain('slots')
     expect(FUSION_PANEL_ID).toBe('fusion')
   })

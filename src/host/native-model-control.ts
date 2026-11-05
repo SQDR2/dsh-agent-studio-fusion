@@ -11,6 +11,7 @@ import { BindingRepository, type SessionBinding } from './bindings.js'
 import { adaptiveWorkflow, enforcedWorkflow } from './native-workflow.js'
 import { isShellTool } from './shell.js'
 import { unsettledContinuationError } from './worker-terminal.js'
+import { FUSION_SOURCE_KIND } from '../message-source.js'
 
 const LEAD_RECOVERABLE = ['WORKFLOW_INCOMPLETE', 'NO_PROGRESS', 'UNKNOWN']
 const LEAD_RECOVERIES = 2
@@ -233,7 +234,7 @@ export class NativeModelControl {
       }
       const operation = { id: randomUUID(), taskId, state: 'prepared' as const }
       const message = createUserMessage({ content: [{ type: 'text', text: `Continue the existing Fusion task ${taskId} from its saved state. Read fusion_read_state if needed. Preserve accepted constraints and inspect uncertain effects before replay. Local continuation operation: ${operation.id}.` }],
-        source: { kind: 'plugin:dsh-model-fusion', form: 'notice', summary: bi('用户通过 Fusion 控件继续当前任务', 'The user continued the task from the Fusion controls') } })
+        source: { kind: FUSION_SOURCE_KIND, form: 'notice', summary: bi('用户通过 Fusion 控件继续当前任务', 'The user continued the task from the Fusion controls') } })
       view = { ...view, epoch: view.epoch + (change ? 1 : 0), recoveryEpoch: (view.recoveryEpoch ?? 0) + 1,
         routes: change ? { ...view.routes, [change.role]: change.route } : view.routes,
         waits: change ? Object.fromEntries(Object.entries(view.waits).filter(([role]) => role !== change.role)) : {}, operation: { ...operation, message },

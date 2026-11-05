@@ -28,10 +28,12 @@ import { json, readJson, trustedRequest } from './host/http.js'
 import { readFusionStatusAsync } from './host/status.js'
 import { readHistoricalFusionActivity } from './host/native-activity.js'
 import { nativeShellTool } from './host/shell.js'
+import { adoptLegacyStateDirectory } from './store-migration.js'
+import { FUSION_API_PATH, LEGACY_FUSION_API_PATH, LEGACY_PLUGIN_NAME, isFusionProvider } from './identity.js'
 
 export * from './index.js'
 
-export const name = 'dsh-model-fusion'
+export const name = 'dsh-fusion'
 export const inject = ['agents', 'sessions', 'llm', 'tools', 'subagents', 'systemPrompt', 'webServer', 'sessionController', 'sessionQuery', 'commands', 'agentDefaultModel', 'tokenMeter']
 export interface Config { profilePath?: string; authorizationPath?: string; databasePath?: string; workerTools?: string[] }
 const defaultWorkerTools = [nativeShellTool, 'read', 'write', 'edit', 'glob', 'grep', 'job_output', 'job_kill']
@@ -44,6 +46,11 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
   const dshHome = process.env.DSH_HOME || join(homedir(), '.dsh')
   const database = config.databasePath || join(dshHome, 'plugins', name, 'state.sqlite')
   if (!isAbsolute(database)) throw new Error('Fusion databasePath must be absolute')
+  // The plugin was called `dsh-model-fusion` before it was renamed. Its whole
+  // durable ledger — tasks, briefs, artifacts, cache settings — lives in that
+  // directory, so an installation upgrade must keep reading it rather than
+  // start an empty store beside it.
+  if (!config.databasePath) adoptLegacyStateDirectory(join(dshHome, 'plugins', LEGACY_PLUGIN_NAME), join(dshHome, 'plugins', name))
   const store = new SqliteFusionStore(database), bindings = new BindingRepository(store)
   const cachePolicy = new CachePolicy(store)
   backfillHistory(store)
@@ -51,7 +58,7 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
   let defaultProfile: ResolvedProfile | undefined
   const physicalCatalog = async () => {
     const catalog = await ctx.sessionController.modelCatalog()
-    return { ...catalog, groups: catalog.groups.filter(group => group.id !== FUSION_PROVIDER) }
+    return { ...catalog, groups: catalog.groups.filter(group => !isFusionProvider(group.id)) }
   }
   const configuredProfile = async (): Promise<ResolvedProfile> => {
     defaultProfile = undefined
@@ -135,7 +142,7 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
     catch (error) { restoreFailure.set(payload.agent.id, String(error)); return { kind: 'reject' } }
     return next()
   }, { prepend: true }))
-  ctx.effect(() => ctx.webServer.register({ kind: 'exact', path: '/api/model-fusion', handler: async (req, res) => {
+  const apiHandler: Parameters<Context['webServer']['register']>[0]['handler'] = async (req, res) => {
     if (!trustedRequest(req)) return json(res, 403, { error: 'forbidden' })
     try {
       const url = new URL(req.url ?? '/', 'http://localhost')
@@ -262,7 +269,11 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
       }
       throw new Error(bi('请使用原模型菜单选择 Fusion 或切换普通模型', 'Use the model menu to select Fusion or another model'))
     } catch (error) { return json(res, 409, { error: error instanceof Error ? error.message : String(error) }) }
-  } }))
+  }
+  ctx.effect(() => ctx.webServer.register({ kind: 'exact', path: FUSION_API_PATH, handler: apiHandler }))
+  // A tab still running the pre-rename bundle asks the old path until it is
+  // reloaded. Keep answering it from the same handler; nothing new uses it.
+  ctx.effect(() => ctx.webServer.register({ kind: 'exact', path: LEGACY_FUSION_API_PATH, handler: apiHandler }))
   ctx.effect(() => ctx.commands.register({ name: 'fusion', description: bi('Fusion 状态、暂停、恢复与退出（不调用模型）', 'Fusion status, pause, resume and exit (no model call)'),
     input: { hint: bi('status | pause | resume | recover [--effects-stopped] <检查记录> | off', 'status | pause | resume | recover [--effects-stopped] <inspection note> | off') },
     handler: async invocation => {
@@ -306,5 +317,5 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
     const selected = bindings.selected()[0]
     if (selected) await getRuntime({ profile: selected.profile, prompts: selected.prompts })
   }
-  ctx.logger.info('[my-plugins/dsh-model-fusion] loaded')
+  ctx.logger.info('[my-plugins/dsh-fusion] loaded')
 }

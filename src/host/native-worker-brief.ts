@@ -6,6 +6,7 @@ import type { TaskId } from '../contracts.js'
 import { digestOf } from '../digest.js'
 import type { SqliteFusionStore } from '../task/sqlite-store.js'
 import { recentHandoffSuffix } from '../context/handoff.js'
+import { isFusionSourceKind } from '../message-source.js'
 
 /** Durable Lead-authored refinements survive native compaction and request races. */
 export function workerBriefs(store: SqliteFusionStore, taskId: TaskId) {
@@ -62,7 +63,7 @@ export function assertWorkerBriefRequest(store: SqliteFusionStore, taskId: TaskI
   if (!isAgentLoopRequest(request) || request.purpose !== undefined) return
   const expected = workerHandoffProjection(store, taskId)
   if (!expected.totalRecords) return
-  const present = request.messages.some(message => message.source?.kind === 'plugin:dsh-model-fusion' && message.source.form === 'snapshot'
+  const present = request.messages.some(message => isFusionSourceKind(message.source?.kind) && message.source.form === 'snapshot'
     && message.source.sections.some(section => {
       if (section.name !== 'fusion:task') return false
       try {
