@@ -3,7 +3,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import {
-  FUSION_MODEL, FUSION_PROVIDER, FUSION_SELECTION_LABELS, LEGACY_FUSION_PROVIDER, LEGACY_PLUGIN_NAME, PLUGIN_NAME,
+  FUSION_MODEL, FUSION_PROVIDER, FUSION_SELECTION_LABELS, LEGACY_FUSION_PROVIDER, LEGACY_PLUGIN_NAME, PACKAGE_NAME,
+  PLUGIN_NAME,
   isCurrentFusionSelection, isFusionProvider, isFusionSelection,
 } from '../src/identity.js'
 import { FUSION_SOURCE_KIND, FUSION_SOURCE_KINDS, isFusionSourceKind } from '../src/message-source.js'
@@ -15,8 +16,11 @@ const root = join(import.meta.dirname, '..')
 describe('installed plugin identity', () => {
   it('publishes the renamed package without touching the manifest contract', () => {
     const manifest = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'))
-    expect(manifest.name).toBe('dsh-fusion')
-    expect(PLUGIN_NAME).toBe(manifest.name)
+    expect(manifest.name).toBe(PACKAGE_NAME)
+    // The registry identity and the runtime identity are separate on purpose:
+    // moving into a scope must not move the state directory or the patch row.
+    expect(PLUGIN_NAME).toBe('dsh-fusion')
+    expect(manifest.name).not.toBe(PLUGIN_NAME)
     // Entry points move with the package name; both halves must resolve.
     expect(manifest.exports['.'].import).toBe('./lib/dsh-fusion.js')
     expect(manifest.exports['.'].types).toBe('./lib/types/dsh-fusion.d.ts')
@@ -25,7 +29,10 @@ describe('installed plugin identity', () => {
 
   it('registers the bundle patch and dev-server entry under the same id', () => {
     const patch = readFileSync(join(root, 'cordis.patch.yml'), 'utf8')
+    // The row id is the runtime identity; `name` is the specifier pnpm installed,
+    // which is the package name and therefore scoped.
     expect(patch).toContain('- id: dsh-fusion')
+    expect(patch).toContain(`name: '${PACKAGE_NAME}'`)
     expect(patch).not.toMatch(/^\s*name: dsh-model-fusion$/m)
     const dshx = readFileSync(join(root, 'dshx.yml'), 'utf8')
     expect(dshx).toContain('id: dsh-fusion')

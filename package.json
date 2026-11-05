@@ -1,5 +1,5 @@
 {
-  "name": "dsh-fusion",
+  "name": "@sqdr2/dsh-fusion",
   "version": "0.3.0",
   "publishConfig": {
     "access": "public",

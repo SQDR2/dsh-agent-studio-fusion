@@ -2,7 +2,7 @@
 
 [English](README.en.md) · [安装](INSTALL.zh.md) · [Install (English)](INSTALL.md)
 
-> **本仓库是 [`aa2246740/dsh-model-fusion`](https://github.com/aa2246740/dsh-model-fusion) 的 fork，包名 `dsh-fusion`。**
+> **本仓库是 [`aa2246740/dsh-model-fusion`](https://github.com/aa2246740/dsh-model-fusion) 的 fork，包名 `@sqdr2/dsh-fusion`。**
 > 上游的能力、算法和实测数据全部保留；本 fork 专注于三件事：把入口从「设置」搬到左侧边栏、
 > 让 agy 线路（[`dsh-agy-worker`](https://github.com/SQDR2/dsh-agy-worker)）真的能当 Sidekick、
 > 以及修掉冻结范围与任务记录上几个会卡住流程的问题。改动清单见 [本 fork 做了什么](#本-fork-做了什么)。

@@ -4,10 +4,19 @@
 
 需要 **DeepSeek Harness 0.2.0-rc.2 或 0.2.1-rc.2**，其他版本不支持。
 
-> 本包是 [`aa2246740/dsh-model-fusion`](https://github.com/aa2246740/dsh-model-fusion) 的 fork，包名 `dsh-fusion`。
+> 本包是 [`aa2246740/dsh-model-fusion`](https://github.com/aa2246740/dsh-model-fusion) 的 fork，包名 `@sqdr2/dsh-fusion`。
 > 因为换了包名，旧的 `dsh-model-fusion` 不会被自动升级；需要按下面的步骤装一次新包，装好后数据会自动迁移。
+>
+> 包名和插件 id 是两件事：包名是 `@sqdr2/dsh-fusion`，插件 id（配置里 `- id:`，也是数据目录名）仍是
+> `dsh-fusion`。所以升级只换安装来源，不动已有数据。
 
-## 从 GitHub 安装（推荐）
+## 从 npm 安装（推荐）
+
+```sh
+dsh plugin --profile web add @sqdr2/dsh-fusion
+```
+
+## 从 GitHub 安装
 
 仓库里带着构建好的 `lib/`，不需要自己编译。
 
@@ -15,15 +24,12 @@
 dsh plugin --profile web add github:SQDR2/dsh-fusion
 ```
 
-这装的是默认分支。等这个版本打了 tag 之后，可以改成钉住版本：
-`github:SQDR2/dsh-fusion#v0.3.0`。
-
 `dsh` 不在 PATH 里时，指定一个受支持的 CLI：
 
 ```sh
-npx @deepseek-ai/dsh@0.2.0-rc.2 plugin --profile web add github:SQDR2/dsh-fusion
+npx @deepseek-ai/dsh@0.2.0-rc.2 plugin --profile web add @sqdr2/dsh-fusion
 # 或
-npx @deepseek-ai/dsh@0.2.1-rc.2 plugin --profile web add github:SQDR2/dsh-fusion
+npx @deepseek-ai/dsh@0.2.1-rc.2 plugin --profile web add @sqdr2/dsh-fusion
 ```
 
 这只会写入 `web` 配置。正在运行的 Web 服务需要重新打开一次，再刷新页面。
@@ -41,10 +47,10 @@ dsh plugin --profile web add ~/github/dsh-fusion
 点左侧栏的 **插件** → **添加插件**，在"包名或地址"里填：
 
 ```text
-github:SQDR2/dsh-fusion
+@sqdr2/dsh-fusion
 ```
 
-装好后退出并重新打开 DSH Studio（插件在下次启动时生效）。
+也可以填 `github:SQDR2/dsh-fusion`。装好后退出并重新打开 DSH Studio（插件在下次启动时生效）。
 
 ## 从 dsh-model-fusion 升级
 
@@ -54,7 +60,7 @@ github:SQDR2/dsh-fusion
    dsh plugin --profile web remove dsh-model-fusion
    ```
 
-2. 按上面的方式安装 `dsh-fusion`。**不要**先手动删除旧数据目录：
+2. 按上面的方式安装 `@sqdr2/dsh-fusion`。**不要**先手动删除旧数据目录：
    `$DSH_HOME/plugins/dsh-model-fusion/` 里的任务、用量和设置会在首次启动时整体迁移到
    `$DSH_HOME/plugins/dsh-fusion/`。
 3. 重启 DSH（桌面版退出后重开，Web 版重开服务并刷新页面）。
@@ -73,7 +79,7 @@ github:SQDR2/dsh-fusion
 ## 卸载
 
 ```sh
-dsh plugin --profile web remove dsh-fusion
+dsh plugin --profile web remove @sqdr2/dsh-fusion
 ```
 
 桌面版在左侧栏的 **插件** 页面里卸载。Fusion 自己的记录在 `$DSH_HOME/plugins/dsh-fusion/state.sqlite`，

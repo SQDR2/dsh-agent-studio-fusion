@@ -2,7 +2,7 @@
 
 [中文](README.md) · [Install](INSTALL.md) · [安装](INSTALL.zh.md)
 
-> **This repository is a fork of [`aa2246740/dsh-model-fusion`](https://github.com/aa2246740/dsh-model-fusion), published as `dsh-fusion`.**
+> **This repository is a fork of [`aa2246740/dsh-model-fusion`](https://github.com/aa2246740/dsh-model-fusion), published as `@sqdr2/dsh-fusion`.**
 > Every upstream capability, algorithm and measurement is kept. This fork does three things: it moves the entry from
 > Settings to the left sidebar, it makes the agy route
 > ([`dsh-agy-worker`](https://github.com/SQDR2/dsh-agy-worker)) work as a Sidekick, and it removes a few ways a frozen

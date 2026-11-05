@@ -1,11 +1,12 @@
-# dsh-fusion 0.3.0
+# @sqdr2/dsh-fusion 0.3.0
 
-This is the first release under the name `dsh-fusion`. It is a fork of
+This is the first release under the name `@sqdr2/dsh-fusion`. It is a fork of
 [`aa2246740/dsh-model-fusion`](https://github.com/aa2246740/dsh-model-fusion), and 0.2.9 is the upstream release it
 builds on. Everything upstream does is still here; the changes below are the fork's.
 
-The package was renamed from `dsh-model-fusion`, so install `dsh-fusion` once — an installed `dsh-model-fusion` is not
-upgraded in place. The plugin adopts its existing state on first start (see Compatibility).
+The package was renamed from `dsh-model-fusion`, so install `@sqdr2/dsh-fusion` once — an installed `dsh-model-fusion` is
+not upgraded in place. The plugin adopts its existing state on first start (see Compatibility). The plugin id stays
+`dsh-fusion`, so the rename moves code only, not data.
 
 ## Changes
 
@@ -52,11 +53,15 @@ the plugin is not installed or activated in a running Host by this preparation.
 
 ## Install
 
-Not on npm yet, so install from the repository:
+```sh
+dsh plugin --profile web add @sqdr2/dsh-fusion
+```
+
+Or from the repository, which ships the built `lib/`:
 
 ```sh
 dsh plugin --profile web add github:SQDR2/dsh-fusion
 ```
 
-See [English instructions](INSTALL.md) or [中文安装说明](INSTALL.zh.md). When an npm release is published,
-`dsh-fusion@0.3.0` will work from the desktop app and the CLI alike.
+See [English instructions](INSTALL.md) or [中文安装说明](INSTALL.zh.md). It is on npm as `@sqdr2/dsh-fusion`,
+so the desktop app's Plugins page and the CLI install the same package.

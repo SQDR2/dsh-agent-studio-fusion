@@ -5,10 +5,20 @@
 Requires **DeepSeek Harness 0.2.0-rc.2 or 0.2.1-rc.2**. Other versions are not supported.
 
 > This package is a fork of [`aa2246740/dsh-model-fusion`](https://github.com/aa2246740/dsh-model-fusion), published as
-> `dsh-fusion`. Because the package name changed, an installed `dsh-model-fusion` is not upgraded automatically; install
-> the new package once as described below and its data migrates on first start.
+> `@sqdr2/dsh-fusion`. Because the package name changed, an installed `dsh-model-fusion` is not upgraded automatically;
+> install the new package once as described below and its data migrates on first start.
+>
+> The package name and the plugin id are two different things: the package is `@sqdr2/dsh-fusion`, while the plugin id
+> (the `- id:` in the composition, and the name of the data directory) stays `dsh-fusion`. An upgrade therefore changes
+> only where the code is installed, never the data it reads.
 
-## From GitHub (recommended)
+## From npm (recommended)
+
+```sh
+dsh plugin --profile web add @sqdr2/dsh-fusion
+```
+
+## From GitHub
 
 The repository ships the built `lib/`, so nothing is compiled locally.
 
@@ -16,15 +26,12 @@ The repository ships the built `lib/`, so nothing is compiled locally.
 dsh plugin --profile web add github:SQDR2/dsh-fusion
 ```
 
-That installs the default branch. Once this release is tagged, you can pin it instead with
-`github:SQDR2/dsh-fusion#v0.3.0`.
-
 If `dsh` is not on PATH, pin one supported CLI:
 
 ```sh
-npx @deepseek-ai/dsh@0.2.0-rc.2 plugin --profile web add github:SQDR2/dsh-fusion
+npx @deepseek-ai/dsh@0.2.0-rc.2 plugin --profile web add @sqdr2/dsh-fusion
 # or
-npx @deepseek-ai/dsh@0.2.1-rc.2 plugin --profile web add github:SQDR2/dsh-fusion
+npx @deepseek-ai/dsh@0.2.1-rc.2 plugin --profile web add @sqdr2/dsh-fusion
 ```
 
 This writes only the `web` profile. Reopen a running Web Host once and reload the page.
@@ -42,10 +49,10 @@ dsh plugin --profile web add ~/github/dsh-fusion
 Click **Plugins** in the left sidebar → **Add plugin**, and enter in "Package name or address":
 
 ```text
-github:SQDR2/dsh-fusion
+@sqdr2/dsh-fusion
 ```
 
-Then quit and reopen DSH Studio (plugins take effect at the next start).
+`github:SQDR2/dsh-fusion` works there too. Then quit and reopen DSH Studio (plugins take effect at the next start).
 
 ## Upgrading from dsh-model-fusion
 
@@ -55,7 +62,7 @@ Then quit and reopen DSH Studio (plugins take effect at the next start).
    dsh plugin --profile web remove dsh-model-fusion
    ```
 
-2. Install `dsh-fusion` as above. Do **not** delete the old data directory first: everything in
+2. Install `@sqdr2/dsh-fusion` as above. Do **not** delete the old data directory first: everything in
    `$DSH_HOME/plugins/dsh-model-fusion/` (tasks, usage, settings) is migrated to
    `$DSH_HOME/plugins/dsh-fusion/` on first start.
 3. Restart DSH (quit and reopen the desktop app; restart the Web Host and reload the page).
@@ -75,7 +82,7 @@ Then quit and reopen DSH Studio (plugins take effect at the next start).
 ## Uninstall
 
 ```sh
-dsh plugin --profile web remove dsh-fusion
+dsh plugin --profile web remove @sqdr2/dsh-fusion
 ```
 
 In the desktop app, uninstall from the **Plugins** page in the left sidebar. Fusion's own records stay in

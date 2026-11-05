@@ -17,6 +17,6 @@ const profile = JSON.parse(readFileSync(resolve(host, 'packages/core/agent/packa
 if (!['0.2.0-rc.2', '0.2.1-rc.2'].includes(profile.version)) throw new Error(`Unsupported Host package version ${profile.version}; Fusion builds against 0.2.0-rc.2 and 0.2.1-rc.2`)
 execFileSync(process.execPath, [resolve(root, 'node_modules/typescript/bin/tsc'), '-p', 'tsconfig.build.json'], { cwd: root, stdio: 'inherit' })
 mkdirSync(resolve(root, 'lib'), { recursive: true })
-for (const config of externalClientBundle('dsh-fusion', ['src/dsh-fusion.ts'], { packageRoot: root, clientEntry: 'src/client/index.ts' })) {
+for (const config of externalClientBundle('@sqdr2/dsh-fusion', ['src/dsh-fusion.ts'], { packageRoot: root, clientEntry: 'src/client/index.ts' })) {
   await build({ ...config, config: false, cwd: root })
 }

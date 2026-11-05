@@ -16,10 +16,21 @@ export const FUSION_API_PATH = '/api/fusion'
  */
 export const LEGACY_FUSION_API_PATH = '/api/model-fusion'
 
-/** The package and plugin id this project publishes under. */
+/**
+ * The npm package this project publishes under.
+ *
+ * Distinct from {@link PLUGIN_NAME}: the package name is the registry identity
+ * and the module specifier a profile's patch resolves, while the plugin id is
+ * the runtime identity that names the state directory, the bundle patch row and
+ * the log marker. Keeping them apart is what lets the package move into a scope
+ * without moving anyone's data.
+ */
+export const PACKAGE_NAME = '@sqdr2/dsh-fusion'
+
+/** The plugin id this project registers under, and the name of its state directory. */
 export const PLUGIN_NAME = 'dsh-fusion'
 
-/** The package name this project published under before the rename. */
+/** The plugin id and package name this project used before the rename. */
 export const LEGACY_PLUGIN_NAME = 'dsh-model-fusion'
 
 /** Registered provider route for the Fusion model entry. */
