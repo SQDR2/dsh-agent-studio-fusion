@@ -2,7 +2,16 @@ import { StatusIndex } from './status-index.js';
 import type { ArtifactRef, FusionEvent, OutboxRow, OutboxState, TaskId } from '../contracts.js';
 import type { PersistedTask, TaskState } from './state.js';
 import type { ArtifactRecord, FusionStore } from './store.js';
+import type { DeletionBlocker } from './deletion.js';
 /** Durable Host backend. Every read is fresh; CAS and outbox writes share one transaction. */
+export interface DeletionAuthority {
+    /**
+     * Why this task still owns live work in this process, or `undefined` when it
+     * owns none. Only the Host can answer this: it holds the Agent, tool call,
+     * lease and stop registries. A caller without a Host passes nothing live.
+     */
+    liveReason(taskId: TaskId): DeletionBlocker | undefined;
+}
 export declare class SqliteFusionStore implements FusionStore {
     #private;
     readonly filename: string;
@@ -14,7 +23,16 @@ export declare class SqliteFusionStore implements FusionStore {
     listTaskIds(): readonly TaskId[];
     listDocumentIds(prefix: string): readonly string[];
     load(taskId: TaskId): TaskState | undefined;
-    deleteTask(taskId: string): void;
+    /**
+     * Remove one task record and everything that belongs to it.
+     *
+     * Liveness comes from `authority`, the in-process Host that owns the Agents,
+     * tool calls, leases and stops, plus durable rows a *different living* process
+     * left open. The persisted phase is deliberately not consulted: it describes
+     * where an interrupted process stopped, not whether anything still runs. See
+     * `deletion.ts` for why that distinction decides this bug.
+     */
+    deleteTask(taskId: string, authority: DeletionAuthority): void;
     events(taskId: TaskId): readonly FusionEvent[];
     replay(taskId: TaskId): TaskState;
     create(event: Extract<FusionEvent, {

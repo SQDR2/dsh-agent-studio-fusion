@@ -7,6 +7,7 @@ import { WorkspaceWriteLease } from '../execution/write-lease.js';
 import type { ResolvedProfile } from '../profile/resolve.js';
 import type { SqliteFusionStore } from '../task/sqlite-store.js';
 import type { TaskState } from '../task/state.js';
+import type { DeletionBlocker } from '../task/deletion.js';
 import { BindingRepository } from './bindings.js';
 import type { SessionBinding } from './bindings.js';
 import type { CheckDefinition } from './native-checks.js';
@@ -126,6 +127,16 @@ export declare class FusionCoordinator {
     readonly roleSandbox: NativeRoleSandbox;
     constructor(ctx: Context, store: SqliteFusionStore, options: CoordinatorOptions);
     state(id: TaskId): TaskState;
+    /**
+     * Why a task still owns live work in this Host process, or `undefined` when it
+     * owns none. This answers the deletion question that persisted state cannot:
+     * `control.mode` and `phase` only ever record what a running process last
+     * appended, so a task whose process was replaced keeps `mode: 'running'`
+     * forever. The registries below are the truth about what runs *now*.
+     *
+     * Read-only and side-effect free: it may be called from the delete route.
+     */
+    liveWork(id: TaskId): DeletionBlocker | undefined;
     append<T extends FusionEvent['type']>(id: TaskId, type: T, payload: Extract<FusionEvent, {
         type: T;
     }>['payload']): TaskState;

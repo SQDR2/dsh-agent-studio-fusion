@@ -12,6 +12,17 @@ import { reduce, reduceAll } from './reducer.js'
 import type { PersistedTask, TaskState } from './state.js'
 import { decodeStoreSnapshot, STORE_PROJECTION_VERSION } from './store.js'
 import type { ArtifactRecord, DiskSnapshot, FusionStore } from './store.js'
+import { deletionVerdict, DeletionBlocked, recordedProcessId, unfinishedDocument } from './deletion.js'
+import type { DeletionBlocker } from './deletion.js'
+
+/** Durable families whose open row pins a task to a still-living process. */
+const FOREIGN_WRITER_FAMILIES = ['native-effect', 'native-approval', 'check-invocation'] as const
+
+/** `kill(pid, 0)` probes existence without signalling; EPERM still means the process exists. */
+function processAlive(pid: number): boolean {
+  try { process.kill(pid, 0); return true }
+  catch (error) { return (error as NodeJS.ErrnoException).code === 'EPERM' }
+}
 
 /**
  * Every document family whose id embeds the owning task as its second segment
@@ -31,6 +42,15 @@ const TASK_DOCUMENT_FAMILIES = [
 ] as const
 
 /** Durable Host backend. Every read is fresh; CAS and outbox writes share one transaction. */
+export interface DeletionAuthority {
+  /**
+   * Why this task still owns live work in this process, or `undefined` when it
+   * owns none. Only the Host can answer this: it holds the Agent, tool call,
+   * lease and stop registries. A caller without a Host passes nothing live.
+   */
+  liveReason(taskId: TaskId): DeletionBlocker | undefined
+}
+
 export class SqliteFusionStore implements FusionStore {
   readonly #db: DatabaseSync
   readonly #status: StatusIndex
@@ -106,16 +126,24 @@ export class SqliteFusionStore implements FusionStore {
 
   load(taskId: TaskId): TaskState | undefined { return this.#read(taskId)?.persisted.state }
 
-  deleteTask(taskId: string): void {
+  /**
+   * Remove one task record and everything that belongs to it.
+   *
+   * Liveness comes from `authority`, the in-process Host that owns the Agents,
+   * tool calls, leases and stops, plus durable rows a *different living* process
+   * left open. The persisted phase is deliberately not consulted: it describes
+   * where an interrupted process stopped, not whether anything still runs. See
+   * `deletion.ts` for why that distinction decides this bug.
+   */
+  deleteTask(taskId: string, authority: DeletionAuthority): void {
     this.#transaction(() => {
       const current = this.load(taskId as TaskId)
       if (!current) throw new FusionError(TASK_NOT_FOUND, 'task not found')
-      // A live Worker, lease or unfinished handoff would keep writing into rows this deletes.
-      if (current.control.mode === 'running' || current.control.mode === 'stop-requested'
-        || current.phase === 'WORKER_RUNNING' || current.phase === 'DIRECT'
-        || current.phase === 'PLANNING' || current.phase === 'REVIEWING' || current.phase === 'REWORK') {
-        throw new FusionError(TASK_BUSY, 'Cannot delete a running task')
-      }
+      const verdict = deletionVerdict({
+        live: authority.liveReason(current.taskId),
+        foreign: this.#foreignWriters(current.taskId),
+      })
+      if (!verdict.allowed) throw new DeletionBlocked(verdict.blocker, verdict.detail)
       this.#db.prepare('DELETE FROM artifacts WHERE task_id = ?').run(taskId)
       this.#db.prepare('DELETE FROM tasks WHERE id = ?').run(taskId)
 
@@ -159,6 +187,28 @@ export class SqliteFusionStore implements FusionStore {
         }
       }
     })
+  }
+
+  /**
+   * Durable rows this task left unfinished under a *different* process that is
+   * still alive. A row owned by this process is not evidence: the in-process
+   * authority has already reported whether anything here is live, so such a row
+   * is residue from a call that was interrupted, not a running one.
+   */
+  #foreignWriters(taskId: TaskId): readonly string[] {
+    const found: string[] = []
+    for (const family of FOREIGN_WRITER_FAMILIES) {
+      for (const id of this.listDocumentIds(`${family}:${taskId}:`)) {
+        const value = this.readDocument(id)?.value
+        if (!unfinishedDocument(family, value)) continue
+        const pid = recordedProcessId(value)
+        // No recorded owner, or this process: the in-process authority decided.
+        if (pid === undefined || pid === process.pid) continue
+        if (!processAlive(pid)) continue
+        found.push(`${family} owned by pid ${pid}`)
+      }
+    }
+    return found
   }
 
   events(taskId: TaskId): readonly FusionEvent[] { return this.#require(taskId).persisted.events }

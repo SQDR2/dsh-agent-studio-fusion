@@ -45,6 +45,14 @@ const tokens = (lang: Lang, field: HistoryTotals['input'], calls: number) => !ca
   : `${formatCompact(field.known)} (${field.known.toLocaleString()})${field.reported < calls ? tr(lang, `（${field.reported}/${calls} 次有报告）`, ` (${field.reported}/${calls} reported)`) : ''}`
 const purpose = (lang: Lang, value: string) => ({ conversation: tr(lang, '任务', 'task'), compaction: tr(lang, '压缩', 'compaction'),
   'cache-keepalive': tr(lang, '保活', 'keepalive'), 'session-title': tr(lang, '标题', 'title') } as Record<string, string>)[value] ?? value
+/** What still holds the task, so a refusal says why instead of only that it refused. */
+const blockerText = (lang: Lang, blocker?: string) => ({
+  agent: tr(lang, 'Lead 或 Sidekick 仍在运行', 'its Lead or Sidekick is still running'),
+  tool: tr(lang, '有原生工具调用尚未返回', 'a native tool call has not returned'),
+  job: tr(lang, '有后台任务尚未停止', 'a background job has not stopped'),
+  lease: tr(lang, '仍持有工作区写入租约', 'it still holds the workspace write lease'),
+  'foreign-process': tr(lang, '另一个 Host 进程仍在处理它', 'another Host process is still working on it'),
+} as Record<string, string>)[blocker ?? ''] ?? tr(lang, '仍有活动写入方', 'something is still writing to it')
 
 export function FusionHistory() {
   const lang = useLang()
@@ -88,10 +96,11 @@ export function FusionHistory() {
         credentials: 'same-origin',
       })
       if (!res.ok) {
-        const data = await res.json().catch(() => null) as { error?: string } | null
+        const data = await res.json().catch(() => null) as { error?: string; blocker?: string } | null
         const raw = data?.error || ''
         const msg = raw === 'Cannot delete a running task'
-          ? tr(lang, '当前任务仍在运行或尚未安全终止，无法清除', 'Cannot delete a running task')
+          ? tr(lang, `当前任务仍在运行或尚未安全终止，无法清除：${blockerText(lang, data?.blocker)}`,
+              `Cannot delete while it still runs: ${blockerText(lang, data?.blocker)}`)
           : (raw || tr(lang, '清除任务失败', 'Failed to delete task'))
         throw new Error(msg)
       }

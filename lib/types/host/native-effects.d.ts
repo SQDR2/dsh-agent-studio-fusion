@@ -56,6 +56,13 @@ export declare class NativeEffects {
     backgroundProblem(exec: Readonly<ToolExecution>): string | undefined;
     jobProblem(exec: Readonly<ToolExecution>, taskId: TaskId): string | undefined;
     waitingForJob(agent: Agent): boolean;
+    /**
+     * Whether a tool call this process is running belongs to this task, or a
+     * native job it started there is still unsettled. This is the in-process half
+     * of the deletion guard: a durable row alone cannot tell a live call from the
+     * residue of an interrupted one, because both look like `dispatch-started`.
+     */
+    live(taskId: TaskId): boolean;
     onlyBackgroundPending(taskId: TaskId): boolean;
     stopJobs(taskId: TaskId): Promise<void>;
     pending(taskId: TaskId): readonly {

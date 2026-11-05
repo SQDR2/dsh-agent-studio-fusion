@@ -173,7 +173,7 @@ describe('FusionSettings layout after sidebar integration', () => {
         return {
           ok: false,
           status: 409,
-          json: async () => ({ error: 'Cannot delete a running task' }),
+          json: async () => ({ error: 'Cannot delete a running task', blocker: 'agent' }),
         }
       }
       if (url.includes('view=history')) {
@@ -201,6 +201,7 @@ describe('FusionSettings layout after sidebar integration', () => {
     expect(rowError).toBeDefined()
     expect(rowError.props.role).toBe('alert')
     expect(rowError.children.join('')).toContain('当前任务仍在运行或尚未安全终止，无法清除')
+    expect(rowError.children.join('')).toContain('Lead 或 Sidekick 仍在运行')
 
     // Task is not removed from the list
     expect(root.root.findAllByType('li')).toHaveLength(1)

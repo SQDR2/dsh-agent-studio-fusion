@@ -185,6 +185,17 @@ export class NativeEffects {
 
   waitingForJob(agent: Agent): boolean { return [...this.#waiters.values()].includes(agent) }
 
+  /**
+   * Whether a tool call this process is running belongs to this task, or a
+   * native job it started there is still unsettled. This is the in-process half
+   * of the deletion guard: a durable row alone cannot tell a live call from the
+   * residue of an interrupted one, because both look like `dispatch-started`.
+   */
+  live(taskId: TaskId): boolean {
+    return [...this.#live.values()].includes(taskId)
+      || [...this.#jobs.values()].some(job => job.row.taskId === taskId)
+  }
+
   onlyBackgroundPending(taskId: TaskId): boolean {
     const pending = this.pending(taskId)
     return pending.length > 0 && pending.every(({ id, record }) => record.state === 'dispatch-started'

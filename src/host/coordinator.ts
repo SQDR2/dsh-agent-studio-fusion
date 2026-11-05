@@ -19,6 +19,7 @@ import { assertCurrentSubject } from '../review/ticket.js'
 import { StatusPending } from '../task/status-index.js'
 import type { SqliteFusionStore } from '../task/sqlite-store.js'
 import type { TaskState } from '../task/state.js'
+import type { DeletionBlocker } from '../task/deletion.js'
 import { BindingRepository } from './bindings.js'
 import type { SessionBinding } from './bindings.js'
 import { BASELINE_PARSERS, MAX_CHECK_SECONDS, TEST_PARSERS, checkCommandUnavailable, checkPrograms, freezeChecks, probeMissingPrograms, runBaselineChecks, runNativeChecks } from './native-checks.js'
@@ -511,6 +512,33 @@ export class FusionCoordinator {
     const state = this.store.load(id)
     if (!state) throw new Error('Fusion task is missing; reconcile durable state')
     return state
+  }
+
+  /**
+   * Why a task still owns live work in this Host process, or `undefined` when it
+   * owns none. This answers the deletion question that persisted state cannot:
+   * `control.mode` and `phase` only ever record what a running process last
+   * appended, so a task whose process was replaced keeps `mode: 'running'`
+   * forever. The registries below are the truth about what runs *now*.
+   *
+   * Read-only and side-effect free: it may be called from the delete route.
+   */
+  liveWork(id: TaskId): DeletionBlocker | undefined {
+    if (this.#stoppingTasks.has(id) || this.#backgroundStops.has(id)) return 'job'
+    if (this.#held.get(id)?.taskId === id) return 'lease'
+    if (this.effects.live(id)) return 'tool'
+    const state = this.store.load(id)
+    // A Lead session outlives the task: rollover rebinds it to a successor, so only
+    // `owner()` can say whether its current turn belongs to *this* task. Crediting a
+    // rolled-over Lead would make every earlier record in the session undeletable.
+    const lead = state && this.ctx.agents.get(NativeSessionId(state.parent))
+    if (lead && lead.status !== 'idle' && this.owner(lead)?.binding.taskId === id) return 'agent'
+    // A Worker is created for one task and dies with it, so naming it is enough.
+    // Asking `owner()` here would miss a Worker whose parent already rolled over.
+    const workerId = state?.acceptedChild ?? state?.reservedChild
+    const worker = workerId && this.ctx.agents.get(NativeSessionId(workerId))
+    if (worker && worker.status !== 'idle') return 'agent'
+    return undefined
   }
 
   append<T extends FusionEvent['type']>(id: TaskId, type: T, payload: Extract<FusionEvent, { type: T }>['payload']): TaskState {

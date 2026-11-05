@@ -1,5 +1,6 @@
 import { bi } from './bilingual.js'
 import { FusionError, TASK_BUSY, TASK_NOT_FOUND } from './errors.js'
+import { DeletionBlocked } from './task/deletion.js'
 import { backfillHistory, readHistory } from './host/history.js'
 import { homedir } from 'node:os'
 import { isAbsolute, join } from 'node:path'
@@ -188,13 +189,20 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
         const taskId = url.searchParams.get('taskId')
         if (!taskId) return json(res, 400, { error: bi('缺少任务标识', 'Missing task id') })
         try {
-          store.deleteTask(taskId)
+          // The coordinator is the only authority that can see in-process Agents,
+          // tool calls and leases. It exists whenever this Host has served the plugin;
+          // without one, nothing in this process owns the task.
+          store.deleteTask(taskId, { liveReason: id => runtime?.liveWork(id) })
           return json(res, 200, { ok: true, taskId })
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error)
           // Decide on the stored code, not on message text: a translated message would silently become a 500.
           if (error instanceof FusionError && error.code === TASK_NOT_FOUND) return json(res, 404, { error: message })
-          if (error instanceof FusionError && error.code === TASK_BUSY) return json(res, 409, { error: message })
+          if (error instanceof FusionError && error.code === TASK_BUSY) {
+            const blocker = error instanceof DeletionBlocked ? error.blocker : undefined
+            const detail = error instanceof DeletionBlocked ? error.detail : undefined
+            return json(res, 409, { error: message, ...(blocker ? { blocker } : {}), ...(detail ? { detail } : {}) })
+          }
           return json(res, 500, { error: message })
         }
       }

@@ -196,9 +196,77 @@ describe('history projection', () => {
 })
 
 describe('task deletion', () => {
-  it('refuses to delete a running task', () => {
+  /** No in-process Host owns the task: nothing here is running. */
+  const idle = { liveReason: () => undefined }
+  /** An in-process Host reports live work for the task. */
+  const live = { liveReason: () => 'agent' as const }
+
+  it('refuses to delete a task a live Host is still running', () => {
     const { store } = setup()
-    expect(() => store.deleteTask(TASK)).toThrow('Cannot delete a running task')
+    expect(() => store.deleteTask(TASK, live)).toThrow('Cannot delete a running task')
+    expect(store.load(TASK)).toBeDefined()
+  })
+
+  it('deletes a task whose owning process was replaced, which keeps only the stale phase of its last moment', () => {
+    const { store } = setup()
+    // A Host restart appends recovery/needed and leaves control.mode at 'running':
+    // the event that would have moved it on is appended by a process that is gone.
+    store.append(TASK, 1, [
+      envelope('intent/chosen', 3, { intent: 'DELEGATE' }),
+      envelope('recovery/needed', 4, { reason: 'Host runtime was replaced with a recorded writer' }),
+    ])
+    const state = store.load(TASK)!
+    expect(state.control.mode).toBe('running')
+    expect(state.phase).toBe('RECOVERING')
+    // The interrupted call journal describes work that a dead pid abandoned.
+    store.writeDocument(`native-effect:${TASK}:e1`, 0, { schemaVersion: 1, taskId: TASK, agentId: 'a',
+      role: 'worker', callId: 'c1', rootCallId: 'r1', toolName: 'bash', processId: 2147483646,
+      startedAt: '2026-11-04T00:00:00.000Z', state: 'dispatch-started', arguments: { digest: 'd' } })
+
+    store.deleteTask(TASK, idle)
+
+    expect(store.load(TASK)).toBeUndefined()
+    expect(store.readDocument(`native-effect:${TASK}:e1`)).toBeUndefined()
+  })
+
+  it('deletes a record whose task never started, where the only events are creation and the frozen profile', () => {
+    const { store } = setup()
+    expect(store.load(TASK)).toMatchObject({ control: { mode: 'running' }, phase: 'PLANNING' })
+    store.deleteTask(TASK, idle)
+    expect(store.load(TASK)).toBeUndefined()
+    expect(store.readDocument(`binding:${PARENT}`)?.value).toMatchObject({ selected: false })
+  })
+
+  it('still refuses a task a different, living process left an unfinished tool call on', () => {
+    const { store } = setup()
+    store.append(TASK, 1, [envelope('recovery/needed', 3, { reason: 'Host runtime was replaced' })])
+    // The parent process is alive and is not this one, which models a second Host.
+    store.writeDocument(`native-effect:${TASK}:e1`, 0, { schemaVersion: 1, taskId: TASK, agentId: 'a',
+      role: 'worker', callId: 'c1', rootCallId: 'r1', toolName: 'bash', processId: process.ppid,
+      startedAt: '2026-11-04T00:00:00.000Z', state: 'dispatch-started', arguments: { digest: 'd' } })
+
+    expect(() => store.deleteTask(TASK, idle)).toThrow(expect.objectContaining({ code: TASK_BUSY }))
+    expect(store.load(TASK)).toBeDefined()
+
+    // The same row, once settled, no longer pins the record.
+    store.writeDocument(`native-effect:${TASK}:e1`, 1, { schemaVersion: 1, taskId: TASK, agentId: 'a',
+      role: 'worker', callId: 'c1', rootCallId: 'r1', toolName: 'bash', processId: process.ppid,
+      startedAt: '2026-11-04T00:00:00.000Z', endedAt: '2026-11-04T00:00:05.000Z', state: 'returned',
+      arguments: { digest: 'd' } })
+    store.deleteTask(TASK, idle)
+    expect(store.load(TASK)).toBeUndefined()
+  })
+
+  it('does not treat an unfinished row from this process as a live writer', () => {
+    const { store } = setup()
+    store.append(TASK, 1, [envelope('recovery/needed', 3, { reason: 'Host runtime was replaced' })])
+    // Written by this process and then interrupted: the live Host authority has
+    // already answered that nothing here runs, so the row is residue.
+    store.writeDocument(`native-effect:${TASK}:e1`, 0, { schemaVersion: 1, taskId: TASK, agentId: 'a',
+      role: 'worker', callId: 'c1', rootCallId: 'r1', toolName: 'bash', processId: process.pid,
+      startedAt: '2026-11-04T00:00:00.000Z', state: 'dispatch-started', arguments: { digest: 'd' } })
+    store.deleteTask(TASK, idle)
+    expect(store.load(TASK)).toBeUndefined()
   })
 
   it('safely deletes a completed task and all its associated documents, artifacts, and indexes atomically', () => {
@@ -220,7 +288,7 @@ describe('task deletion', () => {
     expect(history.takeovers.total).toBe(1)
     expect(bindings.read(PARENT)?.binding.selected).toBe(true)
 
-    store.deleteTask(TASK)
+    store.deleteTask(TASK, idle)
 
     expect(store.load(TASK)).toBeUndefined()
     expect(store.listTaskIds()).not.toContain(TASK)
@@ -258,7 +326,7 @@ describe('task deletion', () => {
       ticket: { id: 't1', subject: { taskId: TASK, workOrderId: 'wo-1', revision: 1, reportId: 'r', reportDigest: 'd', snapshot: SNAP } } })
     store.writeDocument(`model-control:${PARENT}`, 0, { schemaVersion: 1, sessionId: PARENT, epoch: 0, routes: {}, waits: {} })
 
-    store.deleteTask(TASK)
+    store.deleteTask(TASK, idle)
 
     expect(store.readDocument(`workflow-progress:${TASK}:worker-1`)).toBeUndefined()
     expect(store.readDocument(`workflow-stop:${TASK}:worker-1:m`)).toBeUndefined()
@@ -272,11 +340,11 @@ describe('task deletion', () => {
   it('reports a missing task and a live task as distinct codes, not by message text', () => {
     const { store } = setup()
     // The HTTP layer maps these codes to 404 and 409; a translated message must not decide the status.
-    expect(() => store.deleteTask('non-existent-task')).toThrow(expect.objectContaining({ code: TASK_NOT_FOUND }))
-    expect(() => store.deleteTask(TASK)).toThrow(expect.objectContaining({ code: TASK_BUSY }))
+    expect(() => store.deleteTask('non-existent-task', idle)).toThrow(expect.objectContaining({ code: TASK_NOT_FOUND }))
+    expect(() => store.deleteTask(TASK, live)).toThrow(expect.objectContaining({ code: TASK_BUSY }))
   })
 
-  it('preserves deletion protection for tasks in uncompleted running phases', () => {
+  it('decides on live work rather than on the phase a task stopped in', () => {
     const { store } = setup()
     const currentOrder = order()
     store.append(TASK, 1, [
@@ -285,7 +353,12 @@ describe('task deletion', () => {
       envelope('child/accepted', 5, { operationId: currentOrder.operationId, child: CHILD, messageId: 'm1' }),
     ])
     expect(store.load(TASK)?.phase).toBe('WORKER_RUNNING')
-    expect(() => store.deleteTask(TASK)).toThrow(expect.objectContaining({ code: TASK_BUSY }))
+    // A Worker mid-dispatch is exactly what must not be stranded: refuse while it lives.
+    expect(() => store.deleteTask(TASK, live)).toThrow(expect.objectContaining({ code: TASK_BUSY }))
+    // The Worker Agent is gone (Host replaced, session disposed): the phase is a
+    // leftover of its last moment, and the record is a historical one.
+    store.deleteTask(TASK, idle)
+    expect(store.load(TASK)).toBeUndefined()
   })
 
   it('does not accidentally delete another task or similar task id', () => {
@@ -321,7 +394,7 @@ describe('task deletion', () => {
     store.writeDocument('child:child-a', 0, { parent: PARENT, taskId: TASK_A })
     store.writeDocument('child:child-b', 0, { parent: PARENT_B, taskId: TASK_B })
 
-    store.deleteTask(TASK_A)
+    store.deleteTask(TASK_A, idle)
 
     expect(store.load(TASK_A)).toBeUndefined()
     expect(store.listTaskIds()).not.toContain(TASK_A)
