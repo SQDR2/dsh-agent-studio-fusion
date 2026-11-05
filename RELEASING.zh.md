@@ -45,6 +45,10 @@ OIDC 发布是按包授权的，配置在包自己的设置页上，而一个从
    | Workflow | `publish.yml` |
    | Permission | allow npm publish |
 
+   **账号自己得先有 2FA。** 包页面上只会写一句 “2FA has been enabled for this package. It is recommended that you
+   configure 2FA for your npm account”，而提交表单会跳到 `/settings/<user>/tfa` 要求录入安全密钥或认证器。
+   动手之前先把账号级 2FA 配好，否则表单会静默变成 2FA 注册页，什么都不会创建。
+
 3. 在 **2 天内**发一个版本。新的信任配置只有首次成功发布才算验证通过；未验证的会过期，
    之后不能编辑，只能删掉重建。
 

@@ -51,6 +51,11 @@ published does not have. So the very first release of a name can only be done by
    | Workflow | `publish.yml` |
    | Permission | allow npm publish |
 
+   The account needs 2FA of its own first. The package page only says "2FA has been enabled for this package. It is
+   recommended that you configure 2FA for your npm account", and submitting the form bounces to
+   `/settings/<user>/tfa` asking for a security key or authenticator. Configure account-level 2FA before starting, or
+   the form silently turns into a 2FA enrolment page and nothing is created.
+
 3. Publish a version within **2 days**. A new trust configuration is only validated by a first successful publish;
    unvalidated ones expire and cannot be edited afterwards, only deleted and recreated.
 
