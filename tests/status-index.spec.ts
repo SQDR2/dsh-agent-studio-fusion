@@ -32,6 +32,13 @@ function put(db: DatabaseSync, id: string, value: unknown, revision = 1) {
   db.prepare('INSERT INTO documents VALUES (?,?,?,?) ON CONFLICT(id) DO UPDATE SET json=excluded.json,checksum=excluded.checksum,revision=excluded.revision')
     .run(id, revision, json, sha256Hex(Buffer.from(json)))
 }
+// Bulk writers go in one transaction. Row-at-a-time autocommit costs a commit per row, which pushed this test past the
+// 5s default timeout on a CI runner while the same 600 rows finish in a quarter second locally. What the test asserts
+// is what a reader sees, not how many commits produced it.
+function putBulk(db: DatabaseSync, write: () => void) {
+  db.exec('BEGIN')
+  try { write(); db.exec('COMMIT') } catch (err) { db.exec('ROLLBACK'); throw err }
+}
 
 describe('incremental status read model', () => {
   it('replaces snapshots/finals without double counting, keeps unknown counts, and rejects stale writers atomically', () => {
@@ -59,11 +66,11 @@ describe('incremental status read model', () => {
     store.statusSnapshot(index => index.rebuild()); expect(read(store).usage.input.knownTokens).toBe(9)
   })
 
-  it('upgrades an old database with bounded dirty batches and rebuilds missing derived tables', () => {
+  it('upgrades an old database with bounded dirty batches and rebuilds missing derived tables', { timeout: 60_000 }, () => {
     const dir = mkdtempSync(join(tmpdir(), 'fusion-legacy-')); clean.push(() => rmSync(dir, { recursive: true, force: true }))
     const file = join(dir, 'legacy.sqlite'), db = raw(file)
     db.exec('CREATE TABLE documents (id TEXT PRIMARY KEY,revision INTEGER NOT NULL,json TEXT NOT NULL,checksum TEXT NOT NULL); PRAGMA user_version=1;')
-    for (let i = 0; i < 600; i++) put(db, `usage:t:${i}`, row(String(i), 2))
+    putBulk(db, () => { for (let i = 0; i < 600; i++) put(db, `usage:t:${i}`, row(String(i), 2)) })
     const store = open(file)
     expect(store.statusSnapshot(index => index.flushBatch('t'))).toBe(true)
     expect(db.prepare('SELECT count(*) n FROM fusion_status_dirty_v1').get()?.n).toBe(344)
@@ -79,9 +86,9 @@ describe('incremental status read model', () => {
     expect(db.prepare('PRAGMA user_version').get()?.user_version).toBe(1)
   })
 
-  it('yields during backfill, safely cancels, and resumes from committed progress in another store', async () => {
+  it('yields during backfill, safely cancels, and resumes from committed progress in another store', { timeout: 60_000 }, async () => {
     const store = open(), db = raw(store.filename)
-    for (let i = 0; i < 600; i++) put(db, `usage:t:${i}`, row(String(i), 2))
+    putBulk(db, () => { for (let i = 0; i < 600; i++) put(db, `usage:t:${i}`, row(String(i), 2)) })
     const abort = new AbortController()
     setImmediate(() => abort.abort())
     await expect(store.statusSnapshotAsync(index => index.read('t'), abort.signal)).rejects.toThrow()
