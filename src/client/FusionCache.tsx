@@ -89,6 +89,7 @@ export function FusionCache({ refresh }: { refresh: number }) {
   const lang = useLang()
   const [rows, setRows] = useState<CacheModel[]>(), [checked, setChecked] = useState<string>(), [error, setError] = useState<string>()
   const [reload, setReload] = useState(0)
+  const [open, setOpen] = useState(false)
   useEffect(() => {
     const abort = new AbortController()
     void fetch('/api/model-fusion?view=cache', { credentials: 'same-origin', cache: 'no-store', signal: abort.signal })
@@ -97,12 +98,32 @@ export function FusionCache({ refresh }: { refresh: number }) {
       .catch(reason => { if (!abort.signal.aborted) setError(String(reason)) })
     return () => abort.abort()
   }, [refresh, reload, lang])
-  return <section className="fusion-cache" aria-label={tr(lang, '缓存保活', 'Cache keepalive')}>
-    <h3>{tr(lang, '缓存保活', 'Cache keepalive')}</h3>
-    <p>{tr(lang, 'Lead 等 Sidekick 干活时可能要等几分钟，模型的输入缓存过期后，下一次请求会按全价重读整段对话。保活在等待期间定时把 Lead 上一次的请求原样再发一遍，末尾只加一句“Reply OK”，模型只回一个 OK，缓存就不会过期。默认值来自各家官方文档，每个模型都可以单独调整。',
-      'While the Lead waits for the Sidekick, the model\'s prompt cache can expire and the next request re-reads the whole conversation at full price. Keepalive resends the Lead\'s previous request at intervals with only “Reply OK” appended; the model answers OK and the cache stays warm. Defaults come from each provider\'s documentation; every model can be adjusted.')}</p>
-    {checked && <p><small>{tr(lang, `官方默认值核对日期：${checked}。`, `Documented defaults checked on ${checked}.`)}</small></p>}
-    {error && <p role="alert">{error}</p>}
-    {rows?.map(row => <ModelCard key={`${row.provider}/${row.model}/${row.setting.mode ?? ''}/${row.setting.intervalSeconds ?? ''}`} row={row} onSaved={() => setReload(value => value + 1)} />)}
-  </section>
+  return <details
+    className="fusion-cache"
+    aria-label={tr(lang, '缓存保活', 'Cache keepalive')}
+    data-ud-check="fusion-cache"
+    {...(open ? { open: true } : {})}
+    onToggle={event => {
+      if (!event.target || event.target === event.currentTarget) {
+        setOpen(event.currentTarget.open)
+      }
+    }}
+  >
+    <summary className="fusion-cache-summary">
+      <span className="fusion-cache-title">
+        <h3>{tr(lang, '缓存保活', 'Cache keepalive')}</h3>
+      </span>
+      <span className="fusion-cache-indicator">
+        <small>{open ? tr(lang, '点击收起', 'Collapse') : tr(lang, '点击展开', 'Expand')}</small>
+        <span className="fusion-cache-chevron" aria-hidden="true" />
+      </span>
+    </summary>
+    <div className="fusion-cache-content">
+      <p>{tr(lang, 'Lead 等 Sidekick 干活时可能要等几分钟，模型的输入缓存过期后，下一次请求会按全价重读整段对话。保活在等待期间定时把 Lead 上一次的请求原样再发一遍，末尾只加一句“Reply OK”，模型只回一个 OK，缓存就不会过期。默认值来自各家官方文档，每个模型都可以单独调整。',
+        'While the Lead waits for the Sidekick, the model\'s prompt cache can expire and the next request re-reads the whole conversation at full price. Keepalive resends the Lead\'s previous request at intervals with only “Reply OK” appended; the model answers OK and the cache stays warm. Defaults come from each provider\'s documentation; every model can be adjusted.')}</p>
+      {checked && <p><small>{tr(lang, `官方默认值核对日期：${checked}。`, `Documented defaults checked on ${checked}.`)}</small></p>}
+      {error && <p role="alert">{error}</p>}
+      {rows?.map(row => <ModelCard key={`${row.provider}/${row.model}/${row.setting.mode ?? ''}/${row.setting.intervalSeconds ?? ''}`} row={row} onSaved={() => setReload(value => value + 1)} />)}
+    </div>
+  </details>
 }

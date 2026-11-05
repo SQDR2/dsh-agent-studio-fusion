@@ -71,6 +71,75 @@ describe('FusionSettings layout after sidebar integration', () => {
     expect(css).toMatch(/\.fusion-history-panel\{[^}]*border-radius:\s*8px/)
     expect(css).toMatch(/\.fusion-history-tasks-summary\{[^}]*display:\s*flex/)
     expect(css).toMatch(/\.fusion-history-tasks-chevron\{/)
+
+    // Cache keepalive and history outer collapsible boxes with <= 8px radius and no top rule
+    expect(css).toMatch(/\.fusion-cache\{[^}]*border:\s*1px solid var\(--dsw-alias-border-l2\)/)
+    expect(css).toMatch(/\.fusion-cache\{[^}]*border-radius:\s*8px/)
+    expect(css).toMatch(/\.fusion-cache-summary\{[^}]*display:\s*flex/)
+    expect(css).toMatch(/\.fusion-cache-chevron\{/)
+    expect(css).toMatch(/\.fusion-history\{[^}]*border:\s*1px solid var\(--dsw-alias-border-l2\)/)
+    expect(css).toMatch(/\.fusion-history\{[^}]*border-radius:\s*8px/)
+    expect(css).toMatch(/\.fusion-history-summary\{[^}]*display:\s*flex/)
+    expect(css).toMatch(/\.fusion-history-chevron\{/)
+    expect(css).not.toMatch(/\.fusion-cache\{[^}]*border-top:/)
+    expect(css).not.toMatch(/\.fusion-history\{[^}]*border-top:/)
+  })
+
+  it('renders cache keepalive and history/statistics as two independent bordered collapsible boxes, both collapsed by default and expandable', async () => {
+    pinLanguage('zh-CN')
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      if (url.includes('view=cache')) {
+        return { ok: true, json: async () => ({ checked: '2026-11-01', models: [] }) }
+      }
+      if (url.includes('view=history')) {
+        return { ok: true, json: async () => ({ totalTasks: 0, totals: { calls: 0, final: 0, provisional: 0, unreported: 0, input: { known: 0, reported: 0 }, output: { known: 0, reported: 0 }, reasoning: { known: 0, reported: 0 }, totalOutput: { known: 0, reported: 0 }, cacheRead: { known: 0, reported: 0 } }, tasks: [], groups: [] }) }
+      }
+      return { ok: true, json: async () => ({ revision: 1, catalog: { groups: [] }, pair: null, authorized: true }) }
+    }))
+
+    let root!: ReactTestRenderer
+    await act(async () => { root = create(React.createElement(FusionSettings)) })
+    roots.push(root)
+
+    const cacheBox = root.root.findByProps({ className: 'fusion-cache' })
+    const historyBox = root.root.findByProps({ className: 'fusion-history' })
+
+    // Both are distinct bordered collapsible containers
+    expect(cacheBox).toBeDefined()
+    expect(historyBox).toBeDefined()
+    expect(cacheBox.type).toBe('details')
+    expect(historyBox.type).toBe('details')
+
+    // Both collapsed by default (no open attribute)
+    expect(cacheBox.props.open).toBeUndefined()
+    expect(historyBox.props.open).toBeUndefined()
+
+    // Cache summary title and indicator
+    const cacheSummary = cacheBox.findByProps({ className: 'fusion-cache-summary' })
+    expect(cacheSummary.findByType('h3').children).toContain('缓存保活')
+    expect(cacheSummary.findByType('small').children).toContain('点击展开')
+    expect(cacheSummary.findByProps({ className: 'fusion-cache-chevron' })).toBeDefined()
+
+    // History summary title and indicator
+    const historySummary = historyBox.findByProps({ className: 'fusion-history-summary' })
+    expect(historySummary.findByType('h3').children).toContain('历史与统计')
+    expect(historySummary.findByType('small').children).toContain('点击展开')
+    expect(historySummary.findByProps({ className: 'fusion-history-chevron' })).toBeDefined()
+
+    // Expanding cache keeps history collapsed (independent)
+    await act(async () => {
+      cacheBox.props.onToggle({ currentTarget: { open: true } })
+    })
+    expect(cacheBox.props.open).toBe(true)
+    expect(historyBox.props.open).toBeUndefined()
+    expect(cacheSummary.findByType('small').children).toContain('点击收起')
+
+    // Expanding history
+    await act(async () => {
+      historyBox.props.onToggle({ currentTarget: { open: true } })
+    })
+    expect(historyBox.props.open).toBe(true)
+    expect(historySummary.findByType('small').children).toContain('点击收起')
   })
 
   it('renders usage statistics and tasks as two distinct bordered panels with tasks collapsed by default and accessible after expanding', async () => {
@@ -138,7 +207,22 @@ describe('FusionSettings layout after sidebar integration', () => {
     await act(async () => { root = create(React.createElement(FusionHistory)) })
     roots.push(root)
 
-    // Two distinct bordered containers
+    // Outer FusionHistory container is a bordered collapsible details, collapsed by default
+    const historyOuter = root.root.findByProps({ className: 'fusion-history' })
+    expect(historyOuter.type).toBe('details')
+    expect(historyOuter.props.open).toBeUndefined()
+    const historySummary = historyOuter.findByProps({ className: 'fusion-history-summary' })
+    expect(historySummary.findByType('h3').children).toContain('历史与统计')
+    expect(historySummary.findByType('small').children).toContain('点击展开')
+
+    // Expanding outer history details
+    await act(async () => {
+      historyOuter.props.onToggle({ currentTarget: { open: true } })
+    })
+    expect(historyOuter.props.open).toBe(true)
+    expect(historySummary.findByType('small').children).toContain('点击收起')
+
+    // Two distinct bordered containers inside
     const usagePanel = root.root.findByProps({ className: 'fusion-history-panel fusion-history-usage' })
     expect(usagePanel).toBeDefined()
     expect(usagePanel.findByType('h3').children).toContain('用量统计')

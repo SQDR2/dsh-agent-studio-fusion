@@ -64,6 +64,7 @@ export function FusionHistory() {
   const [confirmingId, setConfirmingId] = useState<string | null>(null)
   const [deletingId, setDeletingId] = useState<string | null>(null)
   const [rowError, setRowError] = useState<{ id: string; message: string } | null>(null)
+  const [open, setOpen] = useState(false)
   const [tasksOpen, setTasksOpen] = useState(false)
 
   useEffect(() => {
@@ -121,15 +122,32 @@ export function FusionHistory() {
     }
   }
 
-  return <section className="fusion-history" aria-label={tr(lang, 'Fusion 历史与统计', 'Fusion history and statistics')} data-ud-check="fusion-history">
-    <div className="fusion-history-header">
-      <div>
-        <h2>{tr(lang, '历史与统计', 'History and statistics')}</h2>
+  return <details
+    className="fusion-history"
+    aria-label={tr(lang, 'Fusion 历史与统计', 'Fusion history and statistics')}
+    data-ud-check="fusion-history"
+    {...(open ? { open: true } : {})}
+    onToggle={event => {
+      if (!event.target || event.target === event.currentTarget) {
+        setOpen(event.currentTarget.open)
+      }
+    }}
+  >
+    <summary className="fusion-history-summary">
+      <span className="fusion-history-title">
+        <h3>{tr(lang, '历史与统计', 'History and statistics')}</h3>
+      </span>
+      <span className="fusion-history-indicator">
+        <small>{open ? tr(lang, '点击收起', 'Collapse') : tr(lang, '点击展开', 'Expand')}</small>
+        <span className="fusion-history-chevron" aria-hidden="true" />
+      </span>
+    </summary>
+    <div className="fusion-history-content">
+      <div className="fusion-history-header">
         <p>{tr(lang, '按实际模型请求汇总，包含任务、压缩、保活及已有标题请求。未报告的用量不算作 0；金额与节省率尚无可靠数据。',
           'Totals of actual model requests: tasks, compaction, keepalive and title requests. Unreported usage is not counted as 0; no reliable billed amount or saving rate is available.')}</p>
+        <button disabled={loading} onClick={() => setRefresh(value => value + 1)}>{tr(lang, '刷新记录', 'Refresh')}</button>
       </div>
-      <button disabled={loading} onClick={() => setRefresh(value => value + 1)}>{tr(lang, '刷新记录', 'Refresh')}</button>
-    </div>
     {error && <p role="alert">{error}</p>}{loading && !page && <p role="status">{tr(lang, '正在读取记录…', 'Loading…')}</p>}
     {page && <>
       <div className="fusion-history-panel fusion-history-usage" aria-label={tr(lang, '用量统计', 'Usage statistics')}>
@@ -223,5 +241,6 @@ export function FusionHistory() {
         </div>
       </details>
     </>}
-  </section>
+    </div>
+  </details>
 }
