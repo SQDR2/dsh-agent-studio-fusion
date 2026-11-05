@@ -84,12 +84,13 @@ git add -A && git commit -m "chore(release): 0.3.1"
 git tag v0.3.1 && git push origin main v0.3.1
 ```
 
-[`CHANGELOG.md`](CHANGELOG.md) is the only place release notes live. Do not add a `RELEASE-*.md` per version: a
-directory of near-identical files that nothing links to stops being readable within a few releases, and the notes belong
-under one version heading each.
-
 The workflow then runs `pnpm install`, `pnpm build`, `pnpm test` and, on a tag, `npm publish --access public`.
 A published version also gets a provenance attestation, so `npm view` can point at the commit it was built from.
+
+[`CHANGELOG.md`](CHANGELOG.md) is the only place release notes live. Do not add a `RELEASE-*.md` per version: a
+directory of near-identical files that nothing links to stops being readable within a few releases, and the notes belong
+under one version heading each. It lists only versions published as `@sqdr2/dsh-fusion`; upstream `dsh-model-fusion`
+history stays in the upstream repository.
 
 ### Two things the build is pinned to
 

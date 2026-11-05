@@ -2,9 +2,15 @@
 
 Release notes for `@sqdr2/dsh-fusion`. Newest first.
 
-0.3.0 is the first release of this fork. Everything below it is upstream
-[`aa2246740/dsh-model-fusion`](https://github.com/aa2246740/dsh-model-fusion), kept here because the upstream repository
-is the only other place those notes exist.
+## Origin
+
+This package is a fork of [`aa2246740/dsh-model-fusion`](https://github.com/aa2246740/dsh-model-fusion). 0.3.0 is the
+first release published under this name, and it branches from upstream 0.2.9. Upstream 0.2.10 and 0.2.11 landed after
+that point and are **not** included here.
+
+Earlier versions — `dsh-model-fusion` 0.2.0 through 0.2.11, and the pre-0.3.0 tags in this repository's history — were
+not published as `@sqdr2/dsh-fusion`, so they are not listed here. Their notes live in the upstream repository, under its
+own tags and releases.
 
 Entry format: what changed, then what was actually validated. "Not claimed" lines mark what a release did *not* test —
 read them before assuming a platform is covered.
@@ -31,8 +37,8 @@ token, and the result carries a provenance attestation naming the commit it was 
 
 ## 0.3.0 — 2026-11-05
 
-First release under the name `@sqdr2/dsh-fusion`, forked from `dsh-model-fusion` at 0.2.9. Everything upstream does is
-still here; the changes below are the fork's.
+First release under the name `@sqdr2/dsh-fusion`, branching from upstream `dsh-model-fusion` 0.2.9. Everything 0.2.9
+does is still here; the changes below are the fork's.
 
 The package was renamed, so install `@sqdr2/dsh-fusion` once — an installed `dsh-model-fusion` is not upgraded in place.
 The plugin id stays `dsh-fusion`, so the rename moves code only, not data.
@@ -82,127 +88,3 @@ the plugin is not installed or activated in a running Host by this preparation.
 
 Install with `dsh plugin --profile web add @sqdr2/dsh-fusion`, or `github:SQDR2/dsh-fusion` from the repository, which
 ships the built `lib/`. See [INSTALL.md](INSTALL.md) / [INSTALL.zh.md](INSTALL.zh.md).
-
-## 0.2.11 — 2026-11-03
-
-Supports DeepSeek Harness 0.2.1-rc.5.
-
-- Turns whose command is mixed with prose stay open on 0.2.1 instead of closing early, and explanation-only questions
-  that merely mention "patch" or "implement" complete as answers.
-- A filtered scope is rejected as empty instead of being reported as satisfied, and planning-only work can no longer be
-  claimed as completion.
-- Fusion tools are installed before `refreshTools`, so they are present on the first turn (#20).
-- Exploration may complete on an empty scope when the Host verifies there were zero files (#19).
-- Cache keepalive detects a route change and refuses a stale ping (#22).
-
-## 0.2.10 — 2026-11-03
-
-Widened the supported Host range to DeepSeek Harness 0.2.1-rc.5 (peers moved to `>=0.2.0-rc.2 <0.2.2`), with the Host
-linking scripts, `scripts/build.mjs` and `tsconfig.json` adjusted for it. The rest of the release is CI work: the OIDC
-publish workflow was repaired and the build made to accept TypeScript 5.9 narrowing.
-
-## 0.2.9 — 2026-10-30
-
-Fusion now supports DeepSeek Harness 0.2.0-rc.2 and 0.2.1-rc.2 in one package.
-
-- Model menus use the Host's theme colors, so their labels remain readable in dark mode.
-- Fusion accepts the input modalities supported by the configured Lead, including images when that Lead supports them.
-- Missing or null usage counters remain unknown instead of aborting the turn with `USAGE_MERGE_CONFLICT`.
-- Fusion restores its permitted tools after another plugin replaces the assembled tool table. A missing required Fusion
-  tool stops the request with `FUSION_TOOL_TABLE_INCOMPLETE`.
-- Workspace write leases apply only to agents owned by Fusion. Ordinary sessions in the same folder are no longer blocked
-  by another Fusion task's lease.
-- Read-only reports validate the files they cite. Unrelated file changes or unsupported file types no longer prevent an
-  otherwise valid answer from finishing.
-- A settled Sidekick without a report returns `WORKFLOW_INCOMPLETE`. Recovery controls explain when a model switch is
-  refused, and the user's sandbox mode propagates to a resident Sidekick.
-- The Sidekick's tool allowlist is enforced when a tool executes, including tools another plugin registers directly on
-  the Sidekick.
-
-Includes PRs #16, #17 and #18, incorporating contributions from PRs #2, #7 and #14.
-
-**Validation:** type checking, all 326 unit tests, a fresh build and the DSHX static plugin checks pass; the rebuilt
-`lib/` matches the merged candidate byte for byte. The merged candidate previously passed 256 native Host tests on each
-supported Host version, with one Windows-specific test skipped on macOS. No new model calls were made for this release
-preparation.
-
-**Open reports at the time:** [#15](https://github.com/aa2246740/dsh-model-fusion/issues/15) incorrect quota display,
-[#19](https://github.com/aa2246740/dsh-model-fusion/issues/19) empty-folder investigation blocked awaiting feedback,
-[#20](https://github.com/aa2246740/dsh-model-fusion/issues/20) missing Fusion tools on the first turn,
-[#21](https://github.com/aa2246740/dsh-model-fusion/issues/21) keepalive after a model or effort change.
-
-## 0.2.8 — 2026-10-14
-
-Large usage histories no longer require a full document scan for every status request. An incremental SQLite index
-preserves the existing status totals, supports cancellable asynchronous backfill, and resumes unfinished backfill on a
-later request. Status components for the same session share polling within a page, back off while collapsed, and pause
-while hidden or unmounted.
-
-Fusion also supplies its frozen session routes to Compact Saviour through the optional `compactionRoutes` v1 service.
-With Compact Saviour 0.2.8, capacity planning and summary generation use the same physical model, effort and output
-limit. Model changes, cancellation and owner unload invalidate an old plan before it can commit a summary.
-
-**Validation:** 287 unit tests, 241 native Host tests and 10 cross-plugin Host tests pass on macOS; one Windows-specific
-test skipped. Type checking, build, DSHX checks and archive validation passed. The original reporter's ~4 GB OOM and
-full abnormal compaction chain were **not** reproduced — this release addresses the confirmed status-scan bottleneck and
-the compaction routing mismatch, and does not claim every symptom of issue #11 is resolved.
-
-## 0.2.7 — 2026-10-07
-
-Supports DeepSeek Harness **0.2.0-rc.2**. Sidekick workspace paths, baseline-ready test parsers and command program
-probes:
-
-- The leased project root and every Sidekick path are matched by filesystem identity, not string spelling: macOS
-  `/tmp/x` for `/private/tmp/x`, symlinked checkouts, and directories *below* the project root are accepted; paths
-  outside the root stay refused. Relative `workdir` resolves inside the workspace, and absolute `file_path` values for
-  write/edit normalize to workspace-relative before the lease checks them.
-- `baseline: "no-new-failures"` now works with unittest, vitest, jest, tap, go (verbose) and cargo besides pytest. A
-  baseline is still rejected whenever the output cannot name every failure its summary counts: a failure without a name,
-  or two under one name, would let a candidate trade a frozen failure for a new one. Mocha stays unsupported (its default
-  report cannot name failures); the error names the concrete fix. pytest 9 `SUBFAILED` subtests count and list
-  correctly.
-- Command program probes no longer look up a quoted word in command position: `"$PY" -m unittest`, `FOO="a b" pytest`.
-  Quoted text is replaced by NUL, which no program name contains; assignments, wrappers, heredocs and PATH-overriding
-  commands behave as before.
-
-**Validation:** 265 unit tests and 239 Host tests pass, 1 Windows-only test skipped. A real-model acceptance ran a
-unittest baseline freeze, a `/tmp`-alias and relative-subdirectory workdir, and an absolute-path edit. No new Windows or
-Linux runtime acceptance claimed.
-
-## 0.2.6 — 2026-10-01
-
-Supports DeepSeek Harness **0.2.0-rc.2**. Cheaper cache keepalive, measured on the ChatGPT subscription route
-(gpt-6-astra, about 20k tokens of context):
-
-- Each ping now resends the Lead's previous request with "Reply OK" appended instead of "continue". The model answers
-  with 5 output tokens, no reasoning and no tool call (16 of 16 trials). With "continue" it called tools every time; the
-  median ping produced 463 output tokens.
-- The cache was still there after 10 idle minutes and gone after 15, and every ping restarts that clock. The ChatGPT
-  subscription route therefore defaults to one ping every 8 minutes (was 285 seconds).
-- The interval is shortened only when 3 of the last 5 pings at that interval missed. Before, two scattered random
-  evictions were enough. Intervals learned under the old rule are ignored.
-- The settings page shows the output tokens spent on pings.
-
-Replayed over the real waits in the session logs, pings dropped from 126 to 57 and keepalive cost fell by about 78%.
-Validation was on macOS arm64 with DSH 0.2.0-rc.2; no new Windows or Linux runtime acceptance claimed.
-
-## 0.2.5 — 2026-09-30
-
-Enable public npm publication and provide pinned npm installation commands for official DSH 0.2.0-rc.2. Runtime code is
-unchanged from the preceding GitHub release.
-
-## 0.2.4 — 2026-09-30
-
-Supports DeepSeek Harness **0.2.0-rc.2**.
-
-Fix the installation instructions that still selected the older DSH 0.1.7-compatible plugin tag. An
-installation-documentation correction: runtime bundles are unchanged from the previous RC2-compatible release, and DSH
-peers remain `>=0.2.0-rc.1 <0.2.1`.
-
-## 0.2.3 — 2026-09-29
-
-DeepSeek Harness compatibility: built and tested against DSH `0.2.0-rc.2`
-(`639ed015397290b3745d163aafe02ffee4aa3f84`). Updated the development SDK and compatibility checks for RC2; existing
-RC1-compatible public plugin interfaces remain supported by the declared peer range.
-
-Validation was performed on macOS arm64. This release does not claim new Windows or Linux runtime acceptance.

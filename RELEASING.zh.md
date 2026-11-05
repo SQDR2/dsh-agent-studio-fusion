@@ -76,11 +76,12 @@ git add -A && git commit -m "chore(release): 0.3.1"
 git tag v0.3.1 && git push origin main v0.3.1
 ```
 
-发布说明只有 [`CHANGELOG.md`](CHANGELOG.md) 一处。不要再每个版本加一个 `RELEASE-*.md`：
-一堆无人引用、名字几乎相同的文件，几个版本之后就没法读了；同一个版本的内容应该按版本标题归在这一个文件里。
-
 workflow 随后依次执行 `pnpm install`、`pnpm build`、`pnpm test`，在 tag 上再执行 `npm publish --access public`。
 发布出来的版本还带 provenance 证明，可以用 `npm view` 追溯它是从哪个 commit 构建的。
+
+发布说明只有 [`CHANGELOG.md`](CHANGELOG.md) 一处。不要再每个版本加一个 `RELEASE-*.md`：
+一堆无人引用、名字几乎相同的文件，几个版本之后就没法读了；同一个版本的内容应该按版本标题归在这一个文件里。
+它只列以 `@sqdr2/dsh-fusion` 名义发过的版本；上游 `dsh-model-fusion` 的历史留在上游仓库。
 
 ### 构建被钉死的两处
 
