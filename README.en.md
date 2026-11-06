@@ -72,6 +72,7 @@ After contaminated attempts were excluded, four tasks were clean in every condit
 - **The Lead does not write code.** The program enforces this, not the prompt:
   - the Lead has no file-writing tools;
   - its shell commands run in DSH's read-only sandbox.
+- **The permission shown in the composer.** Fusion separates permissions by role and pins the Lead's session to read-only, and "read-only plus your approval policy" usually matches no configured preset, so the native permission control reads `Custom` once a task is dispatched. Fusion's own chip in the composer tool row names the role working right now and its permission: `Lead · Read Only` / `Sidekick · Full access`. That control still sets the Sidekick's permission: change it and the Sidekick's next step uses that mode while the Lead stays read-only. If you would rather the native control read a name instead of `Custom`, add a preset to your profile's `presets` with `sandbox: read-only` and `approval: never` — pure configuration, this plugin does not depend on it.
 - **The only exception is a takeover the Host unlocks when the Sidekick demonstrably cannot finish.** For example: checks still failing after 2 rework rounds, or the Sidekick hit its step limit or kept stalling. During a takeover:
   - the Lead may only change the files the task allows;
   - its work must pass the same acceptance;

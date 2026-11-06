@@ -109,12 +109,25 @@ export function workerToolBriefProblem(store: SqliteFusionStore, taskId: TaskId,
   const message = native ?? (transport === undefined ? undefined
     : events?.findLast(event => event.type === 'assistant/message'
       && event.data.message.content.some(block => block.type === 'tool-call' && block.name === transport)))
-  if (!message || message.type !== 'assistant/message' || message.data.interrupted) return 'Worker tool requires a complete native model request'
-  const row = store.readDocument(`worker-request:${exec.agent!.id}:${message.data.turn}:${message.data.step}`)?.value as {
+  type WorkerRequestRow = {
     schemaVersion?: number; taskId?: string; sessionId?: string; turn?: number; step?: number; briefRevision?: number; workOrderId?: string
-  } | undefined
-  if (row?.schemaVersion !== 1 || row.taskId !== taskId || row.sessionId !== exec.agent!.id
-    || row.turn !== message.data.turn || row.step !== message.data.step) return 'Worker tool has no captured brief identity'
+  }
+  let row: WorkerRequestRow | undefined
+  if (message && message.type === 'assistant/message' && !message.data.interrupted) {
+    row = store.readDocument(`worker-request:${exec.agent!.id}:${message.data.turn}:${message.data.step}`)?.value as WorkerRequestRow | undefined
+    if (row?.schemaVersion !== 1 || row.taskId !== taskId || row.sessionId !== exec.agent!.id
+      || row.turn !== message.data.turn || row.step !== message.data.step) return 'Worker tool has no captured brief identity'
+  } else if (transport !== undefined) {
+    const ids = store.listDocumentIds(`worker-request:${exec.agent!.id}:`)
+    const rows = ids
+      .map(id => store.readDocument(id)?.value as WorkerRequestRow | undefined)
+      .filter((r): r is NonNullable<WorkerRequestRow> => Boolean(r && r.schemaVersion === 1 && r.taskId === taskId && r.sessionId === exec.agent!.id))
+    rows.sort((a, b) => (a.turn ?? 0) - (b.turn ?? 0) || (a.step ?? 0) - (b.step ?? 0))
+    row = rows.at(-1)
+    if (!row) return 'Worker tool has no captured brief identity'
+  } else {
+    return 'Worker tool requires a complete native model request'
+  }
   if (row.briefRevision !== revision) return 'A newer Lead brief superseded this request; process it before further tools or a report'
   const order = store.load(taskId)?.currentWorkOrder
   if (row.workOrderId !== order?.id && (row.workOrderId || order?.mode)) return 'A newer work order superseded this request; process its plan before further tools'

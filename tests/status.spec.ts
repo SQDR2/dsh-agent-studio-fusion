@@ -8,6 +8,7 @@ import { readFusionStatus, taskStage } from '../src/host/status.js'
 import { completeProfile } from '../src/profile/resolve.js'
 import { loadPromptBundle } from '../src/prompts.js'
 import { billFromNativeUsage, type NativeUsageRecord } from '../src/host/native-usage.js'
+import type { Role } from '../src/contracts.js'
 import { newLedger, ingestDurable } from '../src/usage/ledger.js'
 import { TASK_BUSY, TASK_NOT_FOUND } from '../src/errors.js'
 import { created, envelope, TASK, PARENT, SNAP, CHILD, order } from './helpers.js'
@@ -26,7 +27,7 @@ function setup() {
   return { store, bindings, file }
 }
 
-function usage(id: string, mode: 'final' | 'snapshot' | 'none', tokens = 0): NativeUsageRecord {
+function usage(id: string, mode: 'final' | 'snapshot' | 'none', tokens = 0, role: Role = 'lead'): NativeUsageRecord {
   const key = { provider: 'actual-provider', model: 'actual-model', requestId: id, attemptId: id, contractDigest: 'native' }
   let ledger = newLedger(key)
   if (mode !== 'none') {
@@ -34,7 +35,7 @@ function usage(id: string, mode: 'final' | 'snapshot' | 'none', tokens = 0): Nat
     ledger = ingestDurable(ledger, { id: `${id}:latest`, key, sequence: 2, mode,
       bill: billFromNativeUsage({ inputTokens: tokens, outputTokens: 2, cacheReadTokens: 0 }) })
   }
-  return { schemaVersion: 1, taskId: TASK, sessionId: PARENT, role: 'lead', purpose: 'conversation', maxOutputTokens: 8000,
+  return { schemaVersion: 1, taskId: TASK, sessionId: PARENT, role, purpose: 'conversation', maxOutputTokens: 8000,
     nativeInvocationId: id, startedAt: `2026-09-22T00:00:${id.padStart(2, '0')}Z`, endedAt: null, nativeStreamInvocations: 1,
     upstreamHttpCalls: null, outcome: 'entered', ledger, actualSubscriptionChargeUsd: null, apiEquivalentCostUsd: null }
 }
@@ -132,6 +133,45 @@ describe('read-only Fusion status', () => {
     expect(() => readFusionStatus(store, PARENT)).toThrow('状态记录')
     store.writeDocument(id, 1, { ...usage('1', 'none'), ledger: { schemaVersion: 0 } })
     expect(() => readFusionStatus(store, PARENT)).toThrow('UNSUPPORTED_LEDGER_FORMAT')
+  })
+})
+
+describe('role-separated permissions', () => {
+  function roleSetup() {
+    const root = mkdtempSync(join(tmpdir(), 'fusion-role-status-')), file = join(root, 'state.sqlite')
+    const store = new SqliteFusionStore(file)
+    cleanup.push(() => rmSync(root, { recursive: true, force: true }), () => store.close())
+    const prompts = loadPromptBundle(), profile = completeProfile({ id: 'fusion-auto', version: '0.2.0-enforced-v3', enabled: true,
+      interactionMode: 'model-like', workflowPolicy: 'enforced-v3',
+      lead: { provider: 'fixture', model: 'lead' }, worker: { provider: 'fixture', model: 'worker' }, dataPolicyId: 'local' }, prompts)
+    store.create(created())
+    store.append(TASK, 1, [envelope('profile/frozen', 2, { digest: profile.digest, profileId: profile.id, version: profile.version })])
+    new BindingRepository(store).select(PARENT, TASK, { profile, prompts })
+    return store
+  }
+  const intent = (mode: string, active = true) => ({ schemaVersion: 1, sessionId: PARENT, mode, ownSeqs: [], active })
+
+  it('names the mode of the role working now instead of leaving the composer on custom', () => {
+    const store = roleSetup()
+    expect(readFusionStatus(store, PARENT).task).not.toHaveProperty('permissions')
+    store.writeDocument(`sandbox-intent:${PARENT}`, 0, intent('danger-full-access'))
+    store.writeDocument(`usage:${TASK}:lead`, 0, usage('1', 'final', 10))
+    expect(readFusionStatus(store, PARENT).task!.permissions)
+      .toEqual({ lead: 'read-only', worker: 'danger-full-access', active: 'lead' })
+    store.writeDocument(`usage:${TASK}:worker`, 0, usage('2', 'final', 10, 'worker'))
+    expect(readFusionStatus(store, PARENT).task!.permissions)
+      .toEqual({ lead: 'read-only', worker: 'danger-full-access', active: 'worker' })
+  })
+
+  it('reports the user mode while the Lead holds a takeover and nothing once Fusion released the conversation', () => {
+    const store = roleSetup()
+    store.writeDocument(`sandbox-intent:${PARENT}`, 0, intent('workspace-write'))
+    store.writeDocument(`runtime:${TASK}`, 0, { schemaVersion: 1, taskId: TASK, takeover: true })
+    // Nothing is in flight yet, so the phase names the role that will run next.
+    expect(readFusionStatus(store, PARENT).task!.permissions)
+      .toEqual({ lead: 'workspace-write', worker: 'workspace-write', active: 'lead' })
+    store.writeDocument(`sandbox-intent:${PARENT}`, 1, intent('workspace-write', false))
+    expect(readFusionStatus(store, PARENT).task).not.toHaveProperty('permissions')
   })
 })
 

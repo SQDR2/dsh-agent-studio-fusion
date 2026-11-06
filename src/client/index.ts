@@ -6,6 +6,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-model-selection/client'
 import { FusionSettings } from './FusionSettings.js'
 import { FusionPanelIcon } from './FusionPanelIcon.js'
 import { FusionHint } from './FusionHint.js'
+import { FusionPermission } from './FusionPermission.js'
 import { FusionTool, fusionControlTools } from './FusionTool.js'
 import { bindLocale } from './i18n.js'
 
@@ -39,12 +40,16 @@ export function apply(ctx: Context): void {
     name: 'sidebar.panellist', id: FUSION_PANEL_ID, order: 40, label: () => 'Fusion',
   }, FusionPanelIcon))
   ctx.inject(['modelDirectories'], scope => {
+    const sessionProps = (sessionId: Parameters<typeof scope.modelDirectories.directoryFor>[0]) => {
+      const directory = scope.modelDirectories.directoryFor(sessionId)
+      return { sessionId, directory: directory.store, load: () => { void directory.load().catch(() => undefined) } }
+    }
     scope.slots.inject('conversation.input.dock', () => scope.slots.register({
-      name: 'conversation.input.dock', id: 'fusion-configuration', order: 20,
-      inject: sessionId => {
-        const directory = scope.modelDirectories.directoryFor(sessionId)
-        return { sessionId, directory: directory.store, load: () => { void directory.load().catch(() => undefined) } }
-      },
+      name: 'conversation.input.dock', id: 'fusion-configuration', order: 20, inject: sessionProps,
     }, FusionHint))
+    // Additive: the native permission control keeps its slot and its selection state.
+    scope.slots.inject('conversation.input.left', () => scope.slots.register({
+      name: 'conversation.input.left', id: 'fusion-permission', order: 10, inject: sessionProps,
+    }, FusionPermission))
   })
 }

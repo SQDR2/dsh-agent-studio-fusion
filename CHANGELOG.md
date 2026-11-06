@@ -19,6 +19,12 @@ read them before assuming a platform is covered.
 
 ### Changes
 
+- The composer names the permission of the model working now. Fusion pins the conversation (Lead) session to
+  `read-only`, and that pair matches no configured preset, so the native permission control read `Custom` for the whole
+  task. A Fusion chip in the composer tool row shows `Lead · Read Only` / `Sidekick · Full access` and follows the role
+  that is running; `FusionStatus.task.permissions` carries the per-role modes (`lead`, `worker`) and `active` role, read
+  from the recorded role intent, the in-flight request and the phase. The native control keeps its slot, its selection
+  state and its meaning: it still sets the Sidekick's mode.
 - Fusion is no longer limited to one saved pair. The sidebar panel now manages a list of combos (add, rename, delete),
   and **each combo is its own entry in the native model menu** (`Fusion · <name>`), so several conversations can run
   different Lead/Sidekick pairs at the same time.
@@ -48,6 +54,9 @@ read them before assuming a platform is covered.
   bundle registers under `@sqdr2/dsh-fusion` and still exports `apply`/`inject`/`name`/`FUSION_PANEL_ID`/`FusionPanelIcon`.
 - New `tests/pairs.spec.ts` (migration, id assignment, name/limit validation, compare-and-swap, per-combo profile
   identity) and `tests/fusion-combos.spec.ts` (list/rename/add/delete and whole-list save payload).
+- The permission chip: new `tests/status.spec.ts` cases (role modes, the takeover exception and the released
+  conversation) and `tests/fusion-permission.spec.ts` (both roles, the Custom explanation, silence outside a
+  role-separated task, the fast poll, and the additive registration that never takes the native permission slot).
 
 ## 0.3.2 — 2026-11-05
 

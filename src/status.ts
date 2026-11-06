@@ -1,5 +1,5 @@
 import type { ControlView } from './host/native-model-control.js'
-import type { PhysicalRoute, Role, TokenMeasurement, VerificationLevel } from './contracts.js'
+import type { PhysicalRoute, Role, SandboxMode, TokenMeasurement, VerificationLevel } from './contracts.js'
 
 /** Bounded, read-only UI projection. No prompts, tool arguments or credentials. */
 export interface FusionStatus {
@@ -20,6 +20,22 @@ export interface FusionStatus {
     workerId: string | null
     modelControl?: ControlView
     models: { lead: PhysicalRoute; worker: PhysicalRoute; compactor: PhysicalRoute | null }
+    /**
+     * Role-separated sandbox modes, present while Fusion confines the Lead. The
+     * composer's own permission control follows the conversation (Lead) session,
+     * so the UI shows these instead of the derived preset name.
+     */
+    permissions?: {
+      /**
+       * What the Lead's own work is confined to. The session is widened only for the
+       * checks Fusion runs itself and for the Lead during a Host-unlocked takeover.
+       */
+      lead: SandboxMode
+      /** What the Sidekick runs under: the mode the user chose for this conversation. */
+      worker: SandboxMode
+      /** The role working right now; null while the task waits. */
+      active: Role | null
+    }
     usage: {
       calls: number
       finalCalls: number

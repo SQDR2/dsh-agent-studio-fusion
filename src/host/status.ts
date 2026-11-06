@@ -1,4 +1,6 @@
 import { readModelControl } from './native-model-control.js'
+import { readSandboxIntent, roleSeparated } from './native-role-sandbox.js'
+import type { Phase, Role } from '../contracts.js'
 import type { TaskState } from '../task/state.js'
 import type { SqliteFusionStore } from '../task/sqlite-store.js'
 import type { StatusIndex } from '../task/status-index.js'
@@ -26,6 +28,18 @@ const EN: Record<string, string> = {
   '继续消息的投递结果尚未确认。检查会话后使用 /fusion recover 提交检查记录。': 'Delivery of the continuation is unconfirmed. Check the conversation, then use /fusion recover.',
 }
 const english = (text: string | null | undefined) => text == null ? text : EN[text] ?? text
+
+/**
+ * The role working right now: an in-flight request names it exactly (requests read
+ * newest first), and between requests the phase does ('DIRECT' is the Lead writing).
+ */
+function activeRole(requests: readonly { role: Role; purpose: string; outcome: string }[], phase: Phase): Role | null {
+  const running = requests.find(request => request.purpose === 'conversation' && request.outcome === 'entered')
+  if (running) return running.role
+  if (phase === 'WORKER_RUNNING' || phase === 'REWORK') return 'worker'
+  if (phase === 'PLANNING' || phase === 'REVIEWING' || phase === 'DIRECT') return 'lead'
+  return null
+}
 
 export function taskStage(state: TaskState, checking: boolean, workerStepLimitReached = false, workerQuotaExhausted = false): Pick<NonNullable<FusionStatus['task']>, 'stage' | 'detail' | 'attention'> {
   const control = state.control
@@ -81,7 +95,8 @@ function readStatus(store: SqliteFusionStore, sessionId: string, index: StatusIn
   const { checking, ...facts } = index.read(taskId)
   const runtime = store.readDocument(`runtime:${taskId}`)?.value as { schemaVersion?: number; taskId?: string;
     workerStepStop?: { workOrderId?: string; requests: number; limit: number };
-    workerFailure?: { workOrderId?: string; childId?: string; category?: string } } | undefined
+    workerFailure?: { workOrderId?: string; childId?: string; category?: string };
+    takeover?: boolean } | undefined
   const stop = runtime?.workerStepStop
   const workerStepLimitReached = runtime?.schemaVersion === 1 && runtime.taskId === taskId && Boolean(stop
     && state.currentWorkOrder && stop.workOrderId === state.currentWorkOrder.id && stop.limit > 0 && stop.requests >= stop.limit)
@@ -98,10 +113,18 @@ function readStatus(store: SqliteFusionStore, sessionId: string, index: StatusIn
   const pendingDelivery = modelControl?.operation && ['prepared', 'dispatching'].includes(modelControl.operation.state)
     ? { stage: '等待检查', detail: '继续消息的投递结果尚未确认。检查会话后使用 /fusion recover 提交检查记录。', attention: true } : {}
   const stage = { ...taskStage(state, checking, workerStepLimitReached, workerQuotaExhausted), ...modelStage, ...pendingDelivery }
+  // The composer's own permission control follows the conversation (Lead) session,
+  // where Fusion's read-only confinement matches no configured preset. Report the
+  // per-role modes so the UI can name the permission of the role that is working.
+  const intent = roleSeparated(binding) ? readSandboxIntent(store, sessionId) : undefined
+  const takeover = runtime?.schemaVersion === 1 && runtime.taskId === taskId && runtime.takeover === true
+  const permissions = intent && { lead: takeover ? intent.mode : 'read-only' as const,
+    worker: intent.mode, active: activeRole(facts.requests, state.phase) }
   return { ...base, task: { id: taskId, revision: state.revision, ...stage, stageEn: english(stage.stage)!,
     detailEn: 'detailEn' in stage && stage.detailEn ? stage.detailEn : english(stage.detail) ?? null, ...(modelControl ? { modelControl } : {}), verification: state.verification,
     workerId: state.acceptedChild ?? binding.workerId ?? null,
     models: { lead: modelControl?.routes.lead ?? binding.profile.lead, worker: modelControl?.routes.worker ?? binding.profile.worker, compactor: binding.profile.compactor?.route ?? null },
+    ...(permissions ? { permissions } : {}),
     ...facts,
     automatedChecks: Array.isArray((runtime as { checks?: unknown[] } | undefined)?.checks) && runtime?.taskId === taskId
       ? (runtime as { checks: unknown[] }).checks.length : null,
