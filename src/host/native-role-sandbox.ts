@@ -3,11 +3,11 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import { SessionId as NativeSessionId } from '@deepseek-ai/dsh-session'
 import type { Session } from '@deepseek-ai/dsh-session'
 import type { ToolExecution } from '@deepseek-ai/dsh-tools'
-import type { Role } from '../contracts.js'
+import type { Role, SandboxMode } from '../contracts.js'
 import type { SqliteFusionStore } from '../task/sqlite-store.js'
 import type { SessionBinding } from './bindings.js'
 
-type Mode = 'read-only' | 'workspace-write' | 'danger-full-access'
+type Mode = SandboxMode
 
 // Mirrors the Host sandbox-policy augmentation (a type-only declaration; the Host
 // registers the event at runtime). The plugin does not depend on that package.
@@ -36,6 +36,19 @@ interface Intent {
 
 export const roleSeparated = (binding: SessionBinding) => binding.profile.workflowPolicy === 'enforced-v3'
 
+const intentId = (sessionId: string) => `sandbox-intent:${sessionId}`
+
+/**
+ * The mode the user chose for a confined Fusion conversation, which is the mode
+ * the Sidekick runs under. Undefined until Fusion has confined the Lead, or after
+ * the conversation left Fusion and its own mode was restored.
+ */
+export function readSandboxIntent(store: SqliteFusionStore, sessionId: string): { mode: Mode } | undefined {
+  const intent = store.readDocument(intentId(sessionId))?.value as Intent | undefined
+  if (!intent || intent.schemaVersion !== 1 || !intent.active) return undefined
+  return { mode: intent.mode }
+}
+
 /**
  * Role separation enforced below the prompt: the Lead's session runs under the
  * Host's own read-only sandbox (bash and filesystem are refused by the OS
@@ -53,13 +66,12 @@ export class NativeRoleSandbox {
     return (this.ctx as unknown as { get(name: string): unknown }).get('sandboxPolicy') as SandboxPolicy | undefined
   }
 
-  #id(sessionId: string) { return `sandbox-intent:${sessionId}` }
   #intent(sessionId: string): Intent | undefined {
-    return this.store.readDocument(this.#id(sessionId))?.value as Intent | undefined
+    return this.store.readDocument(intentId(sessionId))?.value as Intent | undefined
   }
   #save(intent: Intent) {
-    const prior = this.store.readDocument(this.#id(intent.sessionId))
-    this.store.writeDocument(this.#id(intent.sessionId), prior?.revision ?? 0, { ...intent, ownSeqs: intent.ownSeqs.slice(-32) })
+    const prior = this.store.readDocument(intentId(intent.sessionId))
+    this.store.writeDocument(intentId(intent.sessionId), prior?.revision ?? 0, { ...intent, ownSeqs: intent.ownSeqs.slice(-32) })
   }
   // Session listeners run synchronously inside append, before the seq is known here.
   #writing = false

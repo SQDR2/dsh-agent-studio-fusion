@@ -72,13 +72,18 @@ function subscribe(sessionId: string, listener: () => void, expanded: () => bool
   }
 }
 
-/** One in-flight read per mounted session; collapsed hints still discover new attention states. */
-export function useFusionStatus(sessionId: string, expandedTask: string | undefined, attentionOnly = false): Snapshot | undefined {
-  const expandedRef = useRef(expandedTask), attentionRef = useRef(attentionOnly)
-  expandedRef.current = expandedTask; attentionRef.current = attentionOnly
+/**
+ * One in-flight read per mounted session; collapsed hints still discover new attention states.
+ * `live` asks for the fast cadence whenever the task is running, for a view whose whole
+ * purpose is the current stage (the role and permission of the model working now).
+ */
+export function useFusionStatus(sessionId: string, expandedTask: string | undefined, attentionOnly = false, live = false): Snapshot | undefined {
+  const expandedRef = useRef(expandedTask), attentionRef = useRef(attentionOnly), liveRef = useRef(live)
+  expandedRef.current = expandedTask; attentionRef.current = attentionOnly; liveRef.current = live
   useEffect(() => { if (expandedTask) entries.get(sessionId)?.visibility() }, [sessionId, expandedTask])
   return useSyncExternalStore(
     useCallback(listener => subscribe(sessionId, listener, () => {
+      if (liveRef.current) return true
       const task = entries.get(sessionId)?.snapshot?.status?.task
       return expandedRef.current !== undefined && task?.id === expandedRef.current && (!attentionRef.current || task.attention)
     }), [sessionId]),

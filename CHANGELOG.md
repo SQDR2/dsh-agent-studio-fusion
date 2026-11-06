@@ -15,6 +15,26 @@ own tags and releases.
 Entry format: what changed, then what was actually validated. "Not claimed" lines mark what a release did *not* test —
 read them before assuming a platform is covered.
 
+## Unreleased
+
+### Changes
+
+- The composer names the permission of the model working now. Fusion pins the conversation (Lead) session to
+  `read-only`, and that pair matches no configured preset, so the native permission control read `Custom` for the whole
+  task. A Fusion chip in the composer tool row shows `Lead · Read Only` / `Sidekick · Full access` and follows the role
+  that is running; `FusionStatus.task.permissions` carries the per-role modes (`lead`, `worker`) and `active` role, read
+  from the recorded role intent, the in-flight request and the phase. The native control keeps its slot, its selection
+  state and its meaning: it still sets the Sidekick's mode.
+
+### Validation
+
+Type checking passes and the 386 unit tests pass, apart from `tests/link-host.spec.ts`, which needs this checkout's own
+`node_modules` and fails in a worktree that shares the parent's. New coverage: `tests/status.spec.ts` (role modes, the
+takeover exception and the released conversation) and `tests/fusion-permission.spec.ts` (both roles, the Custom
+explanation, silence outside a role-separated task, the fast poll, and the additive registration that never takes the
+native permission slot). `lib/` was not rebuilt here: this checkout's Harness is 0.2.1-rc.5, outside the two versions
+`scripts/build.mjs` accepts. No Host was run and no model was called.
+
 ## 0.3.2 — 2026-11-05
 
 Verification release. No runtime behaviour changed from 0.3.0, and the package is identical to it apart from the version

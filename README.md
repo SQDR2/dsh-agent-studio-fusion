@@ -67,6 +67,7 @@ Fusion 在 DeepSeek Harness（DSH）的模型菜单里是一个普通模型：**
 - **Lead 不写代码**：这不是靠提示词约束，而是由程序保证的：
   - Lead 没有写文件的工具；
   - 它执行的 shell 命令跑在 DSH 的只读沙盒里。
+- **输入框里的权限**：Fusion 按角色分离权限，Lead 的会话被固定在只读，而"只读 + 你的确认策略"这个组合通常匹配不上任何已配置预设，所以下发任务后「权限」控件会显示 `Custom`。工具行里 Fusion 自己的标签随时显示**当前在干活的角色**及其权限：`Lead · 仅可查看` / `Sidekick · 完全权限`。那个控件本身仍然决定 Sidekick 的权限：在那里换一项，Sidekick 下一轮就用那一项，Lead 仍然只读。如果你更希望原生控件也不显示 `Custom`，在你 profile 的 `presets` 里加一条 `sandbox: read-only` + `approval: never` 的预设即可（纯配置，本插件不依赖它）。
 - **唯一的例外：程序判定 Sidekick 确实做不完时，才解锁 Lead 接手。** 例如 2 轮返工后检查仍然失败，或者 Sidekick 用完了步数、反复卡住。接手时：
   - Lead 只能改任务允许的文件；
   - 必须通过同样的验收；

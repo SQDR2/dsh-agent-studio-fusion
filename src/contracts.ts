@@ -40,6 +40,8 @@ export type RunSelection =
   | { kind: 'profile'; profileId: string; requestedVersion?: string }
 
 export type Role = 'lead' | 'worker'
+/** A Host sandbox mode, spelled as the `sandbox/mode` session event writes it. */
+export type SandboxMode = 'read-only' | 'workspace-write' | 'danger-full-access'
 export type Phase =
   | 'READY'
   | 'PLANNING'
