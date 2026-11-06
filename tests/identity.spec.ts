@@ -3,9 +3,9 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import {
-  FUSION_MODEL, FUSION_PROVIDER, FUSION_SELECTION_LABELS, LEGACY_FUSION_PROVIDER, LEGACY_PLUGIN_NAME, PACKAGE_NAME,
+  FUSION_MODEL, FUSION_PROVIDER, LEGACY_FUSION_PROVIDER, LEGACY_PLUGIN_NAME, PACKAGE_NAME,
   PLUGIN_NAME,
-  isCurrentFusionSelection, isFusionProvider, isFusionSelection,
+  isCurrentFusionSelection, isFusionModel, isFusionProvider, isFusionSelection, isFusionSelectionLabel,
 } from '../src/identity.js'
 import { FUSION_SOURCE_KIND, FUSION_SOURCE_KINDS, isFusionSourceKind } from '../src/message-source.js'
 import { adoptLegacyLeaseRoot, leasePath } from '../src/execution/write-lease.js'
@@ -59,10 +59,28 @@ describe('pre-rename compatibility', () => {
     expect(isCurrentFusionSelection({ provider: FUSION_PROVIDER, model: FUSION_MODEL })).toBe(true)
   })
 
-  it('suppresses the native switch notice under either spelling', () => {
-    expect(FUSION_SELECTION_LABELS).toContain('dsh-fusion/auto')
-    expect(FUSION_SELECTION_LABELS).toContain('dsh-model-fusion/auto')
-    expect(FUSION_SELECTION_LABELS).toHaveLength(2)
+  it('suppresses the native switch notice under either spelling and any combo', () => {
+    // The notice names where the switch came from and where it goes.
+    expect(isFusionSelectionLabel('llm-deepseek/deepseek-chat → dsh-fusion/auto')).toBe(true)
+    expect(isFusionSelectionLabel('llm-deepseek/deepseek-chat → dsh-model-fusion/auto')).toBe(true)
+    expect(isFusionSelectionLabel('llm-deepseek/deepseek-chat → dsh-fusion/pair-a1b2c3d4')).toBe(true)
+    // Switching combo inside this provider names the combos bare.
+    expect(isFusionSelectionLabel('auto → pair-a1b2c3d4')).toBe(true)
+    expect(isFusionSelectionLabel('pair-a1b2c3d4 → auto')).toBe(true)
+    expect(isFusionSelectionLabel('llm-deepseek/deepseek-chat → gpt-6-astra')).toBe(false)
+    // Only the destination decides, and a bare model id needs the arrow before it.
+    expect(isFusionSelectionLabel('llm-gateway/auto')).toBe(false)
+    expect(isFusionSelectionLabel('dsh-fusion/auto')).toBe(true)
+    expect(isFusionSelectionLabel(undefined)).toBe(false)
+  })
+
+  it('accepts every advertised combo model but nothing else', () => {
+    expect(isFusionModel('auto')).toBe(true)
+    expect(isFusionModel('pair-a1b2c3d4')).toBe(true)
+    expect(isFusionModel('deepseek-chat')).toBe(false)
+    expect(isFusionSelection({ provider: FUSION_PROVIDER, model: 'pair-a1b2c3d4' })).toBe(true)
+    expect(isCurrentFusionSelection({ provider: FUSION_PROVIDER, model: 'pair-a1b2c3d4' })).toBe(true)
+    expect(isFusionSelection({ provider: 'llm-deepseek', model: 'pair-a1b2c3d4' })).toBe(false)
   })
 
   it('reads both producer kinds so an existing session keeps its context', () => {

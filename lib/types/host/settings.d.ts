@@ -32,8 +32,12 @@ export declare function savedLeadRoute(value: unknown): {
 export declare function validatePairChoice(value: unknown, catalog: SettingsCatalog): PairChoice;
 /** New sessions can opt into this Worker cap. Frozen sessions keep their saved profile. */
 export declare const WORKER_IMPLEMENTATION_OUTPUT_TOKENS = 128000;
-export declare function profileFromChoice(pair: PairChoice): Record<string, unknown>;
-/** Product defaults; explicit legacy/benchmark profiles retain their old contract. */
-export declare function modelProfileFromChoice(pair: PairChoice): Record<string, unknown>;
+export declare function profileFromChoice(pair: PairChoice, id?: string): Record<string, unknown>;
+/**
+ * Product defaults; explicit legacy/benchmark profiles retain their old contract.
+ * `id` names the combo; the first one keeps the historical `fusion-auto` so a
+ * profile frozen before combos existed keeps its identity.
+ */
+export declare function modelProfileFromChoice(pair: PairChoice, id?: string): Record<string, unknown>;
 /** Keep existing default settings stable; expose explicit larger/smaller limits on reload. */
 export declare function choiceFromProfile(profile: PairProfile): PairChoice;

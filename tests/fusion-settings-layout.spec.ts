@@ -94,7 +94,7 @@ describe('FusionSettings layout after sidebar integration', () => {
       if (url.includes('view=history')) {
         return { ok: true, json: async () => ({ totalTasks: 0, totals: { calls: 0, final: 0, provisional: 0, unreported: 0, input: { known: 0, reported: 0 }, output: { known: 0, reported: 0 }, reasoning: { known: 0, reported: 0 }, totalOutput: { known: 0, reported: 0 }, cacheRead: { known: 0, reported: 0 } }, tasks: [], groups: [] }) }
       }
-      return { ok: true, json: async () => ({ revision: 1, catalog: { groups: [] }, pair: null, authorized: true }) }
+      return { ok: true, json: async () => ({ revision: 1, catalog: { groups: [] }, pairs: [], maxPairs: 6, authorized: true }) }
     }))
 
     let root!: ReactTestRenderer

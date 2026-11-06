@@ -15,6 +15,40 @@ own tags and releases.
 Entry format: what changed, then what was actually validated. "Not claimed" lines mark what a release did *not* test —
 read them before assuming a platform is covered.
 
+## Unreleased
+
+### Changes
+
+- Fusion is no longer limited to one saved pair. The sidebar panel now manages a list of combos (add, rename, delete),
+  and **each combo is its own entry in the native model menu** (`Fusion · <name>`), so several conversations can run
+  different Lead/Sidekick pairs at the same time.
+- Each combo advertises its own Lead's input modalities and freezes its own profile, so a conversation keeps the pair it
+  selected even after the list is edited, reordered or a combo is deleted. Picking another combo inside a conversation
+  drains the current task and starts a new one, exactly like leaving Fusion.
+- Up to 6 combos. The first combo keeps the historical model id `auto`, and a pre-combo `settings:profile` is migrated
+  into it (named "自动") on read, so durable selections, frozen bindings and deploy-time profile files keep working. The
+  first combo is still mirrored into `settings:profile` for an older tab or a downgrade.
+- An existing tab running the previous bundle can still save: it sends one pair and edits the first combo, leaving the
+  others alone.
+- The switch-notice filter now recognizes every combo id, including the bare `auto → pair-xxxxxxxx` form the native menu
+  emits when two combos of this provider replace each other.
+
+### Build
+
+- `pnpm build` no longer requires a harness checkout with `tools/dshx`. It still uses that harness-owned builder when
+  `DSHX_HARNESS` provides it, and otherwise emits the same two artifacts with a local `esbuild` pass (now a
+  devDependency): `lib/dsh-fusion.js` as plain ESM with every package external, `lib/client.js` as the CommonJS body the
+  Harness module loader expects.
+
+### Validation
+
+- `pnpm test` (52 files, 389 tests), `tsc -p tsconfig.json --noEmit`, and the native Host suite
+  (`DSHX_HARNESS=… npx vitest run --config vitest.host.config.mts`: 263 passed, 1 skipped).
+- Rebuilt `lib/` and loaded both artifacts in Node: the Host module exports `apply`/`Config`/`name`, and the client
+  bundle registers under `@sqdr2/dsh-fusion` and still exports `apply`/`inject`/`name`/`FUSION_PANEL_ID`/`FusionPanelIcon`.
+- New `tests/pairs.spec.ts` (migration, id assignment, name/limit validation, compare-and-swap, per-combo profile
+  identity) and `tests/fusion-combos.spec.ts` (list/rename/add/delete and whole-list save payload).
+
 ## 0.3.2 — 2026-11-05
 
 Verification release. No runtime behaviour changed from 0.3.0, and the package is identical to it apart from the version

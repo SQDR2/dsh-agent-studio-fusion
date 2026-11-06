@@ -93,11 +93,21 @@ type Route = {
     provider: string;
     model: string;
 };
-/** One row of the settings page: what applies, why, what the defaults say, and what was observed. */
-export declare function cacheView(policy: CachePolicy, pair?: {
-    lead: Route;
-    worker: Route;
-}, pairChoice?: {
+/** A saved combo's routes, plus its optional per-role keepalive choice. */
+export interface CachePairRoutes {
+    readonly lead: Route;
+    readonly worker: Route;
+    readonly cacheKeepalive?: {
+        lead?: boolean | 'auto';
+        worker?: boolean | 'auto';
+    };
+}
+/**
+ * One row of the settings page: what applies, why, what the defaults say, and
+ * what was observed. Every saved combo contributes its routes, so a second
+ * combo's models are listed and labelled even before a session uses them.
+ */
+export declare function cacheView(policy: CachePolicy, pair?: CachePairRoutes | readonly CachePairRoutes[], pairChoice?: {
     lead?: boolean | 'auto';
     worker?: boolean | 'auto';
 }): {
@@ -106,7 +116,7 @@ export declare function cacheView(policy: CachePolicy, pair?: {
     role: Role | undefined;
     mode: CacheMode;
     intervalSeconds: number;
-    modeSource: "user" | "role" | "route" | "family" | "generic" | "pair";
+    modeSource: "user" | "role" | "route" | "pair" | "family" | "generic";
     intervalSource: "user" | "route" | "family" | "generic" | "learned";
     setting: ModelCacheSetting;
     defaults: {

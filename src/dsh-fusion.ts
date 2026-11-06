@@ -13,8 +13,10 @@ import type {} from '@deepseek-ai/dsh-host-webserver'
 import type {} from '@deepseek-ai/dsh-commands'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
 import { FusionCatalogAdapter, FUSION_PROVIDER, FUSION_MODEL, installNativeFusionSelection } from './host/native-selection.js'
+import type { FusionModelEntry } from './host/native-selection.js'
 import type { ResolvedProfile } from './profile/resolve.js'
-import { choiceFromProfile, modelProfileFromChoice, validatePairChoice, savedLeadRoute } from './host/settings.js'
+import { choiceFromProfile, modelProfileFromChoice, validatePairChoice, type PairChoice } from './host/settings.js'
+import { MAX_PAIRS, choiceFromStoredProfile, modelOfProfileId, profileIdOf, readPairs, validatePairs, writePairs } from './host/pairs.js'
 import { CachePolicy, cacheView } from './host/cache-policy.js'
 import { CACHE_DEFAULTS_CHECKED } from './host/cache-defaults.js'
 import { loadJsonObject, resolveProfile } from './profile/resolve.js'
@@ -55,22 +57,71 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
   const cachePolicy = new CachePolicy(store)
   backfillHistory(store)
   const budget = new NativeRequestBudget(store, config.authorizationPath)
-  let defaultProfile: ResolvedProfile | undefined
   const physicalCatalog = async () => {
     const catalog = await ctx.sessionController.modelCatalog()
     return { ...catalog, groups: catalog.groups.filter(group => !isFusionProvider(group.id)) }
   }
-  const configuredProfile = async (): Promise<ResolvedProfile> => {
-    defaultProfile = undefined
-    const saved = store.readDocument('settings:profile')
-    if (!saved && (!config.profilePath || !isAbsolute(config.profilePath))) throw new Error(bi('请先在设置的 Fusion 页面选择 Lead 和 Worker', 'Open Settings → Fusion and choose a Lead and a Sidekick first'))
-    const raw = saved?.value as Record<string, unknown> | undefined ?? loadJsonObject(config.profilePath!)
+  /**
+   * The combos to resolve: the saved list, or the one profile file a benchmark
+   * deployment names. A profile file keeps its legacy contract, so only saved
+   * combos are rebuilt from a choice.
+   */
+  const comboPlan = (): { revision: number; items: readonly { id: string; name: string; pair: PairChoice; raw?: Record<string, unknown> }[] } => {
+    const snapshot = readPairs(store)
+    if (snapshot.pairs.length) return { revision: snapshot.revision, items: snapshot.pairs }
+    if (config.profilePath && isAbsolute(config.profilePath)) {
+      const raw = loadJsonObject(config.profilePath)
+      const pair = choiceFromStoredProfile(raw)
+      if (pair) return { revision: snapshot.revision, items: [{ id: FUSION_MODEL, name: '自动', pair, raw }] }
+    }
+    return { revision: snapshot.revision, items: [] }
+  }
+  interface Combos {
+    revision: number
+    items: readonly { id: string; name: string; pair: PairChoice }[]
+    /** Frozen profile of every usable combo, keyed by the model id it advertises. */
+    profiles: Map<string, ResolvedProfile>
+    /** Why one saved combo cannot run yet; the other combos stay usable. */
+    failures: Map<string, string>
+  }
+  let combos: Combos | undefined
+  const resolveCombos = async (): Promise<Combos> => {
+    const plan = comboPlan()
     const catalog = await physicalCatalog()
-    const pair = validatePairChoice(raw, catalog)
-    const next = saved ? modelProfileFromChoice(pair) : raw
-    defaultProfile = resolveProfile(next, next.interactionMode === 'model-like' ? loadModelPromptBundle() : loadPromptBundle(), { authorizedRoutes: catalog.groups.flatMap(group =>
-      group.models.map(model => ({ provider: group.id, model: model.id }))) })
-    return defaultProfile
+    const authorizedRoutes = catalog.groups.flatMap(group => group.models.map(model => ({ provider: group.id, model: model.id })))
+    const profiles = new Map<string, ResolvedProfile>(), failures = new Map<string, string>()
+    for (const item of plan.items) {
+      try {
+        const pair = validatePairChoice(item.pair, catalog)
+        const next = item.raw ?? modelProfileFromChoice(pair, profileIdOf(item.id))
+        profiles.set(item.id, resolveProfile(next, next.interactionMode === 'model-like' ? loadModelPromptBundle() : loadPromptBundle(), { authorizedRoutes }))
+      } catch (error) {
+        // One retired model must not take every other combo down with it.
+        failures.set(item.id, error instanceof Error ? error.message : String(error))
+      }
+    }
+    combos = { revision: plan.revision, items: plan.items.map(({ id, name, pair }) => ({ id, name, pair })), profiles, failures }
+    return combos
+  }
+  const knownCombos = async (): Promise<Combos> => combos ?? await resolveCombos()
+  // A combo list saved from another process (or before the model catalog was
+  // ready at startup) is picked up on first use instead of failing the session.
+  let reloading = false
+  const profileOf = (model: string): ResolvedProfile | undefined => {
+    const found = combos?.profiles.get(model)
+    if (!found && !reloading) {
+      reloading = true
+      void resolveCombos().catch(() => undefined).finally(() => { reloading = false })
+    }
+    return found
+  }
+  /** The profile a plain (unselected) request falls back to: the first usable combo. */
+  const primaryProfile = async (): Promise<ResolvedProfile> => {
+    const state = await knownCombos()
+    const profile = state.profiles.values().next().value
+    if (profile) return profile
+    const [first] = state.failures.values()
+    throw new Error(first ?? bi('请先在设置的 Fusion 页面选择 Lead 和 Worker', 'Open Settings → Fusion and choose a Lead and a Sidekick first'))
   }
   const needsBudget = (profile: ResolvedProfile['profile']) => Boolean(config.authorizationPath) || profile.interactionMode !== 'model-like'
   let runtime: FusionCoordinator | undefined
@@ -82,7 +133,7 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
     if (runtime) return Promise.resolve(runtime)
     if (creating) return creating
     creating = (async () => {
-      const profile = frozen ?? await configuredProfile()
+      const profile = frozen ?? await primaryProfile()
       runtime = new FusionCoordinator(ctx, store, { profile, workerTools: config.workerTools ?? defaultWorkerTools,
         resumeAuthorization: binding => needsBudget(binding.profile) ? budget.check(effectiveRoutes(binding)).authorizationId : 'native-account',
         authorizeRequest: (_agent, binding) => {
@@ -107,28 +158,39 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
     })().finally(() => { creating = undefined })
     return creating
   }
-  // The catalog entry admits what the configured Lead admits: the Lead is the
-  // only role that reads user content, while the Worker receives text work orders.
-  const leadInputModalities = async (): Promise<readonly ModelModality[] | undefined> => {
-    try {
-      const saved = store.readDocument('settings:profile')?.value
-      const lead = savedLeadRoute(saved)
-        ?? (config.profilePath && isAbsolute(config.profilePath) ? savedLeadRoute(loadJsonObject(config.profilePath)) : undefined)
-      if (!lead) return undefined
-      return (await ctx.llm.resolveModelInfo(lead.provider, lead.model)).inputModalities
-    } catch {
-      // An unresolvable Lead route (unregistered provider, retired model, broken
-      // profile file) cannot verify image support; the catalog entry stays text-only.
-      return undefined
+  // Each combo's entry admits what its own Lead admits: the Lead is the only
+  // role that reads user content, while the Worker receives text work orders.
+  // This resolves through the other providers' own model info, never through
+  // this adapter, so listing Fusion cannot recurse into itself.
+  const fusionModels = async (): Promise<readonly FusionModelEntry[]> => {
+    let items: readonly { id: string; name: string; pair: PairChoice }[]
+    try { items = readPairs(store).pairs } catch { return [] }
+    if (!items.length && config.profilePath && isAbsolute(config.profilePath)) {
+      const pair = choiceFromStoredProfile(loadJsonObject(config.profilePath))
+      items = pair ? [{ id: FUSION_MODEL, name: '自动', pair }] : []
     }
+    return Promise.all(items.map(async item => {
+      let modalities: readonly ModelModality[] = []
+      try {
+        // An unresolvable Lead route (unregistered provider, retired model, broken
+        // profile file) cannot verify image support; the entry stays text-only.
+        modalities = (await ctx.llm.resolveModelInfo(item.pair.lead.provider, item.pair.lead.model)).inputModalities ?? []
+      } catch { modalities = [] }
+      return { id: item.id, name: `Fusion · ${item.name}`, inputModalities: modalities }
+    }))
   }
-  ctx.effect(() => ctx.llm.registerAdapter([FUSION_PROVIDER], new FusionCatalogAdapter(leadInputModalities)))
+  ctx.effect(() => ctx.llm.registerAdapter([FUSION_PROVIDER], new FusionCatalogAdapter(fusionModels)))
   ctx.effect(() => installNativeFusionSelection(ctx, {
-    coordinator: () => runtime, profile: () => defaultProfile,
+    coordinator: () => runtime,
+    profile: profileOf,
+    // A combo that cannot run yet says why, instead of the generic "configure first".
+    reason: model => combos?.failures.get(model)
+      ?? (combos?.items.length ? bi('该组合已被删除或无法使用，请在模型菜单中选择其他组合。', 'That combo was removed or cannot run; pick another one in the model menu.') : undefined),
     selection: agent => {
       const selection = agent.session.snapshotEvents().findLast(event => event.type === 'model/selection')
       if (selection?.type === 'model/selection') return selection.data
-      if (bindings.read(agent.id)?.binding.selected) return { provider: FUSION_PROVIDER, model: FUSION_MODEL }
+      const bound = bindings.read(agent.id)?.binding
+      if (bound?.selected) return { provider: FUSION_PROVIDER, model: modelOfProfileId(bound.profile.id) ?? FUSION_MODEL }
       const header = agent.session.requestHeader()
       return header ? { provider: header.config.provider, model: header.config.model } : ctx.agentDefaultModel.currentSelection()
     },
@@ -162,27 +224,35 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
         }
         if (url.searchParams.get('view') === 'catalog') return json(res, 200, await ctx.sessionController.modelCatalog())
         if (url.searchParams.get('view') === 'cache') {
-          let profile: ResolvedProfile | undefined
-          try { profile = await configuredProfile() } catch { profile = undefined }
-          return json(res, 200, { checked: CACHE_DEFAULTS_CHECKED, models: cacheView(cachePolicy,
-            profile ? { lead: profile.profile.lead, worker: profile.profile.worker } : undefined, profile?.profile.cacheKeepalive) })
+          let pairs: { lead: { provider: string; model: string }; worker: { provider: string; model: string }; cacheKeepalive?: PairChoice['cacheKeepalive'] }[] = []
+          try { pairs = [...(await knownCombos()).profiles.values()].map(profile => ({ lead: profile.profile.lead,
+            worker: profile.profile.worker, cacheKeepalive: profile.profile.cacheKeepalive })) } catch { pairs = [] }
+          return json(res, 200, { checked: CACHE_DEFAULTS_CHECKED, models: cacheView(cachePolicy, pairs) })
         }
         if (url.searchParams.get('view') === 'settings') {
-          const saved = store.readDocument('settings:profile')
-          let profile: ResolvedProfile | undefined, reason: string | undefined, authorized = false
-          try {
-            profile = await configuredProfile()
-            if (needsBudget(profile.profile)) budget.check(profileRoutes(profile.profile)); authorized = true
-          } catch (error) { reason = error instanceof Error ? error.message : String(error) }
-          return json(res, 200, { revision: saved?.revision ?? 0, catalog: await physicalCatalog(),
-            pair: profile ? choiceFromProfile(profile.profile) : null,
-            authorized, reason, managedAuthorization: Boolean(config.authorizationPath), policy: profile?.profile.interactionMode ?? 'legacy', actualBilledUsd: null, apiEquivalentUsd: null })
+          // Resolved fresh: the revision a save sends must match the one shown.
+          const state = await resolveCombos()
+          const pairs = state.items.map(item => {
+            const profile = state.profiles.get(item.id)
+            if (!profile) return { id: item.id, name: item.name, pair: item.pair, authorized: false, reason: state.failures.get(item.id) }
+            let authorized = false, reason: string | undefined
+            try { if (needsBudget(profile.profile)) budget.check(profileRoutes(profile.profile)); authorized = true }
+            catch (error) { reason = error instanceof Error ? error.message : String(error) }
+            return { id: item.id, name: item.name, pair: choiceFromProfile(profile.profile), authorized, ...(reason ? { reason } : {}) }
+          })
+          const blocked = pairs.find(pair => !pair.authorized)
+          return json(res, 200, { revision: state.revision, catalog: await physicalCatalog(), pairs, maxPairs: MAX_PAIRS,
+            // The first combo is what the single-pair page and older tabs read.
+            pair: pairs[0]?.pair ?? null, authorized: pairs.length > 0 && !blocked,
+            ...(blocked?.reason ? { reason: blocked.reason } : {}),
+            managedAuthorization: Boolean(config.authorizationPath),
+            policy: state.profiles.values().next().value?.profile.interactionMode ?? 'model-like', actualBilledUsd: null, apiEquivalentUsd: null })
         }
         const sessionId = url.searchParams.get('sessionId') ?? ''
         const binding = sessionId && bindings.read(sessionId)?.binding
         let available = false, reason: string | undefined
         try {
-          const profile = binding && binding.selected ? { profile: binding.profile, prompts: binding.prompts } : await configuredProfile()
+          const profile = binding && binding.selected ? { profile: binding.profile, prompts: binding.prompts } : await primaryProfile()
           const controller = await getRuntime(profile)
           controller.transport.assertAvailable()
           if (needsBudget(profile.profile)) budget.check(profileRoutes(profile.profile))
@@ -252,19 +322,25 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
       }
       if (body.action === 'configure') {
         if (!Number.isSafeInteger(body.revision) || Number(body.revision) < 0) throw new Error(bi('配置版本无效，请刷新后重试', 'Invalid settings revision; refresh and retry'))
-        const pair = validatePairChoice(body.pair, await physicalCatalog())
-        const revision = store.writeDocument('settings:profile', Number(body.revision), modelProfileFromChoice(pair))
-        const profile = await configuredProfile()
-        await getRuntime(profile)
+        const catalog = await physicalCatalog(), current = readPairs(store)
+        // A tab from before combos existed sends one pair; keep the other combos
+        // and let it edit only the first one it can see.
+        const proposed = Array.isArray(body.pairs) ? body.pairs
+          : [{ ...(current.pairs[0] ?? { id: FUSION_MODEL, name: '自动' }), pair: body.pair }, ...current.pairs.slice(1)]
+        const pairs = validatePairs(proposed, catalog, current.pairs)
+        const revision = writePairs(store, Number(body.revision), pairs)
+        const state = await resolveCombos()
+        const profile = state.profiles.values().next().value
+        if (profile) await getRuntime(profile)
         return json(res, 200, { ok: true, revision })
       }
       if (body.action === 'authorize') {
         if (config.authorizationPath) throw new Error(bi('运行额度由外部授权文件管理，不能在此覆盖', 'Run limits are managed by an external authorization file and cannot be overridden here'))
-        const saved = store.readDocument('settings:profile')
-        if (!saved || saved.revision !== body.revision) throw new Error(bi('模型组合已变化，请刷新后再启用额度', 'The pair changed; refresh before enabling limits'))
-        const profile = await configuredProfile()
-        if (store.readDocument('settings:profile')?.revision !== body.revision) throw new Error(bi('模型组合已变化，请刷新后再启用额度', 'The pair changed; refresh before enabling limits'))
-        const auth = authorizeConfiguredPair(store, profileRoutes(profile.profile), body.limits)
+        if (readPairs(store).revision !== body.revision) throw new Error(bi('组合列表已变化，请刷新后再启用额度', 'The combo list changed; refresh before enabling limits'))
+        // One authorization must cover every combo the menu can offer.
+        const state = await resolveCombos()
+        if (readPairs(store).revision !== body.revision) throw new Error(bi('组合列表已变化，请刷新后再启用额度', 'The combo list changed; refresh before enabling limits'))
+        const auth = authorizeConfiguredPair(store, [...state.profiles.values()].flatMap(profile => profileRoutes(profile.profile)), body.limits)
         return json(res, 200, { ok: true, expiresAt: auth.expiresAt })
       }
       throw new Error(bi('请使用原模型菜单选择 Fusion 或切换普通模型', 'Use the model menu to select Fusion or another model'))
@@ -280,7 +356,7 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
       const [action = 'status', ...note] = invocation.rawInput.trim().split(/\s+/)
       try {
         const binding = bindings.read(invocation.agent.id)?.binding
-        if (!binding?.selected) return { kind: 'success', text: bi('当前会话未启用 Fusion。请在模型选择器中选择 Fusion · 自动。', 'Fusion is not selected in this conversation. Choose Fusion · auto in the model menu.') }
+        if (!binding?.selected) return { kind: 'success', text: bi('当前会话未启用 Fusion。请在模型选择器中选择一个 Fusion 组合。', 'Fusion is not selected in this conversation. Choose a Fusion combo in the model menu.') }
         if (action === 'status' || action === '') {
           const controller = await getRuntime({ profile: binding.profile, prompts: binding.prompts })
           const state = store.load(binding.taskId)!
@@ -312,7 +388,7 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
     } }))
   ctx.effect(() => async () => { if (creating) await creating.catch(() => undefined); if (runtime) await runtime.close(); store.close() })
   // Warm only configuration/scopes; initialization performs no inference.
-  try { await getRuntime(await configuredProfile()) }
+  try { await getRuntime(await primaryProfile()) }
   catch {
     const selected = bindings.selected()[0]
     if (selected) await getRuntime({ profile: selected.profile, prompts: selected.prompts })

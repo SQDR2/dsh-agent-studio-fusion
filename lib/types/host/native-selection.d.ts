@@ -7,12 +7,19 @@ import { FUSION_MODEL, FUSION_PROVIDER, isFusionSelection } from '../identity.js
 import type { ResolvedProfile } from '../profile/resolve.js';
 import type { FusionCoordinator } from './coordinator.js';
 export { FUSION_MODEL, FUSION_PROVIDER, isFusionSelection };
-/** Resolves the configured Lead's declared input modalities; undefined means unconfigured or unverifiable. */
-export type LeadInputModalities = () => Promise<readonly ModelModality[] | undefined>;
+/** One combo as the native menu needs it: its id, its label and its Lead's modalities. */
+export interface FusionModelEntry {
+    readonly id: string;
+    readonly name: string;
+    readonly description?: string;
+    readonly inputModalities: readonly ModelModality[];
+}
+/** Read every combo this Host currently advertises; empty means unconfigured. */
+export type FusionModels = () => Promise<readonly FusionModelEntry[]>;
 /** Catalog-only local adapter; the native request is physically routed before dispatch. */
 export declare class FusionCatalogAdapter extends LlmAdapter {
-    private readonly leadInputModalities?;
-    constructor(leadInputModalities?: LeadInputModalities | undefined);
+    private readonly models?;
+    constructor(models?: FusionModels | undefined);
     providerInfo(provider: string): {
         id: string;
         name: string;
@@ -24,6 +31,9 @@ export declare class FusionCatalogAdapter extends LlmAdapter {
 /** Public native lifecycle integration. No model-menu replacement or Host patch. */
 export declare function installNativeFusionSelection(ctx: Context, input: {
     coordinator(): FusionCoordinator | undefined;
-    profile(): ResolvedProfile | undefined;
+    /** The frozen profile of one combo, or undefined when it cannot be used yet. */
+    profile(model: string): ResolvedProfile | undefined;
+    /** Why one combo cannot run, for the message a blocked session shows. */
+    reason?(model: string): string | undefined;
     selection(agent: Agent): PhysicalRoute | undefined;
 }): () => void;

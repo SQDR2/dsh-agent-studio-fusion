@@ -2325,7 +2325,7 @@ describe('complete native Fusion workflow', () => {
     ctx.llm.registerAdapter([FUSION_PROVIDER], catalog)
     expect(await catalog.resolveModel(FUSION_PROVIDER, FUSION_MODEL)).not.toHaveProperty('reasoning')
     const remove = installNativeFusionSelection(ctx, { coordinator: () => coordinator,
-      profile: () => coordinator.options.profile, selection: () => selectionRef.current })
+      profile: model => model === FUSION_MODEL ? coordinator.options.profile : undefined, selection: () => selectionRef.current })
     cleanups.push(async () => remove())
     const fusion = { provider: FUSION_PROVIDER, model: FUSION_MODEL }
     parent.session.append('model/selection', fusion)
@@ -2353,7 +2353,7 @@ describe('complete native Fusion workflow', () => {
     ])
     await coordinator.clear(parent)
     const remove = installNativeFusionSelection(ctx, { coordinator: () => coordinator,
-      profile: () => coordinator.options.profile, selection: () => selectionRef.current })
+      profile: model => model === FUSION_MODEL ? coordinator.options.profile : undefined, selection: () => selectionRef.current })
     cleanups.push(async () => remove())
     selectionRef.current = { provider: FUSION_PROVIDER, model: FUSION_MODEL }
     parent.followup(createUserMessage({ source: { kind: 'user' },  content: [{ type: 'text', text: 'Fix addition and verify.' }] }))
@@ -2393,7 +2393,7 @@ describe('complete native Fusion workflow', () => {
     const { ctx, parent, coordinator, selectionRef, adapter } = await setup([delegate(), 'hang-slow', textResponse('Ordinary answer')])
     selectionRef.current = { provider: FUSION_PROVIDER, model: FUSION_MODEL }
     const remove = installNativeFusionSelection(ctx, { coordinator: () => coordinator,
-      profile: () => coordinator.options.profile, selection: () => selectionRef.current })
+      profile: model => model === FUSION_MODEL ? coordinator.options.profile : undefined, selection: () => selectionRef.current })
     cleanups.push(async () => remove())
     parent.followup(createUserMessage({ source: { kind: 'user' },  content: [{ type: 'text', text: 'Fix addition.' }] }))
     await waitForNative(() => expect(adapter.requests).toHaveLength(2))

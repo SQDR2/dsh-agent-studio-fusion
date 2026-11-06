@@ -8,6 +8,9 @@ hotReload:
     - src/dsh-fusion.ts
     - src/host/coordinator.ts
     - src/host/settings.ts
+    - src/host/pairs.ts
+    - src/host/native-selection.ts
+    - src/identity.ts
     - src/host/status.ts
     - src/host/native-scopes.ts
     - src/host/native-worker.ts

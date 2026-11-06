@@ -27,10 +27,18 @@ export declare const PACKAGE_NAME = "@sqdr2/dsh-fusion";
 export declare const PLUGIN_NAME = "dsh-fusion";
 /** The plugin id and package name this project used before the rename. */
 export declare const LEGACY_PLUGIN_NAME = "dsh-model-fusion";
-/** Registered provider route for the Fusion model entry. */
+/** Registered provider route for the Fusion model entries. */
 export declare const FUSION_PROVIDER = "dsh-fusion";
-/** The single model id the Fusion entry advertises. */
+/**
+ * The model id of the combo every installation starts with.
+ *
+ * It is a pair id like any other; keeping this exact spelling for the first
+ * combo means a durable `model/selection` written before combos existed still
+ * names a combo that exists.
+ */
 export declare const FUSION_MODEL = "auto";
+/** Whether a model id names a Fusion combo on this provider. */
+export declare const isFusionModel: (model: string | undefined) => boolean;
 /**
  * The provider route this plugin registered before it was renamed from
  * `dsh-model-fusion`. Sessions created then still name it in their durable
@@ -40,23 +48,17 @@ export declare const FUSION_MODEL = "auto";
 export declare const LEGACY_FUSION_PROVIDER = "dsh-model-fusion";
 /** Whether a provider route belongs to this plugin, under either name. */
 export declare const isFusionProvider: (provider: string | undefined) => boolean;
-/** Whether a route names the Fusion entry, under either name. */
+/** Whether a route names a Fusion combo, under either provider spelling. */
 export declare const isFusionSelection: (route: {
     provider?: string;
     model?: string;
 } | undefined) => boolean;
+/** Whether a switch-notice summary describes a Fusion combo as either side. */
+export declare const isFusionSelectionLabel: (summary: string | undefined) => boolean;
 /**
- * How a native model-switch notice names this entry (`provider/model`).
- *
- * Both spellings are listed: a session that switched to Fusion before the
- * rename carries the old one in its durable log, and the notice is the same
- * non-change on every Fusion step either way.
- */
-export declare const FUSION_SELECTION_LABELS: readonly ["dsh-fusion/auto", "dsh-model-fusion/auto"];
-/**
- * Whether a route already names the entry under its current name. A durable
- * intent that fails this is rewritten before the next request is assembled;
- * the legacy spelling is a read-side alias, not a route that still dispatches.
+ * Whether a route already names a combo under its current provider spelling. A
+ * durable intent that fails this is rewritten before the next request is
+ * assembled; the legacy spelling is a read-side alias, not a dispatching route.
  */
 export declare const isCurrentFusionSelection: (route: {
     provider?: string;

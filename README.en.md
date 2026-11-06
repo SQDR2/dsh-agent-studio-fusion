@@ -8,7 +8,7 @@
 > ([`dsh-agy-worker`](https://github.com/SQDR2/dsh-agy-worker)) work as a Sidekick, and it removes a few ways a frozen
 > scope or a stale task record could dead-end a run. See [What this fork changes](#what-this-fork-changes).
 
-In DeepSeek Harness (DSH), Fusion is one entry in the model menu: **Fusion · auto**. Behind it are two models you choose:
+In DeepSeek Harness (DSH), Fusion is an ordinary model in the menu: **save N combos and the menu shows N entries** (**Fusion · combo name**). Behind each one are two models you choose:
 
 - **Lead**: a strong frontier model. It reads the request and the code, briefs the work and reviews the result.
 - **Sidekick**: a much cheaper model. It edits code, runs commands and runs tests.
@@ -51,8 +51,10 @@ After contaminated attempts were excluded, four tasks were clean in every condit
 ## Use
 
 1. Install the plugin ([INSTALL.md](INSTALL.md)).
-2. Open the **Fusion** entry in the left sidebar (default below Memory System) and choose a Lead and a Sidekick. Any model you are signed in to in DSH works.
-3. Select **Fusion · auto** in the model menu and work as usual.
+2. Open the **Fusion** entry in the left sidebar (default below Memory System), name the combo, and choose a Lead and a Sidekick. Any model you are signed in to in DSH works.
+3. Select that combo (**Fusion · name**) in the model menu and work as usual.
+
+**Several combos can coexist** (up to 6): for example a cheap "fast" one and a strong "thorough" one, each its own model-menu entry. With several conversations open, each one can pick a different combo — a conversation freezes the combo it selected, so later edits or other conversations never change it. A pre-combo installation is migrated into one combo named "自动" whose model id stays `auto`, so existing conversations keep working.
 
 **Pairing:** Fusion saves money because the Sidekick costs far less than the Lead. Pick a strong frontier Lead and a Sidekick that is much cheaper (ideally 5× or more). The closer their prices, the smaller the saving.
 

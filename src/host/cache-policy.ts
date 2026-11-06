@@ -148,12 +148,24 @@ export class CachePolicy {
 }
 
 type Route = { provider: string; model: string }
-/** One row of the settings page: what applies, why, what the defaults say, and what was observed. */
-export function cacheView(policy: CachePolicy, pair?: { lead: Route; worker: Route }, pairChoice?: { lead?: boolean | 'auto'; worker?: boolean | 'auto' }) {
-  const same = (a: Route | undefined, provider: string, model: string) => a?.provider === provider && a.model === model
-  return policy.routes(pair ? [pair.lead, pair.worker] : []).map(({ provider, model }) => {
-    const role: Role | undefined = same(pair?.lead, provider, model) ? 'lead' : same(pair?.worker, provider, model) ? 'worker' : undefined
-    const effective = policy.resolve(provider, model, role ?? 'lead', role ? pairChoice?.[role] : undefined)
+/** A saved combo's routes, plus its optional per-role keepalive choice. */
+export interface CachePairRoutes {
+  readonly lead: Route
+  readonly worker: Route
+  readonly cacheKeepalive?: { lead?: boolean | 'auto'; worker?: boolean | 'auto' }
+}
+/**
+ * One row of the settings page: what applies, why, what the defaults say, and
+ * what was observed. Every saved combo contributes its routes, so a second
+ * combo's models are listed and labelled even before a session uses them.
+ */
+export function cacheView(policy: CachePolicy, pair?: CachePairRoutes | readonly CachePairRoutes[], pairChoice?: { lead?: boolean | 'auto'; worker?: boolean | 'auto' }) {
+  const pairs: readonly CachePairRoutes[] = Array.isArray(pair) ? pair : pair ? [pair as CachePairRoutes] : []
+  const same = (role: 'lead' | 'worker', provider: string, model: string) => pairs.some(item => item[role].provider === provider && item[role].model === model)
+  const choiceOf = (role: 'lead' | 'worker') => pairs.find(item => item.cacheKeepalive)?.['cacheKeepalive']?.[role] ?? pairChoice?.[role]
+  return policy.routes(pairs.flatMap(item => [item.lead, item.worker])).map(({ provider, model }) => {
+    const role: Role | undefined = same('lead', provider, model) ? 'lead' : same('worker', provider, model) ? 'worker' : undefined
+    const effective = policy.resolve(provider, model, role ?? 'lead', role ? choiceOf(role) : undefined)
     const stats = policy.stats(provider, model), { family, route } = effective.defaults
     return { provider, model, role,
       mode: effective.mode, intervalSeconds: effective.intervalSeconds, modeSource: effective.modeSource, intervalSource: effective.intervalSource,

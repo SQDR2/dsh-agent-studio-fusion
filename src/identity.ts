@@ -33,11 +33,29 @@ export const PLUGIN_NAME = 'dsh-fusion'
 /** The plugin id and package name this project used before the rename. */
 export const LEGACY_PLUGIN_NAME = 'dsh-model-fusion'
 
-/** Registered provider route for the Fusion model entry. */
+/** Registered provider route for the Fusion model entries. */
 export const FUSION_PROVIDER = 'dsh-fusion'
 
-/** The single model id the Fusion entry advertises. */
+/**
+ * The model id of the combo every installation starts with.
+ *
+ * It is a pair id like any other; keeping this exact spelling for the first
+ * combo means a durable `model/selection` written before combos existed still
+ * names a combo that exists.
+ */
 export const FUSION_MODEL = 'auto'
+
+/**
+ * The model ids this provider advertises: `auto` plus one generated
+ * `pair-xxxxxxxx` per additional combo. The browser bundle inlines this module,
+ * so the namespace shape is fixed here rather than read from a settings
+ * document at import time.
+ */
+const FUSION_MODEL_PATTERN = /^(?:auto|pair-[a-z0-9]{6,12})$/
+
+/** Whether a model id names a Fusion combo on this provider. */
+export const isFusionModel = (model: string | undefined): boolean =>
+  typeof model === 'string' && FUSION_MODEL_PATTERN.test(model)
 
 /**
  * The provider route this plugin registered before it was renamed from
@@ -51,26 +69,31 @@ export const LEGACY_FUSION_PROVIDER = 'dsh-model-fusion'
 export const isFusionProvider = (provider: string | undefined): boolean =>
   provider === FUSION_PROVIDER || provider === LEGACY_FUSION_PROVIDER
 
-/** Whether a route names the Fusion entry, under either name. */
+/** Whether a route names a Fusion combo, under either provider spelling. */
 export const isFusionSelection = (route: { provider?: string; model?: string } | undefined): boolean =>
-  isFusionProvider(route?.provider) && route?.model === FUSION_MODEL
+  isFusionProvider(route?.provider) && isFusionModel(route?.model)
 
 /**
- * How a native model-switch notice names this entry (`provider/model`).
+ * How a native model-switch notice names a combo: `provider/model`, or the bare
+ * model when both sides share this provider (switching from one combo to
+ * another).
  *
- * Both spellings are listed: a session that switched to Fusion before the
- * rename carries the old one in its durable log, and the notice is the same
- * non-change on every Fusion step either way.
+ * The notice is a pseudo-change: it compares the virtual menu route with the
+ * physical Lead route that actually dispatches, so it would otherwise repeat on
+ * every Fusion step. Both provider spellings are accepted because a session
+ * that switched to Fusion before the rename carries the old one in its durable
+ * log; any combo id matches, since combos are not physical models.
  */
-export const FUSION_SELECTION_LABELS = [
-  `${FUSION_PROVIDER}/${FUSION_MODEL}`,
-  `${LEGACY_FUSION_PROVIDER}/${FUSION_MODEL}`,
-] as const
+const FUSION_SELECTION_LABEL_PATTERN = /(?:(?:dsh-fusion|dsh-model-fusion)\/|→ )(?:auto|pair-[a-z0-9]{6,12})$/
+
+/** Whether a switch-notice summary describes a Fusion combo as either side. */
+export const isFusionSelectionLabel = (summary: string | undefined): boolean =>
+  typeof summary === 'string' && FUSION_SELECTION_LABEL_PATTERN.test(summary)
 
 /**
- * Whether a route already names the entry under its current name. A durable
- * intent that fails this is rewritten before the next request is assembled;
- * the legacy spelling is a read-side alias, not a route that still dispatches.
+ * Whether a route already names a combo under its current provider spelling. A
+ * durable intent that fails this is rewritten before the next request is
+ * assembled; the legacy spelling is a read-side alias, not a dispatching route.
  */
 export const isCurrentFusionSelection = (route: { provider?: string; model?: string } | undefined): boolean =>
-  route?.provider === FUSION_PROVIDER && route.model === FUSION_MODEL
+  route?.provider === FUSION_PROVIDER && isFusionModel(route.model)

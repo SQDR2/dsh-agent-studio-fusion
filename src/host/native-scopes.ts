@@ -7,7 +7,7 @@ import { requestOutputReservation } from '../context/guard.js'
 import type { PhysicalRoute, Role } from '../contracts.js'
 import type { SessionBinding } from './bindings.js'
 import { digestOf } from '../digest.js'
-import { FUSION_SELECTION_LABELS } from '../identity.js'
+import { isFusionSelectionLabel } from '../identity.js'
 import { fusionToolDiagnostic, projectRoleTools } from './tool-table.js'
 
 export interface FusionScopeCallbacks {
@@ -122,7 +122,7 @@ export class NativeFusionScopes {
       return { ...decision, messages: [...decision.messages.filter(message => {
         const source = message.source
         return !(source?.kind === 'model-selection' && source.form === 'notice'
-          && FUSION_SELECTION_LABELS.some(label => source.summary.endsWith(label)))
+          && isFusionSelectionLabel(source.summary))
       }).map(message =>
         this.callbacks.projectMessage?.(agent, entry.binding, role, message) ?? message), ...(taskContext ? [taskContext] : [])] }
     }, { prepend: true }))

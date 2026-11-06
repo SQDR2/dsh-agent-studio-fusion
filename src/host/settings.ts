@@ -66,19 +66,23 @@ export function validatePairChoice(value: unknown, catalog: SettingsCatalog): Pa
 /** New sessions can opt into this Worker cap. Frozen sessions keep their saved profile. */
 export const WORKER_IMPLEMENTATION_OUTPUT_TOKENS = 128_000
 
-export function profileFromChoice(pair: PairChoice): Record<string, unknown> {
+export function profileFromChoice(pair: PairChoice, id = 'fusion-auto'): Record<string, unknown> {
   const { outputTokens, ...routes } = pair
   const version = outputTokens?.worker === WORKER_IMPLEMENTATION_OUTPUT_TOKENS ? '0.1.0-worker-128k' : '0.1.0-faithful'
-  return { schemaVersion: 1, id: 'fusion-auto', version, enabled: true, quality: 'experimental',
+  return { schemaVersion: 1, id, version, enabled: true, quality: 'experimental',
     ...routes, workerUpgradePath: [], dataPolicyId: 'native-host-workspace-policy', evidenceCampaignIds: [],
     ...(outputTokens === undefined ? {} : { context: Object.fromEntries(Object.entries(outputTokens)
       .map(([role, reserveOutputTokens]) => [role, { reserveOutputTokens }])) }) }
 }
 
-/** Product defaults; explicit legacy/benchmark profiles retain their old contract. */
-export function modelProfileFromChoice(pair: PairChoice): Record<string, unknown> {
+/**
+ * Product defaults; explicit legacy/benchmark profiles retain their old contract.
+ * `id` names the combo; the first one keeps the historical `fusion-auto` so a
+ * profile frozen before combos existed keeps its identity.
+ */
+export function modelProfileFromChoice(pair: PairChoice, id = 'fusion-auto'): Record<string, unknown> {
   const { outputTokens: _output, ...native } = pair
-  return { ...profileFromChoice(native), version: '0.2.0-enforced-v3', interactionMode: 'model-like', workflowPolicy: 'enforced-v3' }
+  return { ...profileFromChoice(native, id), version: '0.2.0-enforced-v3', interactionMode: 'model-like', workflowPolicy: 'enforced-v3' }
 }
 
 /** Keep existing default settings stable; expose explicit larger/smaller limits on reload. */
