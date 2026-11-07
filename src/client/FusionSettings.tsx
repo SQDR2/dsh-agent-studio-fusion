@@ -44,14 +44,24 @@ const styles = `
 .fusion-settings :is(input[type=number],input[type=text]){min-width:0;width:100%;box-sizing:border-box;background-color:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);border:1px solid var(--dsw-alias-border-l2);border-radius:7px;padding:8px;font:inherit}
 .fusion-settings .fusion-consent{display:flex;align-items:flex-start;gap:8px;font-size:12px;line-height:18px}
 .fusion-combos{display:flex;flex-direction:column;gap:8px}
-.fusion-combo{display:flex;align-items:center;gap:10px;padding:10px 12px;border:1px solid var(--dsw-alias-border-l2);border-radius:9px;background:var(--dsw-alias-bg-layer-1);font-size:13px}
-.fusion-combo[data-active=true]{border-color:var(--dsw-alias-brand-primary)}
-.fusion-combo-main{display:flex;flex-direction:column;gap:2px;min-width:0;flex:1 1 auto;cursor:pointer;background:none;border:0;padding:0;color:inherit;font:inherit;text-align:left}
-.fusion-combo-name{font-weight:600;overflow-wrap:anywhere}
-.fusion-combo-routes{color:var(--dsw-alias-label-secondary);font-size:12px;overflow-wrap:anywhere}
-.fusion-combo-actions{display:flex;align-items:center;gap:6px;flex-shrink:0}
-.fusion-combo-actions button{padding:3px 12px;font-size:12px;border-radius:14px;background:transparent;color:var(--dsw-alias-label-primary)}
-.fusion-combo-add{align-self:flex-start}
+.fusion-settings .fusion-combo{display:flex;align-items:stretch;padding:0;border:1px solid var(--dsw-alias-border-l2);border-radius:10px;background-color:var(--dsw-alias-bg-layer-1);font-size:13px;overflow:hidden;transition:border-color .15s ease,background-color .15s ease}
+.fusion-settings .fusion-combo:hover{background-color:var(--dsw-alias-interactive-bg-hover)}
+.fusion-settings .fusion-combo[data-active=true]{border-color:var(--dsw-alias-brand-primary);background-color:var(--dsw-alias-interactive-bg-hover-accent)}
+.fusion-settings .fusion-combo-main{flex:1 1 auto;display:flex;align-items:center;gap:10px;min-width:0;padding:11px 12px;background:none;border:0;border-radius:0;color:inherit;font:inherit;text-align:left;cursor:pointer}
+.fusion-settings .fusion-combo-main:hover{background:none}
+.fusion-settings .fusion-combo :is(.fusion-combo-main,.fusion-combo-actions):focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:-2px}
+.fusion-settings .fusion-combo-check{position:relative;flex:none;width:14px;height:14px;border:1.5px solid var(--dsw-alias-border-l2);border-radius:50%;transition:border-color .15s ease}
+.fusion-settings .fusion-combo:hover .fusion-combo-check{border-color:var(--dsw-alias-label-tertiary)}
+.fusion-settings .fusion-combo[data-active=true] .fusion-combo-check{border-color:var(--dsw-alias-brand-primary)}
+.fusion-settings .fusion-combo[data-active=true] .fusion-combo-check::after{content:'';position:absolute;inset:2.5px;border-radius:50%;background:var(--dsw-alias-brand-primary)}
+.fusion-settings .fusion-combo-text{display:flex;flex-direction:column;gap:2px;min-width:0}
+.fusion-settings .fusion-combo-name{font-weight:600;overflow-wrap:anywhere}
+.fusion-settings .fusion-combo-routes{color:var(--dsw-alias-label-secondary);font-size:12px;overflow-wrap:anywhere}
+.fusion-settings .fusion-combo-actions{flex:none;align-self:stretch;display:flex;align-items:center;padding:0 14px;border:0;border-left:1px solid var(--dsw-alias-border-l1);border-radius:0;background:none;color:var(--dsw-alias-label-secondary);font:inherit;font-size:12px;cursor:pointer;transition:color .15s ease,background-color .15s ease}
+.fusion-settings .fusion-combo-actions:hover:not(:disabled){color:var(--dsw-alias-state-error-primary);background-color:var(--dsw-alias-interactive-bg-hover-danger)}
+.fusion-settings .fusion-combo-actions:disabled{opacity:.4;cursor:default}
+.fusion-settings .fusion-combo-add{align-self:flex-start;padding:8px 16px;border:1px solid var(--dsw-alias-border-l2);border-radius:9px;background:none;color:var(--dsw-alias-label-secondary);font-size:13px}
+.fusion-settings .fusion-combo-add:hover:not(:disabled){background-color:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
 .fusion-cache{box-sizing:border-box;width:100%;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;background:var(--dsw-alias-bg-module-platform);padding:16px;display:flex;flex-direction:column;gap:12px}
 .fusion-cache h3{margin:0}
 .fusion-cache-summary{cursor:pointer;font-weight:600;font-size:14px;display:flex;align-items:center;justify-content:space-between;list-style:none;user-select:none;padding:2px 0}
@@ -216,15 +226,25 @@ export function FusionSettings() {
       {state && <>
         <section className="fusion-card" aria-label={tr(lang, '组合列表', 'Combo list')}>
           <div className="fusion-combos">
-            {draft.map((combo, index) => <div className="fusion-combo" key={combo.key} data-active={combo.key === current?.key}>
-              <button type="button" className="fusion-combo-main" aria-pressed={combo.key === current?.key} onClick={() => setActive(index)}>
-                <span className="fusion-combo-name">{combo.name.trim() || tr(lang, '未命名组合', 'Untitled combo')}</span>
-                <span className="fusion-combo-routes">{`${routeName(combo.pair.lead)} → ${routeName(combo.pair.worker)}`}</span>
-              </button>
-              <div className="fusion-combo-actions">
-                <button type="button" disabled={saving || draft.length <= 1} onClick={() => removeCombo(index)}>{tr(lang, '删除', 'Delete')}</button>
+            {draft.map((combo, index) => {
+              const selected = combo.key === current?.key
+              const label = combo.name.trim() || tr(lang, '未命名组合', 'Untitled combo')
+              // The whole row is the selection target: the button spans the row up to the Delete
+              // button, so the padding and the empty space beside the text select the combo too.
+              return <div className="fusion-combo" key={combo.key} data-active={selected}>
+                <button type="button" className="fusion-combo-main" aria-pressed={selected}
+                  onClick={() => setActive(index)}>
+                  <span className="fusion-combo-check" aria-hidden="true" />
+                  <span className="fusion-combo-text">
+                    <span className="fusion-combo-name">{label}</span>
+                    <span className="fusion-combo-routes">{`${routeName(combo.pair.lead)} → ${routeName(combo.pair.worker)}`}</span>
+                  </span>
+                </button>
+                <button type="button" className="fusion-combo-actions" disabled={saving || draft.length <= 1}
+                  aria-label={tr(lang, `删除组合 ${label}`, `Delete combo ${label}`)}
+                  onClick={event => { event.stopPropagation(); removeCombo(index) }}>{tr(lang, '删除', 'Delete')}</button>
               </div>
-            </div>)}
+            })}
             {!draft.length && <p>{tr(lang, '还没有组合。新增一个，选择 Lead 和 Sidekick 后保存。', 'No combos yet. Add one, choose a Lead and a Sidekick, then save.')}</p>}
           </div>
           <button type="button" className="fusion-combo-add" disabled={saving || draft.length >= state.maxPairs} onClick={addCombo}>{tr(lang, '＋ 新增组合', '+ Add combo')}</button>

@@ -41,6 +41,10 @@ const rows = (root: ReactTestRenderer) => root.root.findAllByProps({ className: 
 const button = (root: ReactTestRenderer, label: string) => root.root.findAllByType('button')
   .find(node => String(node.children.join('')).includes(label))!
 const nameInput = (root: ReactTestRenderer) => root.root.findAllByType('input').find(node => node.props.type === 'text')!
+const main = (root: ReactTestRenderer, index: number) => rows(root)[index]!.findByProps({ className: 'fusion-combo-main' })
+const remove = (root: ReactTestRenderer, index: number) => rows(root)[index]!.findByProps({ className: 'fusion-combo-actions' })
+const click = () => ({ stopPropagation: vi.fn() })
+const selected = (root: ReactTestRenderer) => rows(root).map(row => row.props['data-active'] === true)
 
 describe('FusionSettings combo list', () => {
   it('lists every saved combo and lets one be added, renamed and removed', async () => {
@@ -64,8 +68,36 @@ describe('FusionSettings combo list', () => {
     expect(root.root.findAllByProps({ role: 'alert' })[0]!.children.join('')).toContain('第 3 个组合')
     expect(posts).toHaveLength(0)
 
-    await act(async () => { rows(root)[2]!.findAllByType('button').find(node => String(node.children.join('')) === '删除')!.props.onClick() })
+    await act(async () => { remove(root, 2).props.onClick(click()) })
     expect(rows(root)).toHaveLength(2)
+  })
+
+  it('selects a combo from anywhere on its row, never from the Delete button', async () => {
+    pinLanguage('zh-CN')
+    stub([])
+    let root!: ReactTestRenderer
+    await act(async () => { root = create(React.createElement(FusionSettings)) })
+    roots.push(root)
+
+    expect(selected(root)).toEqual([true, false])
+
+    // The row is one selection target: the button carries the whole row's padding, not just the text.
+    const css = root.root.findAllByType('style').map(node => String(node.children.join(''))).join('\n')
+    expect(css).toMatch(/\.fusion-settings \.fusion-combo-main\{[^}]*flex:1 1 auto/)
+    expect(css).toMatch(/\.fusion-settings \.fusion-combo-main\{[^}]*padding:11px 12px/)
+    expect(css).toMatch(/\.fusion-settings \.fusion-combo-main\{[^}]*background:none/)
+    // The row itself no longer carries the click; it only frames the two buttons.
+    expect(css).toMatch(/\.fusion-settings \.fusion-combo\{[^}]*padding:0/)
+
+    await act(async () => { main(root, 1).props.onClick() })
+    expect(selected(root)).toEqual([false, true])
+    expect(main(root, 1).props['aria-pressed']).toBe(true)
+
+    // Delete keeps its own hit area and does not change the selection: the surviving row stays selected.
+    await act(async () => { remove(root, 0).props.onClick(click()) })
+    expect(rows(root)).toHaveLength(1)
+    expect(selected(root)).toEqual([true])
+    expect(rows(root)[0]!.findAllByProps({ className: 'fusion-combo-name' })[0]!.children.join('')).toBe('稳')
   })
 
   it('saves the whole list, keeping the ids the Host already issued', async () => {
@@ -77,7 +109,7 @@ describe('FusionSettings combo list', () => {
     roots.push(root)
 
     // Delete the second combo: the remaining one is saved as a full list.
-    await act(async () => { rows(root)[1]!.findAllByType('button').find(node => String(node.children.join('')) === '删除')!.props.onClick() })
+    await act(async () => { remove(root, 1).props.onClick(click()) })
     await act(async () => { button(root, '保存组合').props.onClick() })
 
     expect(posts).toHaveLength(1)
