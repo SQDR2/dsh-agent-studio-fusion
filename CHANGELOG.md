@@ -15,10 +15,17 @@ own tags and releases.
 Entry format: what changed, then what was actually validated. "Not claimed" lines mark what a release did *not* test —
 read them before assuming a platform is covered.
 
-## Unreleased
+## 0.3.3 — 2026-11-07
 
 ### Changes
 
+- The combo list selects from the whole row, and no longer paints a black pill inside it. Only the name and route text
+  was a button, so the row's padding and the empty space beside the text ignored clicks; and the generic
+  `.fusion-settings button` fill (`--dsw-alias-button-primary-fill`, which is `#0f1115` in the light theme) outranked the
+  row's `background:none`, so the one clickable strip rendered as a black capsule. The row is now `padding:0` with the
+  button spanning its full width up to the Delete button (89% of the row in a headless-Chrome measurement), the button
+  keeps `background:none`, and Delete keeps its own hit area and stops its click from selecting. A radio-style marker,
+  a hover surface and a brand-tinted selected state carry the selection instead of the fill.
 - The composer names the permission of the model working now. Fusion pins the conversation (Lead) session to
   `read-only`, and that pair matches no configured preset, so the native permission control read `Custom` for the whole
   task. A Fusion chip in the composer tool row shows `Lead · Read Only` / `Sidekick · Full access` and follows the role
@@ -48,12 +55,20 @@ read them before assuming a platform is covered.
 
 ### Validation
 
-- `pnpm test` (52 files, 389 tests), `tsc -p tsconfig.json --noEmit`, and the native Host suite
-  (`DSHX_HARNESS=… npx vitest run --config vitest.host.config.mts`: 263 passed, 1 skipped).
+- `pnpm test` (53 files, 397 tests: 395 passed, 1 skipped, 1 failed), `tsc -p tsconfig.json --noEmit`. The native Host
+  suite was last run at 263 passed / 1 skipped and was not re-run for this change: nothing outside the client bundle
+  moved. The one failing case is `tests/check-programs.spec.ts`, whose probe returns `undefined` on this Windows host
+  both before and after the change, so it is not counted as a regression.
 - Rebuilt `lib/` and loaded both artifacts in Node: the Host module exports `apply`/`Config`/`name`, and the client
   bundle registers under `@sqdr2/dsh-fusion` and still exports `apply`/`inject`/`name`/`FUSION_PANEL_ID`/`FusionPanelIcon`.
 - New `tests/pairs.spec.ts` (migration, id assignment, name/limit validation, compare-and-swap, per-combo profile
   identity) and `tests/fusion-combos.spec.ts` (list/rename/add/delete and whole-list save payload).
+- The combo row hit area: a new `tests/fusion-combos.spec.ts` case asserts the row carries no padding, the selection
+  button owns it (`flex:1 1 auto`, `padding:11px 12px`, `background:none`), the row switches selection from the row body,
+  and Delete removes its own row without changing which combo is selected. The same markup and CSS were rendered in
+  headless Chrome and hit-tested with `elementFromPoint`: the left edge, the marker, the text and the empty space right
+  of it all resolve to the selection button, the right edge resolves to Delete, and the selection button covers 89% of
+  the row width.
 - The permission chip: new `tests/status.spec.ts` cases (role modes, the takeover exception and the released
   conversation) and `tests/fusion-permission.spec.ts` (both roles, the Custom explanation, silence outside a
   role-separated task, the fast poll, and the additive registration that never takes the native permission slot).
