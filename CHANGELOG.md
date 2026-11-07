@@ -15,6 +15,35 @@ own tags and releases.
 Entry format: what changed, then what was actually validated. "Not claimed" lines mark what a release did *not* test —
 read them before assuming a platform is covered.
 
+## 0.3.4 — 2026-11-07
+
+### Changes
+
+- A combo that names a model the catalog no longer offers now says **which** route and **which** combo went stale.
+  Reading a saved combo deliberately tolerates a retired route so the row stays visible and editable, but saving the
+  list rejects it — and the refusal read only `lead 模型已不可用，请刷新后重选`, naming neither the route nor which combo
+  of several. After a provider is renamed the model itself usually still exists under the new provider id, so the
+  message left nothing to act on; and when the user had just edited the other role, it read like a complaint about the
+  role they had just changed. The Host now names the route (`lead 模型已不可用：aihub-openai/gpt-6.1-sol。请为该角色重新
+  选择模型`), `validatePairs` passes the combo name through so a multi-row save says which row failed, and the page
+  checks the same condition before sending: the save names the combo, the role and the route, the combo list marks the
+  affected row, and the role's picker keeps the dropped model listed and disabled (`已不可用：provider/model`) instead
+  of silently falling back to the `选择已连接的模型` placeholder.
+
+### Validation
+
+- `pnpm test` (54 files, 401 tests: 399 passed, 1 skipped, 1 failed) and `tsc -p tsconfig.json --noEmit`. The one
+  failing case is `tests/check-programs.spec.ts`, whose probe returns `undefined` on this Windows host before and after
+  the change, so it is not counted as a regression. The native Host suite was not re-run: it needs a harness checkout
+  (`DSHX_HARNESS`), which this machine does not have.
+- New `tests/settings-stale-route.spec.ts` covers the route naming, the combo naming through `validatePairs`, and
+  `missingRoutes` ordering; a new `tests/fusion-combos.spec.ts` case covers the row marker and the save refusal. Both
+  were confirmed to fail against the previous source.
+- Rebuilt `lib/` from the merged source and loaded both artifacts in Node: the Host module still exports
+  `apply`/`Config`/`name`, and the client bundle registers under `@sqdr2/dsh-fusion` and still exports
+  `apply`/`inject`/`name`/`FUSION_PANEL_ID`/`FusionPanelIcon`. The client bundle inlines only `missingRoutes`; it pulls
+  in no `node:` module.
+
 ## 0.3.3 — 2026-11-07
 
 ### Changes
