@@ -1,10 +1,10 @@
 import type { Context } from '@deepseek-ai/cordis';
 import type { Agent } from '@deepseek-ai/dsh-agent';
 import type { ToolExecution } from '@deepseek-ai/dsh-tools';
-import type { Role } from '../contracts.js';
+import type { Role, SandboxMode } from '../contracts.js';
 import type { SqliteFusionStore } from '../task/sqlite-store.js';
 import type { SessionBinding } from './bindings.js';
-type Mode = 'read-only' | 'workspace-write' | 'danger-full-access';
+type Mode = SandboxMode;
 declare module '@deepseek-ai/dsh-session/types' {
     interface SessionEventMap {
         'sandbox/mode': {
@@ -14,6 +14,14 @@ declare module '@deepseek-ai/dsh-session/types' {
     }
 }
 export declare const roleSeparated: (binding: SessionBinding) => boolean;
+/**
+ * The mode the user chose for a confined Fusion conversation, which is the mode
+ * the Sidekick runs under. Undefined until Fusion has confined the Lead, or after
+ * the conversation left Fusion and its own mode was restored.
+ */
+export declare function readSandboxIntent(store: SqliteFusionStore, sessionId: string): {
+    mode: Mode;
+} | undefined;
 /**
  * Role separation enforced below the prompt: the Lead's session runs under the
  * Host's own read-only sandbox (bash and filesystem are refused by the OS

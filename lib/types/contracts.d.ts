@@ -37,6 +37,8 @@ export type RunSelection = {
     requestedVersion?: string;
 };
 export type Role = 'lead' | 'worker';
+/** A Host sandbox mode, spelled as the `sandbox/mode` session event writes it. */
+export type SandboxMode = 'read-only' | 'workspace-write' | 'danger-full-access';
 export type Phase = 'READY' | 'PLANNING' | 'DIRECT' | 'WORKER_RUNNING' | 'REVIEWING' | 'REWORK' | 'WAITING_APPROVAL' | 'WAITING_USER' | 'WAITING_BUDGET' | 'RECOVERING' | 'PAUSED' | 'STOPPING' | 'NEEDS_DECISION' | 'FAILED' | 'COMPLETED' | 'CANCELLED';
 export type VerificationLevel = 'unverified' | 'partial' | 'verified';
 export type ExecutionIntent = 'DIRECT' | 'DELEGATE';
