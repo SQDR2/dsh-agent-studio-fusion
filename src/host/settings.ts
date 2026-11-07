@@ -27,20 +27,49 @@ export function savedLeadRoute(value: unknown): { provider: string; model: strin
   return { provider, model }
 }
 
+/** The roles a saved pair names, in the order the settings page shows them. */
+export type PairRole = 'lead' | 'worker' | 'compactor'
+
+/**
+ * The routes a saved choice still names that the current catalog no longer
+ * offers: a provider that was renamed or removed, or a model that was retired.
+ *
+ * Reading a saved combo tolerates a stale route so the row stays visible and
+ * editable, but saving one does not. Without this, the page can only say that
+ * *some* model is gone, which is unusable when the stale route is not the one
+ * being edited — the user then cannot tell which combo to fix.
+ */
+export function missingRoutes(value: Partial<PairChoice> | undefined, catalog: SettingsCatalog): { role: PairRole; route: PhysicalRoute }[] {
+  if (!value) return []
+  const stale = (role: PairRole, route: PhysicalRoute | undefined) => route !== undefined
+    && !catalog.groups.find(group => group.id === route.provider)?.models.find(model => model.id === route.model)
+    ? [{ role, route }] : []
+  return [...stale('lead', value.lead), ...stale('worker', value.worker), ...stale('compactor', value.compactor?.route)]
+}
+
 /** Configuration chooses registered physical models; it cannot create adapters. */
-export function validatePairChoice(value: unknown, catalog: SettingsCatalog): PairChoice {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(bi('请选择 Lead 和 Worker', 'Choose a Lead and a Sidekick'))
+export function validatePairChoice(value: unknown, catalog: SettingsCatalog, combo?: string): PairChoice {
+  // A list is validated row by row, so the failure has to say which row it came
+  // from; `bi` carries both languages, so the label joins the message here
+  // instead of being glued onto an already-bilingual string.
+  const say = (zh: string, en: string) => combo
+    ? bi(`组合「${combo}」：${zh}`, `Combo "${combo}": ${en}`) : bi(zh, en)
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(say('请选择 Lead 和 Worker', 'Choose a Lead and a Sidekick'))
   const raw = value as Record<string, unknown>
   const route = (role: string, candidate: unknown): PhysicalRoute => {
     const item = candidate as Record<string, unknown> | undefined
-    if (!item || typeof item.provider !== 'string' || typeof item.model !== 'string') throw new Error(bi(`请选择 ${role} 模型`, `Choose the ${role} model`))
-    if (isFusionProvider(item.provider)) throw new Error(bi('Fusion 必须选择真实模型', 'Fusion needs real models, not Fusion itself'))
+    if (!item || typeof item.provider !== 'string' || typeof item.model !== 'string') throw new Error(say(`请选择 ${role} 模型`, `Choose the ${role} model`))
+    if (isFusionProvider(item.provider)) throw new Error(say('Fusion 必须选择真实模型', 'Fusion needs real models, not Fusion itself'))
     const group = catalog.groups.find(group => group.id === item.provider)
     const model = group?.models.find(model => model.id === item.model)
-    if (!model) throw new Error(bi(`${role} 模型已不可用，请刷新后重选`, `The ${role} model is no longer available; refresh and choose again`))
+    // Name the exact route: after a provider rename the model usually still
+    // exists elsewhere, so "refresh and choose again" alone leaves the user
+    // guessing which of the two roles went stale.
+    if (!model) throw new Error(say(`${role} 模型已不可用：${item.provider}/${item.model}。请为该角色重新选择模型`,
+      `The ${role} model is no longer available: ${item.provider}/${item.model}. Choose a model for that role again`))
     if (item.reasoningEffort !== undefined && (typeof item.reasoningEffort !== 'string'
       || !model.reasoning?.efforts.some(effort => effort.id === item.reasoningEffort))) {
-      throw new Error(bi(`${role} 不支持所选推理强度`, `${role} does not support the selected reasoning level`))
+      throw new Error(say(`${role} 不支持所选推理强度`, `${role} does not support the selected reasoning level`))
     }
     return { provider: item.provider, model: item.model,
       ...(item.reasoningEffort === undefined ? {} : { reasoningEffort: item.reasoningEffort as string }) }
@@ -53,7 +82,7 @@ export function validatePairChoice(value: unknown, catalog: SettingsCatalog): Pa
     if (!value || typeof value !== 'object' || Array.isArray(value)
       || Object.entries(value).some(([role, tokens]) => !['lead', 'worker'].includes(role)
         || !Number.isSafeInteger(tokens) || Number(tokens) < 1 || Number(tokens) > 128_000)) {
-      throw new Error(bi('每次响应上限必须是 1–128000 的整数 Token 数', 'The per-response limit must be an integer of 1–128000 tokens'))
+      throw new Error(say('每次响应上限必须是 1–128000 的整数 Token 数', 'The per-response limit must be an integer of 1–128000 tokens'))
     }
     outputTokens = { ...value } as PairChoice['outputTokens']
   }

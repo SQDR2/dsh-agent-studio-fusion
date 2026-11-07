@@ -3,6 +3,7 @@ import { FusionCache } from './FusionCache.js'
 import { useEffect, useState } from 'react'
 import type { PhysicalRoute } from '../contracts.js'
 import type { PairChoice, SettingsCatalog } from '../host/settings.js'
+import { missingRoutes } from '../host/settings.js'
 import { settingsChanged } from './settings-events.js'
 import { tr, useLang } from './i18n.js'
 import { FUSION_API_PATH } from '../identity.js'
@@ -49,6 +50,7 @@ const styles = `
 .fusion-combo-main{display:flex;flex-direction:column;gap:2px;min-width:0;flex:1 1 auto;cursor:pointer;background:none;border:0;padding:0;color:inherit;font:inherit;text-align:left}
 .fusion-combo-name{font-weight:600;overflow-wrap:anywhere}
 .fusion-combo-routes{color:var(--dsw-alias-label-secondary);font-size:12px;overflow-wrap:anywhere}
+.fusion-combo-stale{color:var(--dsw-alias-state-error-primary);font-size:12px;overflow-wrap:anywhere}
 .fusion-combo-actions{display:flex;align-items:center;gap:6px;flex-shrink:0}
 .fusion-combo-actions button{padding:3px 12px;font-size:12px;border-radius:14px;background:transparent;color:var(--dsw-alias-label-primary)}
 .fusion-combo-add{align-self:flex-start}
@@ -117,6 +119,10 @@ export function ModelChoice({ role, route, catalog, onChange }: {
   const lang = useLang()
   const name = role === 'compactor' ? tr(lang, '压缩', 'Compaction') : role
   const model = catalog.groups.find(group => group.id === route?.provider)?.models.find(model => model.id === route?.model)
+  // A saved route the catalog no longer offers would otherwise fall back to the
+  // placeholder, silently reading as "nothing chosen" — and hiding which model
+  // went away. Keep it listed, disabled and labelled, until it is replaced.
+  const stale = route !== undefined && model === undefined
   return <fieldset>
     <legend>{name}</legend>
     <p>{role === 'Lead' ? tr(lang, '回答问题、制定方案并审查结果。', 'Answers, plans and reviews.') : role === 'Sidekick' ? tr(lang, '执行命令和修改，接收反馈后继续。', 'Runs commands and makes changes, then continues with feedback.') : tr(lang, '整理较早的上下文，供 Lead 或 Worker 继续工作。', 'Summarises older context so the Lead or Sidekick can continue.')}</p>
@@ -126,10 +132,13 @@ export function ModelChoice({ role, route, catalog, onChange }: {
       onChange({ provider, model })
     }}>
       <option value="" disabled={role !== 'compactor'}>{role === 'compactor' ? tr(lang, '使用当前角色模型', 'Use the role\'s own model') : tr(lang, '选择已连接的模型', 'Choose a connected model')}</option>
+      {stale && route && <option value={key(route)} disabled>{tr(lang, `已不可用：${route.provider}/${route.model}`, `No longer available: ${route.provider}/${route.model}`)}</option>}
       {catalog.groups.map(group => <optgroup key={group.id} label={group.name}>
         {group.models.map(model => <option key={model.id} value={key({ provider: group.id, model: model.id })}>{model.name}</option>)}
       </optgroup>)}
     </select></label>
+    {stale && route && <p role="alert">{tr(lang, `这个角色保存的模型 ${route.provider}/${route.model} 已不可用，请重新选择。`,
+      `This role's saved model ${route.provider}/${route.model} is no longer available; choose another.`)}</p>}
     {model?.reasoning && route && <label>{tr(lang, '推理强度', 'Reasoning')}<select aria-label={tr(lang, `${name} 推理强度`, `${name} reasoning`)} value={route.reasoningEffort ?? ''} onChange={event => {
       const { reasoningEffort: _old, ...physical } = route
       onChange({ ...physical, ...(event.target.value ? { reasoningEffort: event.target.value } : {}) })
@@ -155,6 +164,8 @@ export function FusionSettings() {
   const routeName = (route?: PhysicalRoute) => route
     ? state?.catalog.groups.find(group => group.id === route.provider)?.models.find(model => model.id === route.model)?.name
       ?? `${route.provider}/${route.model}` : '—'
+  const roleLabel = (role: 'lead' | 'worker' | 'compactor') => role === 'lead' ? tr(lang, 'Lead', 'Lead')
+    : role === 'worker' ? tr(lang, 'Sidekick', 'Sidekick') : tr(lang, '压缩模型', 'Compaction model')
   const update = (change: (combo: DraftCombo) => DraftCombo) => setDraft(value => value.map((combo, index) =>
     combo.key === current?.key ? change(combo) : combo))
   const chooseModel = (role: 'lead' | 'worker', route: PhysicalRoute) => update(combo => ({ ...combo, pair: { ...combo.pair, [role]: route,
@@ -180,6 +191,13 @@ export function FusionSettings() {
     if (!state) return
     const invalid = draft.findIndex(combo => !combo.pair.lead || !combo.pair.worker || !combo.name.trim())
     if (invalid >= 0) { setError(tr(lang, `第 ${invalid + 1} 个组合还不完整：需要名称、Lead 和 Sidekick。`, `Combo ${invalid + 1} is incomplete: it needs a name, a Lead and a Sidekick.`)); return }
+    // A route that no longer exists cannot be saved, and the Host's own refusal
+    // names only the role. Checked here so the message can name the combo too:
+    // with several rows, "the Lead model is gone" does not say which row to open.
+    const stale = draft.flatMap((combo, index) => missingRoutes(combo.pair, state.catalog).map(({ role, route }) =>
+      tr(lang, `第 ${index + 1} 个组合「${combo.name.trim() || tr(lang, '未命名组合', 'Untitled combo')}」的 ${roleLabel(role)} 模型已不可用：${route.provider}/${route.model}。请为该角色重新选择模型。`,
+        `Combo ${index + 1} "${combo.name.trim() || 'Untitled combo'}" still names a ${roleLabel(role)} model that is no longer available: ${route.provider}/${route.model}. Choose a model for that role again.`)))
+    if (stale.length) { setError(stale.join(tr(lang, ' ', ' '))); return }
     setSaving(true); setError(undefined); setNotice(undefined)
     try {
       const pairs = draft.map(({ id, name, pair }) => {
@@ -220,6 +238,8 @@ export function FusionSettings() {
               <button type="button" className="fusion-combo-main" aria-pressed={combo.key === current?.key} onClick={() => setActive(index)}>
                 <span className="fusion-combo-name">{combo.name.trim() || tr(lang, '未命名组合', 'Untitled combo')}</span>
                 <span className="fusion-combo-routes">{`${routeName(combo.pair.lead)} → ${routeName(combo.pair.worker)}`}</span>
+                {missingRoutes(combo.pair, state.catalog).length > 0 && <span className="fusion-combo-stale">
+                  {tr(lang, '有模型已不可用，需要重新选择', 'A model is no longer available; choose it again')}</span>}
               </button>
               <div className="fusion-combo-actions">
                 <button type="button" disabled={saving || draft.length <= 1} onClick={() => removeCombo(index)}>{tr(lang, '删除', 'Delete')}</button>

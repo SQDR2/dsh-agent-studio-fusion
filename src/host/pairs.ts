@@ -155,7 +155,9 @@ export function validatePairs(value: unknown, catalog: SettingsCatalog, existing
     const name = pairName(raw.name, index === 0 ? DEFAULT_PAIR_NAME : `组合 ${index + 1}`)
     if (names.has(name)) throw new Error(bi(`组合名称 "${name}" 重复`, `The combo name "${name}" is used twice`))
     names.add(name)
-    return { id, name, pair: validatePairChoice(raw.pair, catalog) }
+    // The name goes in so a stale route in the second row does not read like a
+    // complaint about the first one.
+    return { id, name, pair: validatePairChoice(raw.pair, catalog, name) }
   })
 }
 
