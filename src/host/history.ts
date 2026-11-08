@@ -2,6 +2,8 @@ import type { SqliteFusionStore } from '../task/sqlite-store.js'
 import type { TaskState } from '../task/state.js'
 import type { NativeUsageRecord } from './native-usage.js'
 import { projectLedger, restoreLedger, type Count } from '../usage/ledger.js'
+import { computeSavings, costOfRecord, sumCosts, type CostSum } from '../usage/cost.js'
+import { readPriceSettings } from './price-settings.js'
 
 export interface TaskSummary {
   id: string; sessionId: string; seq: number; createdAt: string; updatedAt: string
@@ -78,11 +80,28 @@ function add(total: HistoryTotals, row: UsageSummary) {
 }
 /** How often the Host unlocked Lead takeover (enforced-v3), by reason. */
 export interface TakeoverTotals { total: number; tasks: number; reasons: Record<string, number> }
+/** Money for one task row or for the whole page. */
+export interface CostTotals {
+  /** API-equivalent estimate over the requests that could be priced. */
+  apiEquivalentUsd: string
+  /** Always null: no per-request billed amount is available. */
+  actualBilledUsd: null
+  leadEquivalentUsd: string | null
+  savedUsd: string | null
+  savedPercent: string | null
+  basis: number
+  priced: number
+  unpriced: number
+  incomplete: number
+  unknown: number
+}
 export interface HistoryView {
-  observedAt: string; totalTasks: number; tasks: (TaskSummary & { usage: HistoryTotals; takeovers: number })[]; nextCursor: string | null
+  observedAt: string; totalTasks: number; tasks: (TaskSummary & { usage: HistoryTotals; takeovers: number; cost?: CostTotals })[]; nextCursor: string | null
   takeovers: TakeoverTotals
   totals: HistoryTotals; groups: ({ role: string; provider: string; model: string; purpose: string } & HistoryTotals)[]
-  actualBilledUsd: null; savingsPercent: null; upstreamHttpCalls: null
+  /** Absent from a Host that predates cost reporting; the panel then shows no money. */
+  cost?: CostTotals
+  actualBilledUsd: null; savingsPercent: string | null; upstreamHttpCalls: null
 }
 export function readHistory(store: SqliteFusionStore, cursor = '', limit = 20): HistoryView {
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > 50) throw new Error('History page size must be 1–50')
@@ -107,8 +126,55 @@ export function readHistory(store: SqliteFusionStore, cursor = '', limit = 20): 
   const start = cursor ? tasks.findIndex(task => task.id === cursor) + 1 : 0
   if (cursor && start === 0) throw new Error('History cursor is no longer available')
   const page = tasks.slice(start, start + limit)
+  // Money is read per task from the same recorded rows the token totals come from,
+  // so a historical task reports the same cost it would have reported live.
+  const overrides = readPriceSettings(store)
+  const costOf = (taskId: string): CostTotals => {
+    const records = store.listDocumentIds(`usage:${taskId}:`).map(id => store.readDocument(id)?.value as NativeUsageRecord | undefined)
+      .filter((row): row is NativeUsageRecord => Boolean(row?.ledger))
+    const costs = records.map(row => costOfRecord(row, overrides))
+    const sum: CostSum = sumCosts(costs)
+    const lead = records.find(row => row.role === 'lead')?.ledger.key
+    const saving = lead ? computeSavings(records.map(row => ({ role: row.role, provider: row.ledger.key.provider,
+      model: row.ledger.key.model, ledger: row.ledger })), lead, overrides) : undefined
+    return { apiEquivalentUsd: sum.complete ? sum.totalUsd : '0', actualBilledUsd: null,
+      leadEquivalentUsd: saving?.leadEquivalentUsd ?? null, savedUsd: saving?.savedUsd ?? null,
+      savedPercent: saving?.savedPercent ?? null, basis: saving?.basis ?? 0,
+      priced: sum.complete, unpriced: sum.unpriced, incomplete: sum.incomplete, unknown: sum.unknown }
+  }
+  const pageCosts = page.map(task => costOf(task.id))
+  const pageCost: CostTotals = pageCosts.length ? {
+    apiEquivalentUsd: pageCosts.reduce((total, cost) => addMoney(total, cost.apiEquivalentUsd), '0'),
+    actualBilledUsd: null,
+    leadEquivalentUsd: pageCosts.every(cost => cost.leadEquivalentUsd !== null)
+      ? pageCosts.reduce((total, cost) => addMoney(total, cost.leadEquivalentUsd!), '0') : null,
+    savedUsd: pageCosts.every(cost => cost.savedUsd !== null)
+      ? pageCosts.reduce((total, cost) => addMoney(total, cost.savedUsd!), '0') : null,
+    savedPercent: null, basis: pageCosts.reduce((total, cost) => total + cost.basis, 0),
+    priced: pageCosts.reduce((total, cost) => total + cost.priced, 0),
+    unpriced: pageCosts.reduce((total, cost) => total + cost.unpriced, 0),
+    incomplete: pageCosts.reduce((total, cost) => total + cost.incomplete, 0),
+    unknown: pageCosts.reduce((total, cost) => total + cost.unknown, 0),
+  } : { apiEquivalentUsd: '0', actualBilledUsd: null, leadEquivalentUsd: null, savedUsd: null, savedPercent: null,
+    basis: 0, priced: 0, unpriced: 0, incomplete: 0, unknown: 0 }
   return { observedAt: new Date().toISOString(), totalTasks: tasks.length,
-    tasks: page.map(task => ({ ...task, usage: byTask.get(task.id) ?? empty(), takeovers: takeoversByTask.get(task.id) ?? 0 })),
+    tasks: page.map((task, index) => ({ ...task, usage: byTask.get(task.id) ?? empty(), takeovers: takeoversByTask.get(task.id) ?? 0,
+      cost: pageCosts[index]! })),
     nextCursor: start + limit < tasks.length ? page.at(-1)!.id : null, takeovers,
-    totals, groups: [...groups.values()].sort((a, b) => b.calls - a.calls), actualBilledUsd: null, savingsPercent: null, upstreamHttpCalls: null }
+    totals, groups: [...groups.values()].sort((a, b) => b.calls - a.calls), cost: pageCost,
+    actualBilledUsd: null, savingsPercent: pageCost.savedPercent, upstreamHttpCalls: null }
+}
+
+/** Money addition in integer units, so a page total never drifts by a cent. */
+function addMoney(left: string, right: string): string {
+  const scale = Math.max(left.split('.')[1]?.length ?? 0, right.split('.')[1]?.length ?? 0)
+  const units = (value: string) => {
+    const [whole, frac = ''] = value.split('.')
+    return BigInt(whole! + frac.padEnd(scale, '0'))
+  }
+  const total = units(left) + units(right)
+  if (scale === 0) return total.toString()
+  const text = total.toString().padStart(scale + 1, '0')
+  const frac = text.slice(-scale).replace(/0+$/, '')
+  return frac ? `${text.slice(0, -scale)}.${frac}` : text.slice(0, -scale)
 }

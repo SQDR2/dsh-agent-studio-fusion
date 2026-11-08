@@ -46,6 +46,8 @@ const tokens = (lang: Lang, field: HistoryTotals['input'], calls: number) => !ca
   : `${formatCompact(field.known)} (${field.known.toLocaleString()})${field.reported < calls ? tr(lang, `（${field.reported}/${calls} 次有报告）`, ` (${field.reported}/${calls} reported)`) : ''}`
 const purpose = (lang: Lang, value: string) => ({ conversation: tr(lang, '任务', 'task'), compaction: tr(lang, '压缩', 'compaction'),
   'cache-keepalive': tr(lang, '保活', 'keepalive'), 'session-title': tr(lang, '标题', 'title') } as Record<string, string>)[value] ?? value
+/** A dollar figure, or a dash when it could not be computed. */
+export const money = (value: string | null): string => value === null ? '—' : `$${Number(value).toFixed(2)}`
 /** What still holds the task, so a refusal says why instead of only that it refused. */
 const blockerText = (lang: Lang, blocker?: string) => ({
   agent: tr(lang, 'Lead 或 Sidekick 仍在运行', 'its Lead or Sidekick is still running'),
@@ -145,8 +147,8 @@ export function FusionHistory() {
     </summary>
     <div className="fusion-history-content">
       <div className="fusion-history-header">
-        <p>{tr(lang, '按实际模型请求汇总，包含任务、压缩、保活及已有标题请求。未报告的用量不算作 0；金额与节省率尚无可靠数据。',
-          'Totals of actual model requests: tasks, compaction, keepalive and title requests. Unreported usage is not counted as 0; no reliable billed amount or saving rate is available.')}</p>
+        <p>{tr(lang, '按实际模型请求汇总，包含任务、压缩、保活及已有标题请求。未报告的用量不算作 0；金额是按公开单价换算的估算，不是账单。',
+          'Totals of actual model requests: tasks, compaction, keepalive and title requests. Unreported usage is not counted as 0; amounts are estimates converted at published rates, not bills.')}</p>
         <button disabled={loading} onClick={() => setRefresh(value => value + 1)}>{tr(lang, '刷新记录', 'Refresh')}</button>
       </div>
     {error && <p role="alert">{error}</p>}{loading && !page && <p role="status">{tr(lang, '正在读取记录…', 'Loading…')}</p>}
@@ -156,6 +158,15 @@ export function FusionHistory() {
         <p>{tr(lang, `${page.totalTasks} 项任务 · ${page.totals.calls} 次原生请求 · ${page.totals.final} 次用量定稿 · ${page.totals.provisional} 次暂报 · ${page.totals.unreported} 次未提供`,
           `${page.totalTasks} tasks · ${page.totals.calls} native requests · ${page.totals.final} final usage · ${page.totals.provisional} provisional · ${page.totals.unreported} unreported`)}</p>
         <p>{tr(lang, '未缓存输入', 'Uncached input')} {tokens(lang, page.totals.input, page.totals.calls)} · {tr(lang, '缓存读取', 'cache read')} {tokens(lang, page.totals.cacheRead, page.totals.calls)} · {tr(lang, '总输出', 'Total output')} {outputTokens(lang, page.totals, page.totals.calls)} Token</p>
+        {page.cost && <p>{tr(lang, `本页按价目表估算 ${money(page.cost.apiEquivalentUsd)}，覆盖 ${page.cost.priced} 次请求`,
+          `This page estimates ${money(page.cost.apiEquivalentUsd)} at list prices, covering ${page.cost.priced} requests`)}
+          {page.cost.savedUsd !== null ? tr(lang, `；比同样的 token 全交给 Lead 省下 ${money(page.cost.savedUsd)}（${page.cost.basis} 次请求可比）`,
+            `; that is ${money(page.cost.savedUsd)} less than sending the same tokens to the Lead (${page.cost.basis} requests comparable)`) : ''}
+          {tr(lang, '。实际账单仍未知：DSH 不提供每次请求的计费金额。', '. The actual bill is still unknown: DSH reports no per-request billed amount.')}</p>}
+        {page.cost && (page.cost.unpriced + page.cost.incomplete + page.cost.unknown) > 0 && <p role="status">
+          {tr(lang, `另有 ${page.cost.unpriced + page.cost.incomplete + page.cost.unknown} 次请求未计入金额：${page.cost.unpriced} 次没有价目、${page.cost.incomplete} 次用量不全、${page.cost.unknown} 次无法读取。`,
+            `${page.cost.unpriced + page.cost.incomplete + page.cost.unknown} further requests are not priced: ${page.cost.unpriced} with no rate, ${page.cost.incomplete} with incomplete usage, ${page.cost.unknown} unreadable.`)}
+        </p>}
         <p>{tr(lang, `Lead 接手改代码 ${page.takeovers?.total ?? 0} 次（${page.takeovers?.tasks ?? 0} 项任务）`, `Lead takeovers: ${page.takeovers?.total ?? 0} (${page.takeovers?.tasks ?? 0} tasks)`)}
           {page.takeovers?.total ? `: ${Object.entries(page.takeovers.reasons).map(([reason, count]) => `${takeoverReason(lang, reason)} ${count}`).join(', ')}` : ''}
           {tr(lang, '。只有 Sidekick 确实完成不了时，程序才会解锁接手。', '. The Host unlocks a takeover only when the Sidekick demonstrably cannot finish.')}</p>
@@ -193,6 +204,8 @@ export function FusionHistory() {
                 <strong>{task.title}</strong>
                 <small>
                   {new Date(task.createdAt).toLocaleString()} · {task.mode === 'completed' ? tr(lang, '已结束', 'finished') : task.phase} · {tr(lang, `${task.usage.calls} 次请求`, `${task.usage.calls} requests`)}{task.takeovers ? tr(lang, ` · Lead 接手 ${task.takeovers} 次`, ` · ${task.takeovers} Lead takeovers`) : ''}
+                  {task.cost?.priced ? tr(lang, ` · 约 ${money(task.cost.apiEquivalentUsd)}`, ` · about ${money(task.cost.apiEquivalentUsd)}`) : ''}
+                  {task.cost?.savedUsd !== null && task.cost?.savedUsd !== undefined ? tr(lang, `（省 ${money(task.cost.savedUsd)}）`, ` (saved ${money(task.cost.savedUsd)})`) : ''}
                 </small>
               </div>
               <div className="fusion-history-actions">

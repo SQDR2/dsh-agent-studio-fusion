@@ -24,12 +24,15 @@ export type RunSelection =
   | { kind: 'model'; route: PhysicalRoute }
   | { kind: 'profile'; profileId: string; requestedVersion?: string };
 export type Role = 'lead' | 'worker';
+/** A Host sandbox mode, spelled as the `sandbox/mode` session event writes it. */
+export type SandboxMode = 'read-only' | 'workspace-write' | 'danger-full-access';
 export type Phase =
   | 'READY' | 'PLANNING' | 'DIRECT' | 'WORKER_RUNNING' | 'REVIEWING'
   | 'REWORK' | 'WAITING_APPROVAL' | 'WAITING_USER' | 'WAITING_BUDGET'
   | 'RECOVERING' | 'PAUSED' | 'STOPPING' | 'NEEDS_DECISION'
   | 'FAILED' | 'COMPLETED' | 'CANCELLED';
 export type VerificationLevel = 'unverified' | 'partial' | 'verified';
+export type ExecutionIntent = 'DIRECT' | 'DELEGATE';
 
 export interface SourceRef {
   sessionId: SessionId;
@@ -71,6 +74,8 @@ export interface ResourcePolicy {
 }
 export interface WorkOrder {
   schemaVersion: 1;
+  /** Older work orders are implementation work. Exploration never grants a writer. */
+  mode?: 'explore' | 'implement' | 'text';
   taskId: TaskId;
   id: WorkOrderId;
   operationId: OperationId;
@@ -85,6 +90,22 @@ export interface WorkOrder {
   decisions: readonly { text: string; source: SourceRef }[];
   uncertainties: readonly string[];
   policy: ResourcePolicy;
+}
+export interface ExplorationSource {
+  path: string;
+  startLine: number;
+  endLine: number;
+}
+/** File excerpts are captured by the Host, not accepted from model narration. */
+export interface ExplorationReport {
+  schemaVersion: 1;
+  workOrderId: WorkOrderId;
+  revision: number;
+  status: WorkerReport['status'];
+  summary: string;
+  unresolved: readonly string[];
+  snapshot: SnapshotId;
+  sources: readonly (ExplorationSource & { fileDigest: string; excerpt: ArtifactRef })[];
 }
 export interface CoverageClaim {
   criterionId: string;
@@ -105,6 +126,7 @@ export interface WorkerReport {
   unresolved: readonly string[];
   questions: readonly string[];
 }
+export type EvidenceKind = 'tool' | 'human-decision' | 'review-accept';
 export interface ToolEvidence {
   schemaVersion: 1;
   taskId: TaskId;
@@ -155,13 +177,20 @@ export interface PairProfile {
   digest: Digest;
   enabled: boolean;
   quality: 'experimental' | 'validated' | 'deprecated';
+  /** Missing on frozen v1 sessions; only new selections use native model behavior. */
+  interactionMode?: 'model-like';
+  /** Frozen per selection. Absence preserves pre-enforcement sessions. */
+  workflowPolicy?: 'enforced-v1' | 'enforced-v2' | 'enforced-v3';
   lead: PhysicalRoute;
   worker: PhysicalRoute;
   workerUpgradePath: readonly PhysicalRoute[];
   promptDigests: Readonly<Record<'lead' | 'worker' | 'compact', Digest>>;
   context: Readonly<Record<Role, RoleContextPolicy>>;
-  /** Experimental auxiliary calls, explicitly enabled for the frozen routes. */
-  cacheKeepalive?: Readonly<Record<Role, boolean>>;
+  /**
+   * Per role: on, off, or 'auto' (armed once the route reports cache reads).
+   * Unset: Lead auto, Worker off.
+   */
+  cacheKeepalive?: Readonly<Record<Role, boolean | 'auto'>>;
   /** Optional explicit summary route. Missing means the current role model. */
   compactor?: { readonly route: PhysicalRoute; readonly maxOutputTokens: number };
   dataPolicyId: string;
@@ -210,11 +239,12 @@ export interface NormalizedUsage {
   reasoningSeparate: number | null;
   /** Reasoning tokens whose include-in-output contract is unknown. */
   reasoningUnspecified: number | null;
-  reasoningBilling: {
-    kind: 'included' | 'separate' | 'unknown' | 'not_applicable';
-    tokens: number | null;
-  };
+  reasoningBilling: ReasoningBilling;
   inputIncludesCacheRead: boolean | null;
+}
+export interface ReasoningBilling {
+  kind: 'included' | 'separate' | 'unknown' | 'not_applicable';
+  tokens: number | null;
 }
 
 export interface ReportSubject {
@@ -232,6 +262,36 @@ export interface ReviewTicket {
   subject: ReportSubject;
   validationDigest: Digest;
   workOrderDigest: Digest;
+}
+export interface ReviewGate {
+  taskId: TaskId;
+  workOrderId: WorkOrderId;
+  revision: number;
+  reportDigest: Digest;
+  snapshot: SnapshotId;
+  reviewAttemptId: string;
+  decision: 'accept' | 'rework' | 'needs-decision' | 'REVIEW_INCOMPLETE';
+  terminalStatus: 'accepting' | 'incomplete' | 'rework' | 'needs-decision' | 'legacy-unbound';
+}
+export interface ReviewReadinessReceipt {
+  subject: ReportSubject;
+  receiptId: string;
+  receiptDigest: Digest;
+  verdict: 'review-ready';
+}
+export interface ReviewResultV2 {
+  ticketId: string;
+  requestId: string;
+  generation: number;
+  subject: ReportSubject;
+  terminalEvidenceRef: string;
+  decision: 'accept' | 'rework' | 'needs-decision' | 'REVIEW_INCOMPLETE';
+  protocolValid: boolean;
+}
+export interface ReviewCompletedPayload {
+  decision: 'accept' | 'rework' | 'needs-decision' | 'REVIEW_INCOMPLETE';
+  /** Required for a new completion. Decision-only payloads are legacy-unbound. */
+  binding?: ReviewResultV2;
 }
 export interface ControlState {
   mode: 'running' | 'paused' | 'stop-requested' | 'cancelled' | 'completed';
@@ -267,13 +327,60 @@ export interface EventEnvelope<T extends string, P> {
   causeId: string;
   payload: P;
 }
+export type OutboxState =
+  | 'prepared'
+  | 'dispatched'
+  | 'accepted'
+  | 'claimed'
+  | 'result-recorded'
+  | 'delivered'
+  | 'acknowledged';
+export interface OutboxRow {
+  operationId: OperationId;
+  taskId: TaskId;
+  kind: string;
+  state: OutboxState;
+  reservedChild?: SessionId;
+  nativeMessageId?: string;
+  resultDigest?: Digest;
+  payloadRef?: string;
+  requestId?: string;
+  ticket?: ReviewTicket;
+}
 export type FusionEvent =
   | EventEnvelope<'task/created', { parent: SessionId; selection: RunSelection }>
+  | EventEnvelope<'requirements/revised', { reason: string }>
+  | EventEnvelope<'profile/frozen', { digest: Digest; profileId: string; version: string }>
+  | EventEnvelope<'intent/chosen', { intent: ExecutionIntent }>
   | EventEnvelope<'work-order/prepared', { order: WorkOrder; reservedChild: SessionId }>
+  | EventEnvelope<'work-order/acceptance-amended', { workOrderId: WorkOrderId; acceptance: readonly AcceptanceCriterion[]; reason: string }>
+  | EventEnvelope<'work-order/scope-expanded', { workOrderId: WorkOrderId; allowedPaths: readonly string[]; added: readonly string[]; reason: string }>
   | EventEnvelope<'child/accepted', { operationId: OperationId; child: SessionId; messageId: string }>
+  | EventEnvelope<'child/claimed', { operationId: OperationId; child: SessionId }>
+  | EventEnvelope<'exploration/recorded', { report: ExplorationReport }>
+  | EventEnvelope<'report/submitted', { operationId: OperationId; report: WorkerReport }>
   | EventEnvelope<'report/validated', { operationId: OperationId; report: WorkerReport }>
+  | EventEnvelope<'review/requested', { ticket: ReviewTicket }>
+  | EventEnvelope<'review/completed', ReviewCompletedPayload>
+  | EventEnvelope<'lease/acquired', { lease: WriteLease }>
+  | EventEnvelope<'lease/released', { workspaceId: string; generation: number }>
   | EventEnvelope<'approval/pending', { approval: LogicalApproval }>
+  | EventEnvelope<'approval/answered', { approvalId: string; state: 'approved' | 'rejected' | 'withdrawn' }>
+  | EventEnvelope<'budget/blocked', { reason: string }>
+  | EventEnvelope<'budget/unblocked', { authorizationId: string }>
+  | EventEnvelope<'checkpoint/committed', { checkpoint: ContextCheckpoint }>
+  | EventEnvelope<'recovery/needed', { reason: string }>
+  | EventEnvelope<'recovery/reconciled', { snapshot: SnapshotId; evidenceRef: string }>
   | EventEnvelope<'effect/outcome-unknown', { operationId: OperationId; reason: string }>
+  | EventEnvelope<'effects/reconciled', { snapshot: SnapshotId; evidenceRef: string; quiescent: true }>
+  | EventEnvelope<'task/stop-requested', { intent: 'pause' | 'cancel' }>
+  | EventEnvelope<'task/paused', { reason: string }>
+  | EventEnvelope<'task/resumed', { reason: string }>
   | EventEnvelope<'task/completed', { snapshot: SnapshotId; verification: VerificationLevel }>
-  | EventEnvelope<'task/paused', { reason: string }>;
-// Expand this union when implementing all specified event kinds; do not use any.
+  | EventEnvelope<'task/cancelled', { reason: string }>;
+/**
+ * Terminal phases end a task; no further event moves it forward. Expressed as a
+ * type here because this file declares no runtime values: import the set itself
+ * from the package root (`TERMINAL_PHASES`) when you need to test membership.
+ */
+export type TerminalPhase = 'COMPLETED' | 'CANCELLED' | 'FAILED';

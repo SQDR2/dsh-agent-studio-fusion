@@ -27,12 +27,12 @@ export function FusionHint({ sessionId, directory, load }: FusionHintProps) {
           if (!active) return
           // The hint speaks for this conversation's combo, not for the first one.
           const combo = state.pairs.find(pair => pair.id === selected?.model)
-          if (!state.pairs.length) setMessage(tr(lang, 'Fusion 尚未配置模型，请前往设置 → Fusion 选择 Lead 和 Sidekick。', 'Fusion has no models yet: open Settings → Fusion and choose a Lead and a Sidekick.'))
+          if (!state.pairs.length) setMessage(tr(lang, 'Fusion 尚未配置模型，请打开左侧边栏的 Fusion 面板选择 Lead 和 Sidekick。', 'Fusion has no models yet: open the Fusion panel in the left sidebar and choose a Lead and a Sidekick.'))
           else if (!combo) setMessage(tr(lang, '当前组合已被删除，请在模型菜单中选择其他组合。', 'This combo was removed; pick another one in the model menu.'))
-          else if (!combo.authorized) setMessage(tr(lang, 'Fusion 当前配置未就绪，请前往设置 → Fusion 查看。', 'The Fusion setup is not ready: see Settings → Fusion.'))
+          else if (!combo.authorized) setMessage(tr(lang, 'Fusion 当前配置未就绪，请在左侧边栏的 Fusion 面板查看。', 'The Fusion setup is not ready: see the Fusion panel in the left sidebar.'))
           else setMessage(undefined)
         })
-        .catch(() => { if (active) setMessage(tr(lang, '暂时无法确认 Fusion 配置，请前往设置 → Fusion 查看。', 'Cannot confirm the Fusion setup right now: see Settings → Fusion.')) })
+        .catch(() => { if (active) setMessage(tr(lang, '暂时无法确认 Fusion 配置，请在左侧边栏的 Fusion 面板查看。', 'Cannot confirm the Fusion setup right now: see the Fusion panel in the left sidebar.')) })
     }
     refresh()
     const off = onSettingsChanged(refresh)

@@ -15,6 +15,57 @@ own tags and releases.
 Entry format: what changed, then what was actually validated. "Not claimed" lines mark what a release did *not* test —
 read them before assuming a platform is covered.
 
+## 0.3.5 — 2026-11-08
+
+### Changes
+
+- Every message that sent the user to **Settings → Fusion** now points at the sidebar panel, which is where that entry
+  has lived since 0.3.0. Thirteen strings were affected: the "configure Fusion first" refusal, the model-menu
+  description, the quota and budget notices (with their English copies), the unreachable-route explanation, and the
+  composer hint's three states. The old wording named a page that no longer exists, so the one instruction a blocked
+  user got was unfollowable.
+- `contracts/fusion.ts` — the published `./contracts` subpath — is level with `src/contracts.ts` again. It had fallen
+  behind by `WorkOrder.mode` (the field that decides whether a task may write at all), `PairProfile.interactionMode`
+  and `workflowPolicy`, the `'auto'` cache-keepalive mode, twelve exported types (`ExplorationReport`, `ReviewResultV2`,
+  `OutboxRow` and others) and 22 of the 30 `FusionEvent` kinds. Nothing imports this file, which is why the drift went
+  unnoticed; a new parity test reads both files as text and fails on any future divergence.
+- Cost is no longer a hard-coded `null`. `usage/pricing.ts` already held a ledger pricer that nothing called; the status
+  panel, the history view and `/fusion status` now report what a task cost, what the same tokens would have cost on the
+  Lead, and the difference. A model with no rate is reported as **unpriced** rather than priced at zero, and the number
+  of requests the figure covers travels with it. `actualBilledUsd` stays `null` on purpose: DSH exposes no per-request
+  billed amount, and subscription routes are not billed per token, so the panel says "estimate" and "unknown" instead of
+  presenting a conversion as a charge. Rates are seeded from the list prices this project's own benchmark published and
+  can be corrected per model from the panel.
+- Acceptance commands can now overlap. A check the Lead marks `independent` runs beside one other check instead of
+  after it, which shortens the wait after every delivery. The default stays serial: the Host cannot see whether two
+  commands share a cache directory, and two runs of the same test framework that share one produce a failure that is not
+  about the code. The single-writer lease and the Lead-orchestration lock are deliberately unchanged — the change
+  manifest attributes every diff to one work order, so a second concurrent writer would make the scope and
+  per-requirement evidence unverifiable. The per-command before/after snapshot moved to batch granularity, because under
+  concurrency a sibling's cache write would otherwise fail an innocent command.
+- `probeMissingPrograms` no longer assumes PowerShell 7. It spawned `pwsh` by name, so a Windows machine with only
+  Windows PowerShell 5.1 (present on every Windows since 7) got `ENOENT`, the probe returned "inconclusive", and the
+  pre-delegation check that names a missing interpreter silently stopped running. It now tries `pwsh` and then
+  `powershell`; the probe script was already written to the 5.1 subset, so both answer identically.
+
+### Validation
+
+- `pnpm test` (60 files, 447 tests: 446 passed, 1 skipped, 0 failed) and `tsc -p tsconfig.json --noEmit`. The suite's
+  previous baseline was 399 passed / 1 skipped / 1 failed, the failure being `tests/check-programs.spec.ts` — that is
+  the case this release fixes, and it now passes on a host without PowerShell 7.
+- New tests: `public-contracts.spec.ts` (parity of the published contract file, confirmed to fail when a field is
+  removed from it), `probe-shells.spec.ts` (the shell fallback and the probe environment filter), `cost.spec.ts` and
+  `cost-projection.spec.ts` (pricing arithmetic, unpriced handling, the saving, and the money reaching both read models,
+  including a page total that must be the clean string `0.45`), and `check-batches.spec.ts` with
+  `check-batches-timing.spec.ts` (the serial default, the bounded overlap, and a measured wall-time difference proving
+  the batches really run concurrently).
+- `tests/native-boundaries.spec.ts` asserted the old `设置` wording; it now asserts that the refusal names the Fusion
+  panel.
+- **Not claimed:** the native Host suite was not run. It needs `DSHX_HARNESS` pointing at a pinned Harness checkout,
+  which this machine does not have.
+- **Not claimed:** `lib/` was not rebuilt in this repository. Building on Windows rewrites every committed `.d.ts` from
+  LF to CRLF, so the artifacts are left to CI, which builds from this tag before publishing.
+
 ## 0.3.4 — 2026-11-07
 
 ### Changes

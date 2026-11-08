@@ -1,7 +1,7 @@
 import { FusionRecovery } from './FusionRecovery.js'
 import { Fragment, useState } from 'react'
 import { useFusionStatus } from './status-polling.js'
-import type { UsageSubtotal } from '../status.js'
+import type { TaskCost, UsageSubtotal } from '../status.js'
 import { tr, useLang, type Lang } from './i18n.js'
 
 const styles = `
@@ -75,8 +75,8 @@ export function FusionStatus({ sessionId, attentionOnly = false }: { sessionId: 
         <dt>{tr(lang, '输入 Token', 'Input tokens')}</dt><dd>{count(usage.input)}<small>{tr(lang, '已报告的未缓存输入', 'reported uncached input')}</small></dd>
         <dt>{tr(lang, '缓存读取', 'Cache read')}</dt><dd>{count(usage.cacheRead)}</dd>
         <dt>{tr(lang, '输出 Token', 'Output tokens')}</dt><dd>{count(usage.output)}</dd>
-        <dt>{tr(lang, '实际费用', 'Actual cost')}</dt><dd>{tr(lang, '未知', 'unknown')}<small>{tr(lang, '当前账号未提供可靠账单金额', 'the account reports no reliable billed amount')}</small></dd>
       </dl>
+      {task.cost && <CostBlock lang={lang} cost={task.cost} />}
       <h3>{tr(lang, '按角色', 'By role')}</h3>
       <dl>
         {(['lead', 'worker'] as const).map(role => <Fragment key={role}>
@@ -100,4 +100,39 @@ export function FusionStatus({ sessionId, attentionOnly = false }: { sessionId: 
       <small>{tr(lang, '显示最近 12 次请求、8 项命令或写入操作；用量汇总覆盖本轮全部请求。读取操作仍可在会话中查看。', 'Shows the last 12 requests and 8 commands or writes; usage totals cover all requests of this task. Reads remain visible in the conversation.')}</small>
     </div>
   </details>
+}
+
+/** Money for the current task, with its coverage and what it is not. */
+export function CostBlock({ lang, cost }: { lang: Lang; cost: TaskCost }) {
+  const usd = (value: string | null) => value === null ? null : `$${Number(value).toFixed(2)}`
+  const saved = cost.savedUsd === null ? null : Number(cost.savedUsd)
+  const omitted = cost.unpriced + cost.incomplete + cost.unknown
+  const reasons = [
+    cost.unpriced ? tr(lang, `${cost.unpriced} 次没有价目`, `${cost.unpriced} with no price`) : '',
+    cost.incomplete ? tr(lang, `${cost.incomplete} 次用量不全`, `${cost.incomplete} with incomplete usage`) : '',
+    cost.unknown ? tr(lang, `${cost.unknown} 次无法读取`, `${cost.unknown} unreadable`) : '',
+  ].filter(Boolean).join(tr(lang, '、', ', '))
+  return <>
+    <h3>{tr(lang, '费用估算', 'Cost estimate')}</h3>
+    <dl>
+      <dt>{tr(lang, '按价目表', 'At list prices')}</dt>
+      <dd>{usd(cost.apiEquivalentUsd) ?? tr(lang, '无法估算', 'cannot estimate')}
+        <small>{tr(lang, `覆盖 ${cost.priced} 次请求；按各模型公开单价换算，不是账单`,
+          `${cost.priced} requests priced; converted at published rates, not a bill`)}</small></dd>
+      {cost.savedUsd !== null && cost.savedPercent !== null && <Fragment>
+        <dt>{tr(lang, '省下', 'Saved')}</dt>
+        <dd>{usd(cost.savedUsd)}<small>{tr(lang, `比同样的 token 全交给 Lead 便宜 ${cost.savedPercent}%（覆盖 ${cost.basis} 次请求）`,
+          `${cost.savedPercent}% cheaper than sending the same tokens to the Lead (${cost.basis} requests)`)}</small></dd>
+      </Fragment>}
+      {saved !== null && saved < 0 && <dd role="status">{tr(lang, '这个 Sidekick 比 Lead 更贵，省钱不成立。', 'This Sidekick costs more than the Lead, so there is no saving.')}</dd>}
+      <dt>{tr(lang, '实际账单', 'Actual bill')}</dt>
+      <dd>{tr(lang, '未知', 'unknown')}<small>{tr(lang, 'DSH 不提供每次请求的计费金额；订阅线路也不按 token 计费',
+        'DSH reports no per-request billed amount, and subscription routes are not billed per token')}</small></dd>
+    </dl>
+    {omitted > 0 && <small role="status">
+      {tr(lang, `有 ${omitted} 次请求未计入：${reasons}。`, `${omitted} requests are not included: ${reasons}.`)}
+      {cost.unpricedModels.length ? tr(lang, `可在面板补充这些模型的单价：${cost.unpricedModels.join('、')}。`,
+        ` Add rates for these models in the panel: ${cost.unpricedModels.join(', ')}.`) : ''}
+    </small>}
+  </>
 }
