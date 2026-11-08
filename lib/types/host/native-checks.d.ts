@@ -20,6 +20,14 @@ export interface CheckDefinition {
      * it shows was already failing there. Default: every test must pass.
      */
     baseline?: 'no-new-failures';
+    /**
+     * This command touches no state another acceptance command also touches, so the Host may run it beside
+     * them. Opt-in on purpose: two suites sharing a cache directory can corrupt each other and produce a
+     * failure that is not about the candidate, and the Host cannot see which commands share what. Commands
+     * that only read the tree (a linter, a type check over an ignored build cache) are safe; two runs of the
+     * same test framework usually are not. Default: run alone.
+     */
+    independent?: boolean;
 }
 /** Parsers that name each failing test, which baseline-relative checks need. Mocha's default report spreads a name over several lines. */
 export declare const BASELINE_PARSERS: readonly ["unittest", "pytest", "vitest", "jest", "tap", "go", "cargo"];
@@ -93,6 +101,24 @@ interface CheckInput {
 export declare function runBaselineChecks(input: CheckInput & {
     checks: readonly FrozenCheck[];
 }): Promise<FrozenCheck[]>;
+/**
+ * How many acceptance commands may run at once.
+ *
+ * Two is the ceiling on purpose. Each command is a real build or test process;
+ * the point is to overlap one suite's I/O wait with another's, not to saturate the
+ * machine. A higher limit would make the check phase compete with whatever the
+ * user is running and turn a slow check into a timeout.
+ */
+export declare const MAX_CONCURRENT_CHECKS = 2;
+/**
+ * Group the checks into batches that may run concurrently.
+ *
+ * A batch is either one command that must run alone, or a run of consecutive
+ * commands the Lead marked `independent`. Consecutive matters: it keeps the
+ * order the Lead wrote for the serial ones, which is the order they were
+ * validated in.
+ */
+export declare function checkBatches(checks: readonly FrozenCheck[]): FrozenCheck[][];
 export declare function runNativeChecks(input: CheckInput & {
     report: WorkerReport;
     checks: readonly FrozenCheck[];

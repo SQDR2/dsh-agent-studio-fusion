@@ -65,12 +65,28 @@ export interface TakeoverTotals {
     tasks: number;
     reasons: Record<string, number>;
 }
+/** Money for one task row or for the whole page. */
+export interface CostTotals {
+    /** API-equivalent estimate over the requests that could be priced. */
+    apiEquivalentUsd: string;
+    /** Always null: no per-request billed amount is available. */
+    actualBilledUsd: null;
+    leadEquivalentUsd: string | null;
+    savedUsd: string | null;
+    savedPercent: string | null;
+    basis: number;
+    priced: number;
+    unpriced: number;
+    incomplete: number;
+    unknown: number;
+}
 export interface HistoryView {
     observedAt: string;
     totalTasks: number;
     tasks: (TaskSummary & {
         usage: HistoryTotals;
         takeovers: number;
+        cost?: CostTotals;
     })[];
     nextCursor: string | null;
     takeovers: TakeoverTotals;
@@ -81,8 +97,10 @@ export interface HistoryView {
         model: string;
         purpose: string;
     } & HistoryTotals)[];
+    /** Absent from a Host that predates cost reporting; the panel then shows no money. */
+    cost?: CostTotals;
     actualBilledUsd: null;
-    savingsPercent: null;
+    savingsPercent: string | null;
     upstreamHttpCalls: null;
 }
 export declare function readHistory(store: SqliteFusionStore, cursor?: string, limit?: number): HistoryView;

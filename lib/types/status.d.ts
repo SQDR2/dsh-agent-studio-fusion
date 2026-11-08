@@ -1,5 +1,5 @@
 import type { ControlView } from './host/native-model-control.js';
-import type { PhysicalRoute, Role, SandboxMode, TokenMeasurement, VerificationLevel } from './contracts.js';
+import type { PhysicalRoute, Role, SandboxMode, TokenMeasurement, UsdDecimal, VerificationLevel } from './contracts.js';
 /** Bounded, read-only UI projection. No prompts, tool arguments or credentials. */
 export interface FusionStatus {
     schemaVersion: 1;
@@ -57,6 +57,15 @@ export interface FusionStatus {
         };
         /** Checks frozen on the current work order; 0 means the Lead review was the only verification. */
         automatedChecks: number | null;
+        /**
+         * What this task cost, and what the Sidekick saved against the Lead.
+         *
+         * `apiEquivalentUsd` is an estimate at list prices, never a bill: DSH reports
+         * no per-request billed amount, and subscription routes are not billed per
+         * token. `actualBilledUsd` therefore stays null and the UI says so rather than
+         * presenting an estimate as a charge.
+         */
+        cost?: TaskCost;
         requests: {
             id: string;
             role: Role;
@@ -101,4 +110,36 @@ export interface UsageSubtotal {
     knownTokens: number;
     reportedRequests: number;
     totalRequests: number;
+}
+/**
+ * Cost of one task, in API-equivalent dollars.
+ *
+ * Every figure is derived from recorded usage rows, so it survives a Host
+ * restart and covers historical tasks. The counts below are not decoration: a
+ * total that silently omits requests with no rate or no reported usage would
+ * read as cheaper than the task really was, so the UI shows the coverage.
+ */
+export interface TaskCost {
+    /** Sum of the requests that could be priced completely. Null when none could. */
+    apiEquivalentUsd: UsdDecimal | null;
+    /** Always null: DSH exposes no per-request billed amount. */
+    actualBilledUsd: null;
+    /** The same tokens priced at the Lead's rate. Null when either side is unpriced. */
+    leadEquivalentUsd: UsdDecimal | null;
+    /** leadEquivalentUsd − apiEquivalentUsd. Negative when the Sidekick is dearer. */
+    savedUsd: UsdDecimal | null;
+    /** One decimal place, or null when it cannot be computed. */
+    savedPercent: string | null;
+    /** Requests priced on both sides, which is what the saving covers. */
+    basis: number;
+    /** Requests that produced a complete total. */
+    priced: number;
+    /** Requests on a model with no rate; the panel offers to add one. */
+    unpriced: number;
+    /** Requests where the provider did not report enough usage to price. */
+    incomplete: number;
+    unknown: number;
+    unpricedModels: readonly string[];
+    /** When the seeded rates were last checked. */
+    checked: string;
 }

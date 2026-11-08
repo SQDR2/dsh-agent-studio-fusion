@@ -51,6 +51,7 @@ type LooseCheck = {
     timeoutSeconds?: number;
     definitionPaths?: readonly string[];
     baseline?: CheckDefinition['baseline'];
+    independent?: boolean;
 };
 /** Fill the defaults a Lead may omit; an explicit test kind without a parser still fails in freezeChecks. */
 export declare function normalizeChecks(raw: readonly LooseCheck[]): CheckDefinition[];
