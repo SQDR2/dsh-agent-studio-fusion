@@ -19,6 +19,8 @@ import { choiceFromProfile, modelProfileFromChoice, validatePairChoice, type Pai
 import { MAX_PAIRS, choiceFromStoredProfile, modelOfProfileId, profileIdOf, readPairs, validatePairs, writePairs } from './host/pairs.js'
 import { CachePolicy, cacheView } from './host/cache-policy.js'
 import { CACHE_DEFAULTS_CHECKED } from './host/cache-defaults.js'
+import { PRICE_OVERRIDES_DOCUMENT, readPriceSettings, writePriceSettings } from './host/price-settings.js'
+import { PRICE_CARDS_CHECKED, cardForModel, pricedModels } from './usage/price-cards.js'
 import { loadJsonObject, resolveProfile } from './profile/resolve.js'
 import { profileRoutes } from './profile/compactor.js'
 import { loadModelPromptBundle, loadPromptBundle } from './prompts.js'
@@ -27,7 +29,7 @@ import { BindingRepository, type SessionBinding } from './host/bindings.js'
 import { FusionCoordinator } from './host/coordinator.js'
 import { authorizeConfiguredPair, NativeRequestBudget } from './host/native-budget.js'
 import { json, readJson, trustedRequest } from './host/http.js'
-import { readFusionStatusAsync } from './host/status.js'
+import { readFusionStatus, readFusionStatusAsync } from './host/status.js'
 import { readHistoricalFusionActivity } from './host/native-activity.js'
 import { nativeShellTool } from './host/shell.js'
 import { adoptLegacyStateDirectory } from './store-migration.js'
@@ -121,7 +123,7 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
     const profile = state.profiles.values().next().value
     if (profile) return profile
     const [first] = state.failures.values()
-    throw new Error(first ?? bi('请先在设置的 Fusion 页面选择 Lead 和 Worker', 'Open Settings → Fusion and choose a Lead and a Sidekick first'))
+    throw new Error(first ?? bi('请先在左侧边栏的 Fusion 面板选择 Lead 和 Worker', 'Open the Fusion panel in the left sidebar and choose a Lead and a Sidekick first'))
   }
   const needsBudget = (profile: ResolvedProfile['profile']) => Boolean(config.authorizationPath) || profile.interactionMode !== 'model-like'
   let runtime: FusionCoordinator | undefined
@@ -229,6 +231,18 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
             worker: profile.profile.worker, cacheKeepalive: profile.profile.cacheKeepalive })) } catch { pairs = [] }
           return json(res, 200, { checked: CACHE_DEFAULTS_CHECKED, models: cacheView(cachePolicy, pairs) })
         }
+        if (url.searchParams.get('view') === 'prices') {
+          // The seeded rates plus every saved override, so the panel can show both
+          // what a model is priced at and whether that came from the user.
+          const overrides = readPriceSettings(store)
+          const document = store.readDocument(PRICE_OVERRIDES_DOCUMENT)
+          return json(res, 200, { checked: PRICE_CARDS_CHECKED, revision: document?.revision ?? 0,
+            models: pricedModels(overrides).map(model => {
+              const card = cardForModel(model, overrides)
+              return { model, input: card?.input ?? null, cacheRead: card?.cacheRead ?? null, output: card?.output ?? null,
+                overridden: Object.hasOwn(overrides, model), unpriced: card === undefined }
+            }) })
+        }
         if (url.searchParams.get('view') === 'settings') {
           // Resolved fresh: the revision a save sends must match the one shown.
           const state = await resolveCombos()
@@ -246,7 +260,7 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
             pair: pairs[0]?.pair ?? null, authorized: pairs.length > 0 && !blocked,
             ...(blocked?.reason ? { reason: blocked.reason } : {}),
             managedAuthorization: Boolean(config.authorizationPath),
-            policy: state.profiles.values().next().value?.profile.interactionMode ?? 'model-like', actualBilledUsd: null, apiEquivalentUsd: null })
+            policy: state.profiles.values().next().value?.profile.interactionMode ?? 'model-like' })
         }
         const sessionId = url.searchParams.get('sessionId') ?? ''
         const binding = sessionId && bindings.read(sessionId)?.binding
@@ -320,6 +334,20 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
         cachePolicy.save(body.provider, body.model, setting)
         return json(res, 200, { ok: true })
       }
+      if (body.action === 'price-setting') {
+        if (!Number.isSafeInteger(body.revision) || Number(body.revision) < 0) throw new Error(bi('价目表版本无效，请刷新后重试', 'Invalid price revision; refresh and retry'))
+        if (typeof body.model !== 'string' || !body.model.trim()) throw new Error(bi('请选择模型', 'Choose a model'))
+        const current = readPriceSettings(store)
+        const key = body.model.trim().toLowerCase()
+        // `reset` returns the model to the seeded rate; `null` records that this
+        // model should not be priced at all, which is different from leaving it out.
+        const next: Record<string, unknown> = { ...current }
+        if (body.reset === true) delete next[key]
+        else if (body.unpriced === true) next[key] = null
+        else next[key] = { input: body.input, cacheRead: body.cacheRead, output: body.output }
+        const revision = writePriceSettings(store, Number(body.revision), next)
+        return json(res, 200, { ok: true, revision })
+      }
       if (body.action === 'configure') {
         if (!Number.isSafeInteger(body.revision) || Number(body.revision) < 0) throw new Error(bi('配置版本无效，请刷新后重试', 'Invalid settings revision; refresh and retry'))
         const catalog = await physicalCatalog(), current = readPairs(store)
@@ -367,7 +395,12 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
             cacheKeepaliveCalls: usage.filter(row => row.purpose === 'cache-keepalive').length,
             compactionCalls: usage.filter(row => row.purpose === 'compaction').length,
             unfinishedEffects, ...(unfinishedEffects.length ? { recoveryHint: bi('请核对中断的工具操作，确认对应命令及子进程已停止；Host 退出不代表这些操作已结束。', 'Check the interrupted tool operations and confirm their commands and child processes stopped; a Host exit does not end them.') } : {}),
-            actualBilledUsd: null, apiEquivalentUsd: null }, null, 2) }
+            ...(() => {
+              // The same money the panel shows, so `/fusion status` and the panel
+              // never disagree. Read-only: this never starts an agent or a model call.
+              const status = readFusionStatus(store, invocation.agent.id)
+              return status.task?.cost ? { cost: status.task.cost } : {}
+            })() }, null, 2) }
         }
         const controller = await getRuntime({ profile: binding.profile, prompts: binding.prompts })
         if (action === 'pause') { controller.modelControl.cancel(binding); await controller.pause(invocation.agent) }

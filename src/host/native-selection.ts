@@ -38,7 +38,7 @@ export class FusionCatalogAdapter extends LlmAdapter {
     const entries = declared.length ? declared
       : [{ id: FUSION_MODEL, name: 'Fusion · 自动', inputModalities: textOnly }]
     return entries.map(entry => ({ provider, id: entry.id, name: entry.name,
-      description: entry.description ?? 'Lead 与 Worker 协作。在设置 → Fusion 中配置模型。',
+      description: entry.description ?? 'Lead 与 Worker 协作。在左侧边栏的 Fusion 面板中配置模型。',
       inputModalities: [...new Set<ModelModality>(['text', ...entry.inputModalities])] }))
   }
   override async resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
@@ -48,7 +48,7 @@ export class FusionCatalogAdapter extends LlmAdapter {
     return declared
   }
   override async *stream(_options: GenerateOptions): AsyncIterable<StreamChunk> {
-    throw new Error('Fusion 尚未就绪。请前往设置 → Fusion 配置 Lead 和 Worker。')
+    throw new Error('Fusion 尚未就绪。请在左侧边栏的 Fusion 面板配置 Lead 和 Worker。')
   }
 }
 
@@ -72,7 +72,7 @@ export function installNativeFusionSelection(ctx: Context, input: {
     const current = binding(agent)
     return current?.selected ? modelOfProfileId(current.profile.id) ?? FUSION_MODEL : undefined
   }
-  const blocked = (model: string) => input.reason?.(model) ?? '请先在设置 → Fusion 配置 Lead 和 Worker，再继续此会话。'
+  const blocked = (model: string) => input.reason?.(model) ?? '请先在左侧边栏的 Fusion 面板配置 Lead 和 Worker，再继续此会话。'
   const change = (agent: Agent) => {
     if (agent.session.header.parentSession || pending.has(agent.id)) return
     const coordinator = input.coordinator(), route = selection(agent)

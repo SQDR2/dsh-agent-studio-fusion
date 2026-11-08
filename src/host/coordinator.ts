@@ -128,7 +128,7 @@ export function substantiveReview(reason: string): boolean {
 }
 
 type LooseCheck = { command: string; id?: string; description?: string; parser?: CheckDefinition['parser']; kind?: CheckDefinition['kind'];
-  timeoutSeconds?: number; definitionPaths?: readonly string[]; baseline?: CheckDefinition['baseline'] }
+  timeoutSeconds?: number; definitionPaths?: readonly string[]; baseline?: CheckDefinition['baseline']; independent?: boolean }
 
 /** Fill the defaults a Lead may omit; an explicit test kind without a parser still fails in freezeChecks. */
 export function normalizeChecks(raw: readonly LooseCheck[]): CheckDefinition[] {
@@ -138,7 +138,8 @@ export function normalizeChecks(raw: readonly LooseCheck[]): CheckDefinition[] {
     return { id: check.id?.trim() || `check-${index + 1}`, description: check.description?.trim() || check.command,
       command: check.command, kind, parser: parser as CheckDefinition['parser'], definitionPaths: check.definitionPaths ?? [],
       ...(check.timeoutSeconds === undefined ? {} : { timeoutSeconds: check.timeoutSeconds }),
-      ...(check.baseline === undefined ? {} : { baseline: check.baseline }) }
+      ...(check.baseline === undefined ? {} : { baseline: check.baseline }),
+      ...(check.independent === true ? { independent: true } : {}) }
   })
 }
 
@@ -2096,6 +2097,7 @@ export class FusionCoordinator {
       timeoutSeconds: { type: 'integer', description: `Optional per-check limit, 1–${MAX_CHECK_SECONDS} seconds.` },
       definitionPaths: { ...optionalStringList, description: 'Existing acceptance files whose bytes must remain unchanged; default none. Do not list files the Worker will create or edit.' },
       baseline: { type: 'string', enum: ['no-new-failures'], description: `For a broad regression suite (${BASELINE_PARSERS.join(', ')}) that may already have unrelated failing tests: the Host runs it once on the untouched workspace and then requires no new failures. Omit for the tests this task must make pass.` },
+      independent: { type: 'boolean', description: 'True only when this command shares no state with the other checks, so the Host may run it beside one of them (faster). A linter or type check over an ignored build cache is usually safe; two runs of the same test framework are usually not, because they share a cache directory and can corrupt each other. Default false: run alone.' },
     } } as const
     dispose.push(scope.tools.register(defineTool({ name: 'fusion_delegate', description: 'Delegate a bounded implementation to an independent persistent Worker. After direct Lead preparation, validated delegation transfers the quiescent write lease without completing the task. By default wait for its report and native checks; block=false returns while the Worker runs.',
       parameters: { goal: { type: 'string', description: 'The complete implementation outcome, including all planned stages.', required: true },

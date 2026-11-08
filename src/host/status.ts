@@ -5,14 +5,19 @@ import type { TaskState } from '../task/state.js'
 import type { SqliteFusionStore } from '../task/sqlite-store.js'
 import type { StatusIndex } from '../task/status-index.js'
 import type { FusionStatus } from '../status.js'
+import type { NativeUsageRecord } from './native-usage.js'
+import { computeSavings, type Savings } from '../usage/cost.js'
+import { PRICE_CARDS_CHECKED, priceCardFor, type PriceOverrides } from '../usage/price-cards.js'
+import type { UsageLedgerV2 } from '../usage/ledger.js'
 import { BindingRepository } from './bindings.js'
+import { readPriceSettings } from './price-settings.js'
 
 /** English copies of the stage and detail texts; the client shows them when DSH runs in English. */
 const EN: Record<string, string> = {
   '正在停止': 'Stopping', '正在等待已启动的操作收尾。': 'Waiting for started operations to finish.',
   '等待检查': 'Needs inspection', '请先核对中断的操作，再使用 /fusion recover 提交检查记录。': 'Check the interrupted operations, then record the inspection with /fusion recover.',
   '已取消': 'Cancelled', '等待确认': 'Waiting for approval', '请在 DSH 的权限提示中处理待确认操作。': 'Handle the pending approval in DSH\'s permission prompt.',
-  '等待额度': 'Waiting for quota', '请前往设置 → Fusion 查看额度，处理后使用 /fusion resume。': 'See Settings → Fusion for the quota, then use /fusion resume.',
+  '等待额度': 'Waiting for quota', '请在左侧边栏的 Fusion 面板查看额度，处理后使用 /fusion resume。': 'See the Fusion panel in the left sidebar for the quota, then use /fusion resume.',
   '已暂停': 'Paused', '使用 /fusion status 查看状态，确认后可用 /fusion resume 继续。': 'Check /fusion status, then continue with /fusion resume.',
   '完成': 'Done', '验证': 'Verifying',
   'Worker 模型服务提示额度已耗尽，当前任务和文件已保留。恢复额度后发送消息继续。': 'The Sidekick provider reported exhausted quota; the task and files are kept. Send a message to continue once quota is back.',
@@ -20,7 +25,7 @@ const EN: Record<string, string> = {
   '就绪': 'Ready', '探索尚未完成，请查看会话中的阻塞说明；补充信息后会继续原 Worker。': 'Exploration is unfinished: see the blocker in the conversation; the same Sidekick continues once you add the information.',
   '分析': 'Analysing', '执行': 'Working', '修改': 'Revising', '审查': 'Reviewing',
   '请处理 DSH 的待确认操作。': 'Handle the pending DSH approval.', '请查看会话中的问题或阻塞说明。': 'See the question or blocker in the conversation.',
-  '请前往设置 → Fusion 查看调用额度。': 'See Settings → Fusion for the request quota.', '请查看 /fusion status 并核对中断的操作。': 'Check /fusion status and the interrupted operations.',
+  '请在左侧边栏的 Fusion 面板查看调用额度。': 'See the Fusion panel in the left sidebar for the request quota.', '请查看 /fusion status 并核对中断的操作。': 'Check /fusion status and the interrupted operations.',
   '确认任务状态后，使用 /fusion resume 继续。': 'Confirm the task state, then continue with /fusion resume.',
   '未完成': 'Unfinished', '请查看会话中的错误和 /fusion status。': 'See the error in the conversation and /fusion status.',
   '完成状态尚未确认，请查看 /fusion status。': 'Completion is unconfirmed; see /fusion status.',
@@ -48,7 +53,7 @@ export function taskStage(state: TaskState, checking: boolean, workerStepLimitRe
   if (control.recovering || control.outcomeUnknown) return value('等待检查', '请先核对中断的操作，再使用 /fusion recover 提交检查记录。', true)
   if (control.mode === 'cancelled') return value('已取消')
   if (control.pendingApprovalIds.length) return value('等待确认', '请在 DSH 的权限提示中处理待确认操作。', true)
-  if (control.budgetBlocked) return value('等待额度', '请前往设置 → Fusion 查看额度，处理后使用 /fusion resume。', true)
+  if (control.budgetBlocked) return value('等待额度', '请在左侧边栏的 Fusion 面板查看额度，处理后使用 /fusion resume。', true)
   if (control.mode === 'paused') return value('已暂停', '使用 /fusion status 查看状态，确认后可用 /fusion resume 继续。', true)
   if (control.mode === 'completed' && state.phase === 'COMPLETED') return value('完成')
   if (checking) return value('验证')
@@ -67,7 +72,7 @@ export function taskStage(state: TaskState, checking: boolean, workerStepLimitRe
     case 'REVIEWING': return value('审查')
     case 'WAITING_APPROVAL': return value('等待确认', '请处理 DSH 的待确认操作。', true)
     case 'WAITING_USER': case 'NEEDS_DECISION': return value('等待反馈', '请查看会话中的问题或阻塞说明。', true)
-    case 'WAITING_BUDGET': return value('等待额度', '请前往设置 → Fusion 查看调用额度。', true)
+    case 'WAITING_BUDGET': return value('等待额度', '请在左侧边栏的 Fusion 面板查看调用额度。', true)
     case 'RECOVERING': return value('等待检查', '请查看 /fusion status 并核对中断的操作。', true)
     case 'PAUSED': return value('已暂停', '确认任务状态后，使用 /fusion resume 继续。', true)
     case 'STOPPING': return value('正在停止', null, true)
@@ -120,16 +125,57 @@ function readStatus(store: SqliteFusionStore, sessionId: string, index: StatusIn
   const takeover = runtime?.schemaVersion === 1 && runtime.taskId === taskId && runtime.takeover === true
   const permissions = intent && { lead: takeover ? intent.mode : 'read-only' as const,
     worker: intent.mode, active: activeRole(facts.requests, state.phase) }
+  const costs = taskCosts(store, taskId, modelControl?.routes.lead ?? binding.profile.lead)
   return { ...base, task: { id: taskId, revision: state.revision, ...stage, stageEn: english(stage.stage)!,
     detailEn: 'detailEn' in stage && stage.detailEn ? stage.detailEn : english(stage.detail) ?? null, ...(modelControl ? { modelControl } : {}), verification: state.verification,
     workerId: state.acceptedChild ?? binding.workerId ?? null,
     models: { lead: modelControl?.routes.lead ?? binding.profile.lead, worker: modelControl?.routes.worker ?? binding.profile.worker, compactor: binding.profile.compactor?.route ?? null },
     ...(permissions ? { permissions } : {}),
     ...facts,
+    ...costs,
     automatedChecks: Array.isArray((runtime as { checks?: unknown[] } | undefined)?.checks) && runtime?.taskId === taskId
       ? (runtime as { checks: unknown[] }).checks.length : null,
     pendingApprovals: state.control.pendingApprovalIds.length,
     recovering: state.control.recovering,
     outcomeUnknown: state.control.outcomeUnknown,
+  } }
+}
+
+/**
+ * What this task cost, and what the Sidekick saved against the Lead.
+ *
+ * Read from the recorded usage rows rather than accumulated at request time: a
+ * cost figure that only appears while the Host is running would be absent from
+ * every historical task, which is exactly where the user wants to compare.
+ * The `usage` block the index already produces stays the authority on token
+ * counts; this adds money and says how many requests it covers.
+ */
+function taskCosts(store: SqliteFusionStore, taskId: string, lead: { provider: string; model: string }): Pick<NonNullable<FusionStatus['task']>, 'cost'> {
+  const overrides: PriceOverrides = readPriceSettings(store)
+  const requests: { role: 'lead' | 'worker'; provider: string; model: string; ledger: UsageLedgerV2 }[] = []
+  for (const id of store.listDocumentIds(`usage:${taskId}:`)) {
+    const row = store.readDocument(id)?.value as NativeUsageRecord | undefined
+    if (!row || row.schemaVersion !== 1 || !row.ledger) continue
+    requests.push({ role: row.role, provider: row.ledger.key.provider, model: row.ledger.key.model, ledger: row.ledger })
+  }
+  const savings: Savings = computeSavings(requests, lead, overrides)
+  return { cost: {
+    // Never a bill: DSH reports no per-request billed amount, and subscription
+    // routes are not billed per token. This is what the tokens would cost at list.
+    apiEquivalentUsd: savings.actual.complete ? savings.actual.totalUsd : null,
+    actualBilledUsd: null,
+    leadEquivalentUsd: savings.leadEquivalentUsd,
+    savedUsd: savings.savedUsd,
+    savedPercent: savings.savedPercent,
+    /** Requests included in the saving comparison (priced on both sides). */
+    basis: savings.basis,
+    priced: savings.actual.complete,
+    unpriced: savings.actual.unpriced,
+    incomplete: savings.actual.incomplete,
+    unknown: savings.actual.unknown,
+    /** Which models have no rate, so the panel can offer to add one. */
+    unpricedModels: [...new Set(requests.filter(request => !priceCardFor(request.provider, request.model, overrides))
+      .map(request => request.model))].slice(0, 8),
+    checked: PRICE_CARDS_CHECKED,
   } }
 }

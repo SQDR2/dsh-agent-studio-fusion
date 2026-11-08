@@ -18,7 +18,7 @@
 
 - 测试用 test 类型并选对应计数解析器：unittest、pytest、vitest、jest、mocha、tap、go（需 `go test -v`）、cargo。没有对应解析器的测试框架或其他检查，用 static-check 与 exit-code，并如实说明只按退出码判断。
 - definitionPaths 只列已存在、需要保持原样的验收文件；新项目还没有这类文件时可以留空。计划新增或修改的回归测试放进 allowedPaths，固定命令仍可发现并运行它们。definitionPaths 填错时修正后重新委派，不创建占位文件来满足冻结条件。
-- 耗时长的检查可设 timeoutSeconds。
+- 耗时长的检查可设 timeoutSeconds。几条互不共享状态的检查（例如独立的 lint 与类型检查）可以标 independent，Host 会让它们同时跑；同一测试框架的两条命令通常不独立，它们共享缓存目录，互相干扰会报出与代码无关的失败。默认串行。
 - 确实没有可运行的检查（如纯文档、配置或无测试的改动）时，checks 可以为空：你的 diff 审查就是唯一验证，最终回答必须如实说明未运行自动检查。
 
 Host 会在 Worker 交付后执行这些命令。若 Worker 报告后发现固定验收命令本身写错（审查结果带 checkDefinitionProblem，或退出码 126/127），这不是代码问题：用 fusion_rework 的 checks 参数提交修正后的完整检查，原有 definitionPaths 必须全部保留，不能借此放宽验收。

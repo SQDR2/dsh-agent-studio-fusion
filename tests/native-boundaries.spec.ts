@@ -20,7 +20,9 @@ describe('native evidence and authorization boundaries', () => {
     const root = temp(), path = join(root, 'settings.sqlite'), route = { provider: 'fixture', model: 'model' }
     const store = new SqliteFusionStore(path), budget = new NativeRequestBudget(store)
     const limits = { validHours: 1, maxNativeRequests: 2, maxReservedOutputTokens: 30 }
-    expect(() => budget.check([route])).toThrow('设置')
+    // The refusal must name where the user enables it. It used to point at
+    // "Settings → Fusion", an entry that moved to the sidebar panel in 0.3.0.
+    expect(() => budget.check([route])).toThrow('Fusion 面板')
     expect(() => authorizeConfiguredPair(store, [route], limits)).toThrow('请确认')
     expect(store.readDocument('settings:authorization')).toBeUndefined()
     const auth = authorizeConfiguredPair(store, [route], { ...limits, acknowledgeAccountUsage: true, acknowledgeUnknownCost: true })

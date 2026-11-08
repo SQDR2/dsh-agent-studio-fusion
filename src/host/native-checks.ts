@@ -15,7 +15,8 @@ import type { CheckPlan, PlannedReceipt } from '../evidence/receipts.js'
 import { assertPlannedCheck, memoryVerificationRegistry } from '../evidence/receipts.js'
 import type { SqliteFusionStore } from '../task/sqlite-store.js'
 import { snapshotWorkspace, workspacePath } from './workspace.js'
-import { nativeShellTool } from './shell.js'
+import type { WorkspaceSnapshot } from './workspace.js'
+import { nativeShellTool, probeEnvironmentDrop, probeShells } from './shell.js'
 
 export interface CheckDefinition {
   id: string
@@ -33,6 +34,14 @@ export interface CheckDefinition {
    * it shows was already failing there. Default: every test must pass.
    */
   baseline?: 'no-new-failures'
+  /**
+   * This command touches no state another acceptance command also touches, so the Host may run it beside
+   * them. Opt-in on purpose: two suites sharing a cache directory can corrupt each other and produce a
+   * failure that is not about the candidate, and the Host cannot see which commands share what. Commands
+   * that only read the tree (a linter, a type check over an ignored build cache) are safe; two runs of the
+   * same test framework usually are not. Default: run alone.
+   */
+  independent?: boolean
 }
 /** Parsers that name each failing test, which baseline-relative checks need. Mocha's default report spreads a name over several lines. */
 export const BASELINE_PARSERS = ['unittest', 'pytest', 'vitest', 'jest', 'tap', 'go', 'cargo'] as const
@@ -300,16 +309,26 @@ export function checkPrograms(command: string, platform: NodeJS.Platform = proce
 export async function probeMissingPrograms(root: string, programs: readonly string[]): Promise<{ missing: string[]; alternatives: Record<string, string[]>; locations: Record<string, string[]> } | undefined> {
   const variants = (name: string) => [`${name}3`, ...(name === 'python' || name === 'python3' ? ['py'] : [])].filter(item => item !== name)
   const names = [...new Set(programs.flatMap(name => [name, ...variants(name)]))]
+  // Written to the PowerShell 5.1 subset so `pwsh` and `powershell` answer identically
+  // (see probeShells); the POSIX branch uses `command -v`, which is a shell builtin
+  // and therefore needs no PATH entry of its own.
   const script = process.platform === 'win32'
     ? `foreach ($p in @(${names.map(name => `'${name}'`).join(',')})) { if (Get-Command $p -ErrorAction SilentlyContinue) { Write-Output "FOUND $p" } }; Write-Output 'PROBE-DONE'`
     : `for p in ${names.map(name => `'${name}'`).join(' ')}; do command -v -- "$p" >/dev/null 2>&1 && printf 'FOUND %s\\n' "$p"; done; printf 'PROBE-DONE\\n'`
-  const env = Object.fromEntries(Object.entries(process.env).filter(([key, value]) => value !== undefined
-    && !/KEY|PASSWORD|SECRET|TOKEN/i.test(key) && !key.toUpperCase().startsWith('DSH_'))) as Record<string, string>
-  const [shell, args] = process.platform === 'win32' ? ['pwsh', ['-NoProfile', '-NonInteractive', '-Command', script]] : ['bash', ['-c', script]]
-  let text: string
-  try { text = (await execFileAsync(shell, args, { cwd: root, env, timeout: process.platform === 'win32' ? 15_000 : 5_000 })).stdout }
-  catch { return undefined }
-  if (!text.includes('PROBE-DONE')) return undefined
+  const env = Object.fromEntries(Object.entries(process.env).filter(([key, value]) => !probeEnvironmentDrop(key, value))) as Record<string, string>
+  // Try each shell this Host can actually spawn. The first one that answers decides;
+  // an unspawnable name is not an inconclusive probe, it is simply not this machine's shell.
+  let text: string | undefined
+  for (const shell of probeShells) {
+    // PowerShell takes `-Command`, bash takes `-c`; both run the same probe script.
+    const args = shell === 'bash' ? ['-c', script] : ['-NoProfile', '-NonInteractive', '-Command', script]
+    try {
+      const stdout = (await execFileAsync(shell, args, { cwd: root, env,
+        timeout: process.platform === 'win32' ? 15_000 : 5_000 })).stdout
+      if (stdout.includes('PROBE-DONE')) { text = stdout; break }
+    } catch { /* this shell is absent or unusable; try the next one */ }
+  }
+  if (text === undefined) return undefined
   const found = new Set([...text.matchAll(/^FOUND (\S+)$/gm)].map(match => match[1]!))
   const missing = programs.filter(name => !found.has(name))
   return { missing, alternatives: Object.fromEntries(missing.map(name => [name, variants(name).filter(item => found.has(item))])),
@@ -349,11 +368,19 @@ interface CheckInput {
   nativeTimeout?: boolean; authorizeNested(callId: string): () => void; uncertain?(evidence: ToolEvidence): void
 }
 
-/** One frozen command through the native bash tool, recorded as invocation evidence. */
-async function invokeCheck(input: CheckInput, check: FrozenCheck) {
+/**
+ * One frozen command through the native bash tool, recorded as invocation evidence.
+ *
+ * `before` is supplied by the caller rather than taken here. A per-check snapshot
+ * would be wrong the moment two checks run at once: the sibling's cache write
+ * lands between this check's `before` and `after`, and the "command changed the
+ * source snapshot" verdict would fire against a command that changed nothing.
+ * The batch takes one snapshot before the first command and one after the last,
+ * which is also the honest unit for that question.
+ */
+async function invokeCheck(input: CheckInput, check: FrozenCheck, before: WorkspaceSnapshot) {
   const { ctx, store, exec, root, order } = input
   if (definitionDigest(root, check.definition) !== check.plan.definitionDigest) throw new Error(`Frozen acceptance definition changed: ${check.definition.id}`)
-  const before = snapshotWorkspace(root)
   const startedAt = new Date().toISOString()
   const callId = ToolCallId(`fusion-check-${randomUUID()}`)
   const operationId = OperationId(callId)
@@ -386,13 +413,13 @@ async function invokeCheck(input: CheckInput, check: FrozenCheck) {
     && raw.signal === null && typeof raw.exitCode === 'number'
   const outText = typeof stdout?.text === 'string' ? stdout.text : ''
   const errText = typeof stderr?.text === 'string' ? stderr.text : JSON.stringify(result.content)
-  const after = snapshotWorkspace(root)
-  const evidence: ToolEvidence = { ...started, outputSnapshot: after.id,
+  // No `after` snapshot here: the batch takes it once every command has finished.
+  const evidence: ToolEvidence = { ...started,
     exitCode: completed ? Number(raw.exitCode) : null, endedAt: new Date().toISOString(),
     stdout: store.putArtifact(order.taskId, Buffer.from(outText), 'text/plain'),
     stderr: store.putArtifact(order.taskId, Buffer.from(errText), 'text/plain'),
     state: completed ? 'completed' : exec.signal.aborted ? 'cancelled' : 'outcome-unknown' }
-  return { key, evidence, text: `${outText}\n${errText}`, truncated: Boolean(stdout?.truncated || stderr?.truncated), before, after }
+  return { key, evidence, text: `${outText}\n${errText}`, truncated: Boolean(stdout?.truncated || stderr?.truncated), before }
 }
 
 /** Counts for a receipt; a baseline-relative check discounts failures frozen from the untouched workspace. */
@@ -414,16 +441,19 @@ function receiptCounts(check: FrozenCheck, text: string): PlannedReceipt['counts
  */
 export async function runBaselineChecks(input: CheckInput & { checks: readonly FrozenCheck[] }): Promise<FrozenCheck[]> {
   const out: FrozenCheck[] = []
+  // A baseline is measured on the untouched workspace, so the commands run one at
+  // a time here: a baseline that a sibling command perturbed would freeze the
+  // wrong set of pre-existing failures, and that set decides every later verdict.
+  const before = input.checks.some(check => check.definition.baseline === 'no-new-failures') ? snapshotWorkspace(input.root) : undefined
   for (const check of input.checks) {
     if (check.definition.baseline !== 'no-new-failures') { out.push(check); continue }
     input.exec.signal.throwIfAborted()
-    const run = await invokeCheck(input, check)
+    const run = await invokeCheck(input, check, before!)
     input.store.writeDocument(run.key, 1, { check, evidence: run.evidence, baseline: true })
     if (run.evidence.state === 'outcome-unknown') {
       input.uncertain?.(run.evidence)
       throw new Error('Baseline command outcome is unknown; inspect the recorded effects before delegating')
     }
-    if (run.before.id !== run.after.id) throw new Error(`Baseline run of ${check.definition.id} changed the source snapshot; use a command that does not write source files`)
     const parsed = run.evidence.state === 'completed' && !run.truncated ? parseTestFailures(check.definition.parser, run.text) : undefined
     if (!parsed) {
       throw new Error(`Baseline run of ${check.definition.id} could not be read (exit ${run.evidence.exitCode}, state ${run.evidence.state}). `
@@ -432,7 +462,44 @@ export async function runBaselineChecks(input: CheckInput & { checks: readonly F
     }
     out.push({ definition: check.definition, plan: { ...check.plan, allowedFailures: parsed.failedIds } })
   }
+  if (before && snapshotWorkspace(input.root).id !== before.id) {
+    throw new Error('A baseline command changed the source snapshot; use a command that does not write source files')
+  }
   return out
+}
+
+/**
+ * How many acceptance commands may run at once.
+ *
+ * Two is the ceiling on purpose. Each command is a real build or test process;
+ * the point is to overlap one suite's I/O wait with another's, not to saturate the
+ * machine. A higher limit would make the check phase compete with whatever the
+ * user is running and turn a slow check into a timeout.
+ */
+export const MAX_CONCURRENT_CHECKS = 2
+
+/**
+ * Group the checks into batches that may run concurrently.
+ *
+ * A batch is either one command that must run alone, or a run of consecutive
+ * commands the Lead marked `independent`. Consecutive matters: it keeps the
+ * order the Lead wrote for the serial ones, which is the order they were
+ * validated in.
+ */
+export function checkBatches(checks: readonly FrozenCheck[]): FrozenCheck[][] {
+  const batches: FrozenCheck[][] = []
+  let current: FrozenCheck[] = []
+  for (const check of checks) {
+    if (!check.definition.independent) {
+      if (current.length) { batches.push(current); current = [] }
+      batches.push([check])
+      continue
+    }
+    current.push(check)
+    if (current.length >= MAX_CONCURRENT_CHECKS) { batches.push(current); current = [] }
+  }
+  if (current.length) batches.push(current)
+  return batches
 }
 
 export async function runNativeChecks(input: CheckInput & {
@@ -441,18 +508,38 @@ export async function runNativeChecks(input: CheckInput & {
   const { store, exec, root, order, checks } = input
   if (order.mode === 'text' && checks.length) throw new Error('Text assignments cannot run workspace checks')
   const receipts: PlannedReceipt[] = []
-  for (const check of checks) {
+  // One snapshot for the whole batch of commands, compared once at the end: see
+  // invokeCheck for why a per-command snapshot is wrong under concurrency.
+  let batchBefore: WorkspaceSnapshot | undefined
+  const openBatch = () => { batchBefore ??= snapshotWorkspace(root) }
+  const closeBatch = (): string | undefined => {
+    const before = batchBefore
+    batchBefore = undefined
+    if (!before) return undefined
+    return snapshotWorkspace(root).id === before.id ? undefined
+      : 'Acceptance command changed the source snapshot; rework is required'
+  }
+  for (const batch of checkBatches(checks)) {
     exec.signal.throwIfAborted()
-    const run = await invokeCheck(input, check)
-    const counts = run.truncated ? undefined : receiptCounts(check, run.text)
-    const receipt: PlannedReceipt = { id: `receipt:${run.evidence.nativeToolCallId}`, planDigest: digestOf(check.plan), evidence: run.evidence, ...(counts ? { counts } : {}) }
-    store.writeDocument(run.key, 1, { check, evidence: run.evidence, receipt })
-    if (run.evidence.state === 'outcome-unknown') {
-      input.uncertain?.(run.evidence)
-      throw new Error('Acceptance command outcome is unknown; inspect the recorded effects before continuing')
+    openBatch()
+    const runs = await Promise.all(batch.map(check => invokeCheck(input, check, batchBefore!)))
+    // Record every run before deciding anything: a sibling that finished must not
+    // lose its evidence because another command in its batch failed the check.
+    const pending: PlannedReceipt[] = []
+    for (const [index, run] of runs.entries()) {
+      const check = batch[index]!
+      const counts = run.truncated ? undefined : receiptCounts(check, run.text)
+      const receipt: PlannedReceipt = { id: `receipt:${run.evidence.nativeToolCallId}`, planDigest: digestOf(check.plan), evidence: run.evidence, ...(counts ? { counts } : {}) }
+      store.writeDocument(run.key, 1, { check, evidence: run.evidence, receipt })
+      if (run.evidence.state === 'outcome-unknown') {
+        input.uncertain?.(run.evidence)
+        throw new Error('Acceptance command outcome is unknown; inspect the recorded effects before continuing')
+      }
+      pending.push(receipt)
     }
-    receipts.push(receipt)
-    if (run.before.id !== run.after.id) throw new Error('Acceptance command changed the source snapshot; rework is required')
+    const changed = closeBatch()
+    receipts.push(...pending)
+    if (changed) throw new Error(changed)
   }
   const report: WorkerReport = { ...input.report,
     verification: receipts.flatMap(receipt => [receipt.evidence.stdout, receipt.evidence.stderr]),
