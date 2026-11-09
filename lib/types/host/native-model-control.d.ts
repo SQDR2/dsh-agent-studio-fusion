@@ -4,6 +4,31 @@ import type { LlmFailure, UserMessage } from '@deepseek-ai/dsh-llm';
 import type { PhysicalRoute, Role } from '../contracts.js';
 import type { SqliteFusionStore } from '../task/sqlite-store.js';
 import { type SessionBinding } from './bindings.js';
+/** Whether a model wait is a hard stop that only a route or account change clears. */
+export declare function hardWait(code: string): boolean;
+/**
+ * The waits left after the user explicitly continues this task.
+ *
+ * Only the Lead is lifted: the user speaks to the Lead, while a paused
+ * Sidekick stays behind the bounded `leadRecover` path so a delegation cannot
+ * silently retry a failing model. Another task's wait is never touched.
+ * @param waits - Durable per-role waits of the current control record.
+ * @param taskId - The task the user is continuing.
+ * @returns The next waits, or undefined when nothing is clearable.
+ */
+export declare function userContinuationWaits(waits: ModelControl['waits'], taskId: string): ModelControl['waits'] | undefined;
+/**
+ * Whether an inbox message is an explicit human continuation rather than an
+ * automatic wake. An empty message carries no instruction, so it can only mean
+ * "continue"; every synthetic wake (a Sidekick settlement, a goal round) has
+ * content.
+ */
+export declare function explicitContinuation(message: {
+    source?: {
+        kind?: string;
+    };
+    content?: readonly unknown[];
+}): boolean;
 export interface ModelControl {
     schemaVersion: 1;
     sessionId: string;

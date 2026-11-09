@@ -15,6 +15,45 @@ import { FUSION_SOURCE_KIND } from '../message-source.js'
 
 const LEAD_RECOVERABLE = ['WORKFLOW_INCOMPLETE', 'NO_PROGRESS', 'UNKNOWN']
 const LEAD_RECOVERIES = 2
+/**
+ * Stops a human retry cannot fix: the account has to change first. A new user
+ * message lifts the other pauses (a timeout, a transport failure, an unknown
+ * error), because re-asking in this conversation is an explicit local
+ * continuation, never the automatic retry these waits exist to prevent.
+ */
+const HARD_WAIT = /QUOTA|CREDENTIAL/i
+
+/** Whether a model wait is a hard stop that only a route or account change clears. */
+export function hardWait(code: string): boolean {
+  return HARD_WAIT.test(code)
+}
+
+/**
+ * The waits left after the user explicitly continues this task.
+ *
+ * Only the Lead is lifted: the user speaks to the Lead, while a paused
+ * Sidekick stays behind the bounded `leadRecover` path so a delegation cannot
+ * silently retry a failing model. Another task's wait is never touched.
+ * @param waits - Durable per-role waits of the current control record.
+ * @param taskId - The task the user is continuing.
+ * @returns The next waits, or undefined when nothing is clearable.
+ */
+export function userContinuationWaits(waits: ModelControl['waits'], taskId: string): ModelControl['waits'] | undefined {
+  const lead = waits.lead
+  if (lead?.taskId !== taskId || hardWait(lead.code)) return undefined
+  const { lead: _lifted, ...rest } = waits
+  return rest
+}
+
+/**
+ * Whether an inbox message is an explicit human continuation rather than an
+ * automatic wake. An empty message carries no instruction, so it can only mean
+ * "continue"; every synthetic wake (a Sidekick settlement, a goal round) has
+ * content.
+ */
+export function explicitContinuation(message: { source?: { kind?: string }; content?: readonly unknown[] }): boolean {
+  return message.source === undefined || message.source.kind === 'user' || (message.content?.length ?? 0) === 0
+}
 
 export interface ModelControl {
   schemaVersion: 1
@@ -76,8 +115,8 @@ export class NativeModelControl {
       return undefined
     }, { prepend: true }))
     this.#dispose.push(ctx.on('session/event', (session, event) => {
-      const user = event.type === 'user/message' ? !event.data.source || event.data.source.kind === 'user'
-        : event.type === 'agent/inbox/spliced' && event.data.inserted.some(message => !message.source || message.source.kind === 'user')
+      const user = event.type === 'user/message' ? explicitContinuation(event.data)
+        : event.type === 'agent/inbox/spliced' && event.data.inserted.some(explicitContinuation)
       if (!user) return
       const binding = this.#bindings.read(session.id)?.binding
       if (!binding?.selected || binding.profile.interactionMode !== 'model-like') return
@@ -90,6 +129,12 @@ export class NativeModelControl {
           waits: Object.fromEntries(Object.entries(view.waits).filter(([, wait]) => wait?.taskId !== binding.taskId
             || !['NO_PROGRESS', 'WORKFLOW_INCOMPLETE'].includes(wait.code))) })
       }
+      // A user message is the local continuation control: it lifts the Lead's
+      // model-error pause so the same conversation continues instead of every
+      // later turn being rejected as `blocked`. Quota and credential stops stay.
+      view = readModelControl(store, binding)!
+      const lifted = userContinuationWaits(view.waits, binding.taskId)
+      if (lifted) this.write({ ...view, waits: lifted, recoveryEpoch: (view.recoveryEpoch ?? 0) + 1 })
     }))
     this.#dispose.push(ctx.on('tools/result', (exec, result) => {
       const owner = exec.agent && callbacks.owner(exec.agent)

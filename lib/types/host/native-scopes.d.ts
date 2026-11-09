@@ -15,6 +15,13 @@ export interface FusionScopeCallbacks {
     /** Shared gates plus limits that apply only to admitting a new generation. */
     prepareRequest?(agent: Agent, binding: SessionBinding, role: Role, signal: AbortSignal): Promise<void>;
     canRequest(agent: Agent, binding: SessionBinding, role: Role): string | undefined;
+    /**
+     * Report a gate that rejects the next step. A rejected step never reaches the
+     * model, so the turn ends as `blocked` with nothing in the conversation; the
+     * Host uses this to write the reason once instead of leaving a silent dead
+     * end the user can only escape by starting a new session.
+     */
+    blockedNotice?(agent: Agent, binding: SessionBinding, role: Role, reason: string): void;
     canExecute(exec: Readonly<ToolExecution>, binding: SessionBinding, role: Role): string | undefined;
     beforeRequest(agent: Agent, turn: number, step: number, binding: SessionBinding, role: Role): void;
     /** Disclosed context window for this physical model, read when the request is built. */
