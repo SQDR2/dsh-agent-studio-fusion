@@ -1,6 +1,6 @@
 {
   "name": "@sqdr2/dsh-fusion",
-  "version": "0.3.6",
+  "version": "0.3.8",
   "publishConfig": {
     "access": "public",
     "registry": "https://registry.npmjs.org/"

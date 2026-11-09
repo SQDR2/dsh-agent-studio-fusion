@@ -1,4 +1,4 @@
-import { chmodSync, cpSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, cpSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -40,7 +40,9 @@ describe('durable complete change evidence', () => {
     writeFileSync(join(project, 'new.txt'), 'created without final newline')
     writeFileSync(join(project, 'empty-new'), '')
     chmodSync(join(project, 'exec.sh'), 0o755)
-    for (const name of ['remove.txt', 'empty-remove', 'link']) rmSync(join(project, name))
+    for (const name of ['remove.txt', 'empty-remove']) rmSync(join(project, name))
+    // Node 24's rmSync leaves a dangling symlink in place; unlinking is the only removal.
+    unlinkSync(join(project, 'link'))
     symlinkSync('new-target', join(project, 'link'))
     const candidate = snapshotWorkspace(project)
     const result = manifest(saveChangeManifest(store, TASK, base, candidate, captured).id)

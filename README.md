@@ -102,6 +102,16 @@ Fusion 在 DeepSeek Harness（DSH）的模型菜单里就是一个普通模型�
 > Windows 把 `bash` 换成 `pwsh`；改过 `workerTools` 就跟着改。完整配置面、验证步骤与排障对照见
 > [dsh-agy-worker 的 MCP 桥接文档](https://github.com/SQDR2/dsh-agy-worker/blob/main/docs/MCP-BRIDGE-SETUP.md)。
 
+### 其它 agent 线路（ACP 等）：这里没有工具桥
+
+上面的 `mcpBridge` / `permissionMode` / `agy_tool` 三件套是 **agy 专属**的，因为那条线路由本插件的桥接层接管。把别的
+agent 接进来（例如第三方 `dsh-tauri-acp` 提供的 ACP 线路）不属于这种情况：这类适配器可能在自己的会话里根本不带 MCP
+servers（实测的 `dsh-tauri-acp` 构建即是如此，但这取决于适配器而不是协议），**本插件没有任何设置能替它补上这座桥**。这种线路交给 Sidekick 做文本问答时，
+Fusion 现在允许它用一份严格限定的文本报告交回结果（`fusionTextReport` 块，绑定当前 `workOrderId` + `revision`，字段与
+`fusion_submit_result` 同构；散文、旧单、错 revision、多余字段一律拒绝，报告仍由 Lead 审查）；而需要读写文件、跑命令的
+workspace 任务仍然必须走真实工具，这条线路依然会明确失败并给出现实可行的出路（换直连模型线路）。细节见
+[`docs/WORKER-TOOLS-UNREACHABLE.md`](docs/WORKER-TOOLS-UNREACHABLE.md)。
+
 ## 本 fork 做了什么
 
 相对上游 `dsh-model-fusion`，本 fork 的改动（按提交时间）：

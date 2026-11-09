@@ -449,21 +449,25 @@ export async function runBaselineChecks(input: CheckInput & { checks: readonly F
     if (check.definition.baseline !== 'no-new-failures') { out.push(check); continue }
     input.exec.signal.throwIfAborted()
     const run = await invokeCheck(input, check, before!)
-    input.store.writeDocument(run.key, 1, { check, evidence: run.evidence, baseline: true })
-    if (run.evidence.state === 'outcome-unknown') {
-      input.uncertain?.(run.evidence)
+    // The closing snapshot is the real state after this command. Recording it is what
+    // lets a later receipt prove the command changed nothing; leaving it undefined made
+    // every completed run fail verification as CHECK_SNAPSHOT_MISMATCH.
+    const after = snapshotWorkspace(input.root)
+    const evidence: ToolEvidence = run.evidence.state === 'completed'
+      ? { ...run.evidence, outputSnapshot: after.id } : run.evidence
+    input.store.writeDocument(run.key, 1, { check, evidence, baseline: true })
+    if (after.id !== before!.id) throw new Error('A baseline command changed the source snapshot; use a command that does not write source files')
+    if (evidence.state === 'outcome-unknown') {
+      input.uncertain?.(evidence)
       throw new Error('Baseline command outcome is unknown; inspect the recorded effects before delegating')
     }
-    const parsed = run.evidence.state === 'completed' && !run.truncated ? parseTestFailures(check.definition.parser, run.text) : undefined
+    const parsed = evidence.state === 'completed' && !run.truncated ? parseTestFailures(check.definition.parser, run.text) : undefined
     if (!parsed) {
-      throw new Error(`Baseline run of ${check.definition.id} could not be read (exit ${run.evidence.exitCode}, state ${run.evidence.state}). `
+      throw new Error(`Baseline run of ${check.definition.id} could not be read (exit ${evidence.exitCode}, state ${evidence.state}). `
         + `It needs a completed run with ${BASELINE_OUTPUT[check.definition.parser as BaselineParser]}. Retry fusion_delegate with a runnable command, or drop baseline to require every test to pass. `
         + `Output tail: ${run.text.slice(-600)}`)
     }
     out.push({ definition: check.definition, plan: { ...check.plan, allowedFailures: parsed.failedIds } })
-  }
-  if (before && snapshotWorkspace(input.root).id !== before.id) {
-    throw new Error('A baseline command changed the source snapshot; use a command that does not write source files')
   }
   return out
 }
@@ -510,36 +514,33 @@ export async function runNativeChecks(input: CheckInput & {
   const receipts: PlannedReceipt[] = []
   // One snapshot for the whole batch of commands, compared once at the end: see
   // invokeCheck for why a per-command snapshot is wrong under concurrency.
-  let batchBefore: WorkspaceSnapshot | undefined
-  const openBatch = () => { batchBefore ??= snapshotWorkspace(root) }
-  const closeBatch = (): string | undefined => {
-    const before = batchBefore
-    batchBefore = undefined
-    if (!before) return undefined
-    return snapshotWorkspace(root).id === before.id ? undefined
-      : 'Acceptance command changed the source snapshot; rework is required'
-  }
   for (const batch of checkBatches(checks)) {
     exec.signal.throwIfAborted()
-    openBatch()
-    const runs = await Promise.all(batch.map(check => invokeCheck(input, check, batchBefore!)))
+    const before = snapshotWorkspace(root)
+    const runs = await Promise.all(batch.map(check => invokeCheck(input, check, before)))
+    // The batch's closing snapshot is the honest post-command state: every command in
+    // it has finished, so a concurrent sibling's writes are already accounted for.
+    // Every completed receipt records it, which is what proves the command changed
+    // nothing; a missing `outputSnapshot` made every checked task unverifiable.
+    const after = snapshotWorkspace(root)
     // Record every run before deciding anything: a sibling that finished must not
     // lose its evidence because another command in its batch failed the check.
     const pending: PlannedReceipt[] = []
     for (const [index, run] of runs.entries()) {
       const check = batch[index]!
       const counts = run.truncated ? undefined : receiptCounts(check, run.text)
-      const receipt: PlannedReceipt = { id: `receipt:${run.evidence.nativeToolCallId}`, planDigest: digestOf(check.plan), evidence: run.evidence, ...(counts ? { counts } : {}) }
-      store.writeDocument(run.key, 1, { check, evidence: run.evidence, receipt })
-      if (run.evidence.state === 'outcome-unknown') {
-        input.uncertain?.(run.evidence)
+      const evidence: ToolEvidence = run.evidence.state === 'completed'
+        ? { ...run.evidence, outputSnapshot: after.id } : run.evidence
+      const receipt: PlannedReceipt = { id: `receipt:${evidence.nativeToolCallId}`, planDigest: digestOf(check.plan), evidence, ...(counts ? { counts } : {}) }
+      store.writeDocument(run.key, 1, { check, evidence, receipt })
+      if (evidence.state === 'outcome-unknown') {
+        input.uncertain?.(evidence)
         throw new Error('Acceptance command outcome is unknown; inspect the recorded effects before continuing')
       }
       pending.push(receipt)
     }
-    const changed = closeBatch()
     receipts.push(...pending)
-    if (changed) throw new Error(changed)
+    if (after.id !== before.id) throw new Error('Acceptance command changed the source snapshot; rework is required')
   }
   const report: WorkerReport = { ...input.report,
     verification: receipts.flatMap(receipt => [receipt.evidence.stdout, receipt.evidence.stderr]),

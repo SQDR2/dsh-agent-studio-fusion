@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest'
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { SqliteFusionStore } from '../src/task/sqlite-store.js'
@@ -55,7 +55,8 @@ describe('native evidence and authorization boundaries', () => {
     symlinkSync('../outside-a', join(project, 'link'))
     const before = snapshotWorkspace(project)
     rmSync(join(project, 'file.ts'))
-    rmSync(join(project, 'link'))
+    // Node 24's rmSync no-ops on a dangling symlink, so EEXIST would surface on the next link.
+    unlinkSync(join(project, 'link'))
     symlinkSync('../outside-b', join(project, 'link'))
     expect(changedPaths(before, snapshotWorkspace(project))).toEqual(['file.ts', 'link'])
     expect(() => workspacePath(project, '../outside')).toThrow('escapes')

@@ -71,4 +71,67 @@ describe('Worker no-report diagnosis', () => {
     expect(String(reply.next)).toContain('Do not retry fusion_rework')
     expect(String(reply.next)).toContain('not a provider outage')
   })
+
+  it('names a non-bridge agent route honestly instead of repeating the agy settings', () => {
+    // session-6113b527: the Worker ran on `devin` (dsh-tauri-acp) and the Lead was
+    // told to set mcpBridge/permissionMode. Those are dsh-agy-link options; an ACP
+    // route opens its session with no MCP servers, so no Fusion setting can help.
+    const reply = JSON.parse(workerUnreachableReply('fusion-worker-outer', { provider: 'devin', model: 'swe-2-flash-medium',
+      mode: 'text', workerText: '我当前实际运行的模型是 SWE-2 Flash Medium。' })) as Record<string, unknown>
+    const next = String(reply.next)
+    expect(next).not.toContain('mcpBridge')
+    expect(next).not.toContain('permissionMode')
+    expect(next).not.toContain('agy_tool')
+    // No agy-specific vocabulary at all on a route Fusion does not wire.
+    expect(next.toLowerCase()).not.toContain('antigravity')
+    expect(next).not.toMatch(/\bagy\b/)
+    // Nor a blanket claim about how every ACP adapter opens its session.
+    expect(next).toContain('adapter must itself forward')
+    expect(next).toContain('one example')
+    expect(next).toContain('not a provider outage')
+    expect(next).toContain('Do not retry fusion_rework')
+    expect(next).toMatch(/MCP|forward/i)
+    expect(next).toContain('direct-call')
+    // The Worker did answer: its bounded prose is retained as unverified evidence.
+    expect(reply.workerSaid).toMatchObject({ text: '我当前实际运行的模型是 SWE-2 Flash Medium。', truncated: false })
+    expect(JSON.stringify(reply.workerSaid)).toContain('unverified')
+    expect(next).toContain('did not deliver a valid one')
+  })
+
+  it('bounds the retained Worker prose and says when it was cut', () => {
+    const reply = JSON.parse(workerUnreachableReply('fusion-worker-2', { provider: 'devin', model: 'swe-2-flash-medium',
+      workerText: 'x'.repeat(5000) })) as Record<string, unknown>
+    expect(reply.workerSaid).toMatchObject({ truncated: true })
+    expect(String((reply.workerSaid as { text: string }).text)).toHaveLength(2000)
+    // A route with no prose keeps the reply free of a fabricated quote.
+    expect(JSON.parse(workerUnreachableReply('fusion-worker-3', { provider: 'devin', model: 'swe-2-flash-medium' })))
+      .not.toHaveProperty('workerSaid')
+  })
+
+  it('re-reports a quote that the ledger already cut as truncated, not as a complete message', () => {
+    // The stored text is exactly the cap, so re-deriving truncation would lose the fact.
+    const reply = JSON.parse(workerUnreachableReply('fusion-worker-4', { provider: 'devin', model: 'swe-2-flash-medium',
+      workerText: 'x'.repeat(2000), workerTextTruncated: true })) as Record<string, unknown>
+    expect(reply.workerSaid).toMatchObject({ truncated: true })
+  })
+
+  it('names the bounded reason when a structured text block was refused', () => {
+    const reply = JSON.parse(workerUnreachableReply('fusion-worker-5', { provider: 'devin', model: 'swe-2-flash-medium',
+      mode: 'text', textReportRejected: 'revision does not match the frozen work order revision 1' })) as Record<string, unknown>
+    expect(String(reply.textReportRefused)).toContain('revision does not match')
+    expect(String(reply.next)).toContain('A structured text block was refused')
+    expect(String(reply.next)).toContain('revision does not match the frozen work order revision 1')
+    // The refusal is bounded too: a hostile reason cannot flood the Lead.
+    const long = JSON.parse(workerUnreachableReply('fusion-worker-6', { provider: 'devin', model: 'swe-2-flash-medium',
+      textReportRejected: 'y'.repeat(5000) })) as Record<string, unknown>
+    expect(String(long.textReportRefused)).toHaveLength(300)
+  })
+
+  it('keeps the agy knobs on the one bridge route Fusion wires', () => {
+    const reply = JSON.parse(workerUnreachableReply('fusion-worker-7', { provider: 'antigravity', model: 'gemini-3.8-flash' })) as Record<string, unknown>
+    expect(String(reply.next)).toContain('mcpBridge on')
+    expect(String(reply.next)).toContain('permissionMode skip')
+    expect(String(reply.next)).toContain('agy_tool')
+    expect(String(reply.next)).not.toContain('adapter must itself forward')
+  })
 })

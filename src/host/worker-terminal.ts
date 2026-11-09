@@ -1,3 +1,5 @@
+import { routeTransportName } from './route-transport.js'
+
 /** What fusion_wait should do once the resident Worker handle is already gone. */
 export function absentWorkerOutcome(input: { pendingEffects: number; outcomeUnknown: boolean; submitted: boolean }):
   { kind: 'recovery'; reason: string } | { kind: 'collect-report' } | { kind: 'incomplete' } {
@@ -69,16 +71,68 @@ export function workerUnreachableFor(order: { id?: string } | undefined,
  * The one wording for a route that cannot reach Host tools, shared by every entry
  * point that can rediscover the verdict, so a later `fusion_wait` says the same
  * thing as the delegation that first failed.
+ *
+ * The remedy depends on the route: only a bridge route Fusion actually wires (the
+ * antigravity/agy one) has transport and `mcpBridge`/`permissionMode` settings to
+ * check. Any other route (session-6113b527 ran `devin` through `dsh-tauri-acp`,
+ * whose `session/new` carries no MCP servers) cannot be configured into reaching
+ * Host tools from inside Fusion, so naming agy's settings there is a false lead.
+ *
+ * `workerText` is the Worker's own bounded message from the captured request. It is
+ * unverified prose, not a report, but withholding it made the Lead tell the user the
+ * Sidekick never replied when it had answered the question correctly.
  */
+export const WORKER_QUOTE_MAX = 2_000
+export const TEXT_REPORT_REFUSED_MAX = 300
+
 export function workerUnreachableReply(childId: string | undefined,
-  route: { provider: string; model: string }): string {
+  route: { provider: string; model: string; mode?: string; workerText?: string; workerTextTruncated?: boolean
+    textReportRejected?: string }): string {
+  const bridge = routeTransportName(route.provider) !== undefined
+  const quoted = boundedWorkerText(route.workerText, route.workerTextTruncated)
+  const textOnly = route.mode === 'text'
+    ? ' This was a text-only work order: a strictly bound `fusionTextReport` JSON block was the accepted fallback, and the Worker did not deliver a valid one. A workspace or exploration order cannot be completed this way; it needs real Host tool calls.'
+    : ''
+  // Only the bridge route Fusion actually wires has these knobs. Every other route
+  // must be told the truth: forwarding Host tools is the adapter's job, and no Fusion
+  // setting can add a bridge that the adapter does not implement.
+  const remedy = bridge
+    ? ' Fusion adds that transport (agy_tool for the antigravity/agy route) to the Worker ceiling automatically, so first check the route itself: mcpBridge on, permissionMode skip, and the bridge tool allowlist permitting fusion_submit_result.'
+    : ' No Fusion setting can fix that here: the adapter must itself forward this Host\'s tools to the agent (an ACP adapter may open its session without any MCP server, which is one example of the missing bridge, but that depends on the adapter and not on Fusion). For workspace or exploration work, replace the Worker route with a direct-call model route in the Fusion panel in the left sidebar.'
+  const seeQuote = quoted === undefined
+    ? ''
+    : ' The Worker did answer in prose (quoted above, unverified): report what it said as the Sidekick\'s own unverified statement, and do not say it never replied.'
+  const refused = route.textReportRejected === undefined
+    ? ''
+    : ' A structured text block was refused: ' + route.textReportRejected.slice(0, TEXT_REPORT_REFUSED_MAX) + '.'
   return JSON.stringify({
     status: 'needs-decision',
     reason: 'worker dispatched no tool call, so it could not reach fusion_submit_result',
     reasonCode: 'worker-tools-unreachable', failureCode: 'WORKER_TOOLS_UNREACHABLE',
     childId, workerRunning: false, provider: route.provider, model: route.model,
-    next: 'This is a route/adapter mismatch, not a provider outage, quota limit or a model capability. The Worker route ran its own agent loop and only surfaces a tool call when the request also carries that adapter\'s own transport tool, so the Fusion tools this Host advertised were unreachable. Fusion adds that transport (agy_tool for the antigravity/agy route) to the Worker ceiling automatically, so first check the route itself: mcpBridge on, permissionMode skip, and the bridge tool allowlist permitting fusion_submit_result. Do not retry fusion_rework, do not take over and do not claim completion. Tell the user which Worker route failed, and that it must be configured to reach Host tools or be replaced by a direct-call route in the Fusion panel in the left sidebar.',
+    ...(quoted === undefined ? {} : { workerSaid: quoted }),
+    ...(route.textReportRejected === undefined ? {}
+      : { textReportRefused: route.textReportRejected.slice(0, TEXT_REPORT_REFUSED_MAX),
+        textReportHint: 'The block named a different work order, revision or brief, or failed the schema: copy the ids from the current frozen order and the current brief, and send exactly one complete block.' }),
+    next: 'This is a route/adapter mismatch, not a provider outage, quota limit or a model capability.'
+      + ' The Worker route ran its own agent loop and never called a Host tool, so the Fusion tools this Host advertised were unreachable.'
+      + remedy + textOnly + refused + seeQuote
+      + ' Do not retry fusion_rework, do not take over and do not claim completion. Tell the user which Worker route failed and why.',
   })
+}
+
+/**
+ * At most `WORKER_QUOTE_MAX` characters of the Worker's own words, with an honest
+ * truncation marker. `truncated` is supplied when the caller already cut the text for
+ * storage, so the ledger and the reply agree instead of re-deriving a shorter value.
+ */
+export function boundedWorkerText(text: string | undefined, truncated?: boolean):
+  { text: string; truncated: boolean; note: string } | undefined {
+  if (text === undefined) return undefined
+  const trimmed = text.trim()
+  if (!trimmed) return undefined
+  return { text: trimmed.slice(0, WORKER_QUOTE_MAX), truncated: truncated ?? trimmed.length > WORKER_QUOTE_MAX,
+    note: 'Quoted verbatim from the Worker\'s captured message: unverified prose, not a submitted report.' }
 }
 
 /** Continue/switch is refused before the route is written. Say so when a switch was requested. */

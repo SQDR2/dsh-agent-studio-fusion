@@ -15,6 +15,58 @@ own tags and releases.
 Entry format: what changed, then what was actually validated. "Not claimed" lines mark what a release did *not* test —
 read them before assuming a platform is covered.
 
+## 0.3.8 — 2026-11-09
+
+### Fixes
+- **Acceptance check receipts now carry their real closing snapshot.** `runNativeChecks` recorded only
+  `inputSnapshot`, so `src/evidence/receipts.ts` rejected every completed check as `CHECK_SNAPSHOT_MISMATCH`: no task
+  with an acceptance command could reach `verified`, and the Lead could never accept it. The producer now takes the
+  batch's closing snapshot after every command in it finished, confirms the source did not change, and writes it into
+  each completed receipt; `runBaselineChecks` does the same per command. Covered by a host regression that asserts the
+  persisted pair, and the host suite goes from 91 environment failures to green.
+- `WORKER_TOOLS_UNREACHABLE` is now route-aware. Only the antigravity/agy bridge route, which Fusion actually wires,
+  is told to check `mcpBridge` / `permissionMode` / the `agy_tool` allowlist. Every other route (an ACP agent such as
+  `dsh-tauri-acp`, whose `session/new` carries no MCP servers) is told the adapter itself must forward Host tools, that
+  no Fusion setting can do it, and that workspace work needs a direct-call route. Zero tool calls stays a
+  route/adapter mismatch — never a provider outage, quota limit or model capability.
+- The verdict now carries the Worker's own bounded last words as `workerSaid` (`text` ≤ 2000 characters, `truncated`,
+  and an explicit unverified-prose note), persisted with the order mode so `fusion_wait` re-reports identical evidence
+  instead of the Lead telling the user the Sidekick never replied (session-6113b527).
+- Per-order evidence: the tool-call count and the quoted message are now scoped to the current work order via its
+  `worker-request:<childId>:<turn>:<step>` rows, so a persistent Worker's earlier tool calls can no longer mask a
+  current order that dispatched none.
+
+### Added
+- A strictly bounded text-report protocol for `mode: 'text'` assignments whose route cannot call Host tools at all:
+  one ```` ```json ```` block with `fusionTextReport: 1`, the frozen `workOrderId` / `revision`, the current
+  `briefRevision` (and `operationId` when present), `status`, `summary` and `unresolved`. Another order, another
+  revision or brief, extra fields, several blocks, an unclosed block, non-JSON or plain prose are refused with a
+  recorded reason, and only the captured request's complete message of the current brief may ever be adopted (rework
+  keeps the frozen order revision, so a stale block cannot answer again; an older step's valid block is never a
+  fallback, and an interrupted captured request adopts nothing). An accepted report goes through the
+  existing validation, review ticket and Lead acceptance path, and the review reply marks it
+  `submittedVia: 'text-report'` so it is never presented as a tool-verified submission. Native
+  `fusion_submit_result` stays preferred, and `implement` / `explore` orders still require real Host tool calls.
+- The protocol is discoverable in the text-order brief, in the single repair instruction and in `prompts/worker.md` +
+  `prompts/model-worker.md`; a valid pending text report also skips the turn-stopping repair generation.
+- `docs/WORKER-TOOLS-UNREACHABLE.md` gained the ACP half of the story: the `dsh-tauri-acp` `mcpServers: []` root cause,
+  what the protocol does and does not allow, and the difference between route metadata (`provider`/`model`) and a
+  Worker's own claim about the model it runs.
+- Tests: `tests/text-report.spec.ts` (protocol parsing, binding, caps, discovery text), route-aware wording and bounded
+  quoting in `tests/worker-terminal.spec.ts`, and host-level cases in `native-tests/coordinator.spec.ts` (bound text
+  report accepted without a repair generation, prose-only route quoting + `fusion_wait` consistency, wrong-revision
+  rejection, per-order evidence, rework refusing the previous brief's report, a fresh report under the new brief,
+  a stale `briefRevision` named in the refusal, an interrupted captured request not falling back to an older step's
+  report, workspace order refusing a bound text block, and the check-receipt
+  snapshot regression).
+
+### Not claimed
+- This is not ACP Sidekick support. An ACP route still cannot read, run or edit anything through Fusion; the missing
+  MCP bridge observed in `dsh-tauri-acp` lives outside this repository. Fusion does not assume every ACP adapter is
+  built that way.
+- End-to-end verification against a live ACP route was not reproduced here; the coverage is unit tests plus the host
+  integration suite, which now runs green (see below).
+
 ## 0.3.6 — 2026-11-09
 
 ### Changes

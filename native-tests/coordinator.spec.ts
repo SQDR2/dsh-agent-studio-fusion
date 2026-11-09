@@ -1092,6 +1092,245 @@ describe('unreachable Worker route', () => {
     expect(store.readDocument(`runtime:${taskId}`)?.value).not.toHaveProperty('workerUnreachable')
     expect(JSON.stringify(toolResults(parent))).not.toContain('worker-tools-unreachable')
   })
+
+  it('judges the current order, not tool calls recorded under an earlier one', async () => {
+    // The exploration order dispatched real tools; the implementation order that
+    // followed on the same Worker never called one. Counting the whole child log
+    // would call that an incomplete turn and hide the unreachable route
+    // (session-6113b527's shape, one order later).
+    const { parent, coordinator, store, taskId } = await setup([
+      explore(), delegate(), textResponse('Explain what the Worker could do.'),
+    ], [readCalc(), findings(), textResponse('Implementation order: prose only.'), textResponse('Still prose; no Host tool.')],
+    { modelLike: true, enforcedWorkflow: 'enforced-v2', files: true })
+    parent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Find and fix the addition bug.' }] }))
+    await parent.whenIdle()
+    const text = JSON.stringify(toolResults(parent))
+    expect(text).toContain('worker-tools-unreachable')
+    expect(store.readDocument(`runtime:${taskId}`)?.value).toMatchObject({
+      workerUnreachable: expect.objectContaining({ workOrderId: coordinator.state(taskId).currentWorkOrder!.id }),
+    })
+  })
+})
+
+describe('acceptance check evidence', () => {
+  it('records the real post-batch snapshot on every completed check receipt', async () => {
+    // session-6113b527 exposed this: the receipt carried `inputSnapshot` only, so
+    // every checked task failed verification as CHECK_SNAPSHOT_MISMATCH. The producer
+    // must record the snapshot the batch actually ended with.
+    const { parent, coordinator, store, taskId } = await setup([
+      delegate(), edit(), report(), review('accept'), textResponse('Verified.'),
+    ], [edit(), report()], { files: true })
+    parent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Fix addition.' }] }))
+    await parent.whenIdle()
+    const ready = toolResults(parent).flatMap(result => result.message.content)
+      .find(block => block.type === 'text' && block.text.includes('\"status\":\"review-ready\"'))
+    expect(ready, JSON.stringify(toolResults(parent))).toBeDefined()
+    const payload = JSON.parse((ready as { text: string }).text).report as { snapshot: string }
+    const ids = store.listDocumentIds('check-invocation:')
+    expect(ids.length).toBeGreaterThan(0)
+    let completed = 0
+    for (const id of ids) {
+      const evidence = (store.readDocument(id)!.value as { evidence: { state: string; inputSnapshot?: string; outputSnapshot?: string } }).evidence
+      if (evidence.state !== 'completed') continue
+      completed += 1
+      // The batch changed nothing, so the honest pair is base -> same candidate.
+      expect(evidence.inputSnapshot).toBe(payload.snapshot)
+      expect(evidence.outputSnapshot).toBe(payload.snapshot)
+    }
+    expect(completed).toBeGreaterThan(0)
+    expect(coordinator.state(taskId), JSON.stringify(toolResults(parent))).toMatchObject({ phase: 'COMPLETED' })
+  })
+})
+
+describe('text delegation on a route without Host tools', () => {
+  /** The exact one-sentence answer session-6113b527's Worker produced, now delivered under the protocol. */
+  const answer = '我当前实际运行的模型是 SWE-2 Flash Medium。'
+  const delegateText = () => toolCallResponse('text', 'fusion_delegate_text', { goal: 'Report the running model',
+    brief: 'Reply with exactly one Chinese sentence naming the model you are actually running.', constraints: [] })
+  const options = { modelLike: true, enforcedWorkflow: 'enforced-v2', noCwd: true } as const
+
+  /** The frozen order and the newest brief revision a text-only Worker actually received. */
+  function briefContext(request: GenerateOptions): { id: string; revision: number; briefRevision?: number; operationId?: string } {
+    const texts = request.messages.flatMap(message => (Array.isArray(message.content)
+      ? message.content.flatMap(block => block.type === 'text' ? [block.text] : []) : [String(message.content)]))
+    const joined = texts.join('\n')
+    const lines = joined.split('\n'), at = lines.findIndex(line => line.startsWith('Frozen work order ('))
+    if (at < 0) throw new Error(`The Worker request carried no frozen work order: ${joined.slice(0, 400)}`)
+    const order = JSON.parse(lines[at + 1]!) as { id: string; revision: number; operationId?: string }
+    // Rework keeps the frozen order revision and re-states the protocol with the new
+    // brief revision in the newest message, so the last match is the live one.
+    const brief = [...joined.matchAll(/"briefRevision": (\d+)/g)].at(-1)
+    return { ...order, ...(brief ? { briefRevision: Number(brief[1]) } : {}) }
+  }
+
+  /** One structured text report block bound to the request's own frozen order and brief. */
+  function reportBlock(request: GenerateOptions,
+    overrides: (order: ReturnType<typeof briefContext>) => Record<string, unknown> = () => ({})): string {
+    const order = briefContext(request)
+    return '```json\n' + JSON.stringify({ fusionTextReport: 1, workOrderId: order.id, revision: order.revision,
+      ...(order.briefRevision === undefined ? {} : { briefRevision: order.briefRevision }),
+      ...(order.operationId === undefined ? {} : { operationId: order.operationId }),
+      status: 'completed', summary: answer, unresolved: [], ...overrides(order) }) + '\n```'
+  }
+
+  function textReport(overrides: (order: ReturnType<typeof briefContext>) => Record<string, unknown> = () => ({})) {
+    return (request: GenerateOptions): StreamChunk[] => textResponse(reportBlock(request, overrides))
+  }
+  const reworkText = () => toolCallResponse('rework-text', 'fusion_rework', { feedback: '请再确认一次模型身份。' })
+
+  it('accepts one strictly-bound text report without spending a repair generation', async () => {
+    const { parent, coordinator, adapter, taskId } = await setup([
+      delegateText(), review('accept'), textResponse('The Sidekick reported its model.'),
+    ], [textReport()], options)
+    parent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Which model is the Sidekick running?' }] }))
+    await parent.whenIdle()
+    const workerRequests = adapter.requests.filter(request => request.model === 'worker')
+    // The protocol is the alternative, not a replacement: the native submit tool stays advertised.
+    expect(workerRequests).toHaveLength(1)
+    expect(workerRequests[0]!.tools!.map(tool => tool.name).sort())
+      .toEqual(['fusion_read_evidence', 'fusion_read_state', 'fusion_submit_result'])
+    expect(JSON.stringify(toolResults(parent))).toContain('review-ready')
+    expect(coordinator.state(taskId), JSON.stringify(toolResults(parent))).toMatchObject({ phase: 'COMPLETED', verification: 'verified' })
+  })
+
+  it('keeps the Worker own words as unverified evidence and re-reports them at fusion_wait', async () => {
+    const explanation = '我无法通过 fusion_submit_result 提交：当前路由的 ACP session/new 固定 mcpServers: []。'
+    const { parent, coordinator, store, taskId } = await setup([
+      delegateText(), toolCallResponse('wait', 'fusion_wait', {}), textResponse('The Sidekick answered in prose but could not submit.'),
+    ], [textResponse(answer), textResponse(explanation)], options)
+    parent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Which model is the Sidekick running?' }] }))
+    await parent.whenIdle()
+    const results = toolResults(parent), text = JSON.stringify(results)
+    expect(text).toContain('worker-tools-unreachable')
+    // This route has no agy transport, so the agy-only remedies must not be offered.
+    expect(text).not.toContain('mcpBridge')
+    expect(text).not.toContain('permissionMode')
+    expect(text).not.toContain('agy_tool')
+    // What the Worker actually said is evidence the Lead may quote, marked unverified.
+    expect(text).toContain('mcpServers')
+    expect(text).toContain('did not deliver a valid one')
+    expect(store.readDocument(`runtime:${taskId}`)?.value).toMatchObject({
+      workerUnreachable: expect.objectContaining({ mode: 'text', workerText: expect.stringContaining('mcpServers') }),
+    })
+    // The persisted verdict speaks with the same evidence at every later entry point.
+    expect(text.match(/worker-tools-unreachable/g)!.length).toBeGreaterThanOrEqual(2)
+    expect(coordinator.state(taskId).phase).not.toBe('COMPLETED')
+  })
+
+  it('refuses a report that names another revision instead of treating it as the answer', async () => {
+    const { parent, coordinator, store, taskId } = await setup([
+      delegateText(), textResponse('Explain what the Worker could do.'),
+    ], [textReport(() => ({ revision: 99 })), textResponse('Still no valid report.')], options)
+    parent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Which model is the Sidekick running?' }] }))
+    await parent.whenIdle()
+    expect(coordinator.state(taskId).phase).not.toBe('COMPLETED')
+    expect(JSON.stringify(toolResults(parent))).toContain('worker-tools-unreachable')
+    expect(store.readDocument(`runtime:${taskId}`)?.value).toMatchObject({
+      workerUnreachable: expect.objectContaining({ textReportRejected: expect.stringContaining('revision') }),
+    })
+  })
+
+  it('refuses to reuse the previous brief report after a rework', async () => {
+    // The first generation answered legally. Rework keeps the frozen order revision, so
+    // without a brief identity its old block would satisfy every later round.
+    const { parent, coordinator, store, taskId } = await setup([
+      delegateText(), reworkText(), textResponse('The old answer cannot be reused.'),
+    ], [textReport(), textResponse('我无法再次提交报告。'), textResponse('仍然只能给出散文。')], options)
+    parent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Which model is the Sidekick running?' }] }))
+    await parent.whenIdle()
+    const text = JSON.stringify(toolResults(parent))
+    expect(text.match(/review-ready/g) ?? []).toHaveLength(1)
+    expect(text).toContain('worker-tools-unreachable')
+    expect((store.readDocument(`runtime:${taskId}`)?.value as { submitted?: unknown }).submitted).toBeUndefined()
+    expect(store.readDocument(`runtime:${taskId}`)?.value).toMatchObject({
+      workerUnreachable: expect.objectContaining({ workOrderId: coordinator.state(taskId).currentWorkOrder!.id }),
+    })
+  })
+
+  it('never adopts an older step report when the captured request has no complete message', async () => {
+    // Two requests under ONE brief: step 1 carried a bound report AND a tool call, so the
+    // generation continued; step 2 was interrupted before it produced a complete message.
+    // Only the captured request's message may be adopted. The earlier block in the same
+    // brief is not a fallback — `#pendingTextReport` already binds the captured request,
+    // so adopting an older step would also contradict the repair decision.
+    const { ctx, parent, coordinator, adapter, store, taskId } = await setup([
+      delegateText(), toolCallResponse('wait-after-interrupt', 'fusion_wait', {}),
+      textResponse('The interrupted Worker never delivered a current report.'),
+    ], [
+      (request: GenerateOptions) => toolCallResponse('read-before-report', 'fusion_read_state', {}, reportBlock(request)),
+      'hang-slow',
+    ], options)
+    const release = holdLeadForFollowup(adapter, 1)
+    parent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Which model is the Sidekick running?' }] }))
+    await waitForNative(() => expect(adapter.requests.filter(request => request.model === 'worker')).toHaveLength(2))
+    const childId = coordinator.state(taskId).acceptedChild!
+    // Interrupt the second request: its only message is `interrupted`, never a candidate.
+    await coordinator.transport.stop(parent, childId)
+    await parent.whenIdle()
+    const rows = store.listDocumentIds(`worker-request:${childId}:`)
+      .map(id => store.readDocument(id)!.value as { turn: number; step: number; briefRevision: number })
+      .sort((left, right) => left.turn - right.turn || left.step - right.step)
+    expect(rows).toHaveLength(2)
+    expect(rows[1]!.briefRevision).toBe(rows[0]!.briefRevision)
+    const events = (await ctx.sessionQuery.readSession(SessionId(childId))).events
+    // Guard the scenario: the earlier step really carried a valid block, and the newest
+    // request really ended with an interrupted message instead of a complete one.
+    const early = events.find(event => event.type === 'assistant/message'
+      && event.data.turn === rows[0]!.turn && event.data.step === rows[0]!.step)
+    expect(JSON.stringify(early)).toContain('fusionTextReport')
+    const interrupted = events.find(event => event.type === 'assistant/message' && event.data.interrupted)
+    expect(interrupted).toMatchObject({ data: { turn: rows[1]!.turn, step: rows[1]!.step } })
+    release()
+    parent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Collect the interrupted Worker report.' }] }))
+    await parent.whenIdle()
+    const text = JSON.stringify(toolResults(parent))
+    // The valid block belongs to the earlier step of the same brief: it must not answer.
+    expect(text).not.toContain('review-ready')
+    expect(text).toContain('worker ended without submitting a report')
+    expect(coordinator.state(taskId).phase).not.toBe('COMPLETED')
+    expect((store.readDocument(`runtime:${taskId}`)?.value as { submitted?: unknown }).submitted).toBeUndefined()
+  })
+
+  it('accepts a fresh report bound to the new brief revision after a rework', async () => {
+    const { parent, coordinator, adapter, taskId } = await setup([
+      delegateText(), reworkText(), review('accept'), textResponse('Both rounds reported.'),
+    ], [textReport(), textReport()], options)
+    parent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Which model is the Sidekick running?' }] }))
+    await parent.whenIdle()
+    // The same frozen order was reported twice: once per brief revision.
+    expect(adapter.requests.filter(request => request.model === 'worker')).toHaveLength(2)
+    expect(JSON.stringify(toolResults(parent)).match(/review-ready/g)).toHaveLength(2)
+    expect(coordinator.state(taskId), JSON.stringify(toolResults(parent))).toMatchObject({ phase: 'COMPLETED' })
+  })
+
+  it('names a stale brief revision instead of adopting the block', async () => {
+    // A copy of the previous brief's block is doubly refused: the captured message is the
+    // current brief's, and its briefRevision no longer matches.
+    const { parent, coordinator, store, taskId } = await setup([
+      delegateText(), reworkText(), textResponse('Explain what was refused.'),
+    ], [textReport(), textReport(() => ({ briefRevision: 0 })), textResponse('仍然没有合法报告。')], options)
+    parent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Which model is the Sidekick running?' }] }))
+    await parent.whenIdle()
+    const text = JSON.stringify(toolResults(parent))
+    expect(text).toContain('worker-tools-unreachable')
+    expect(text).toContain('textReportRefused')
+    expect(text).toContain('briefRevision')
+    expect(coordinator.state(taskId).phase).not.toBe('COMPLETED')
+    expect(store.readDocument(`runtime:${taskId}`)?.value).toMatchObject({
+      workerUnreachable: expect.objectContaining({ textReportRejected: expect.stringContaining('briefRevision') }),
+    })
+  })
+
+  it('refuses a perfectly bound report on a workspace order, where only real tools count', async () => {
+    const { parent, coordinator, store, taskId, workspace } = await setup([
+      delegate(), textResponse('Explain what the Worker could do.'),
+    ], [textReport(), textResponse('Still no native report.')], { ...options, noCwd: false, files: true })
+    parent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Fix addition.' }] }))
+    await parent.whenIdle()
+    expect(coordinator.state(taskId).phase).not.toBe('COMPLETED')
+    expect(JSON.stringify(toolResults(parent))).toContain('worker-tools-unreachable')
+    expect(readFileSync(join(workspace, 'calc.py'), 'utf8')).toContain('return a - b')
+  })
 })
 
 describe('bridge-route Worker', () => {
@@ -2386,7 +2625,7 @@ describe('complete native Fusion workflow', () => {
     expect(adapter.requests).toHaveLength(0)
     expect(coordinator.bindings.read(parent.id)?.binding.selected).toBe(false)
     const end = parent.session.snapshotEvents().findLast(event => event.type === 'turn/end')
-    expect(end).toMatchObject({ data: { reason: { kind: 'error', error: { message: expect.stringContaining('设置 → Fusion') } } } })
+    expect(end).toMatchObject({ data: { reason: { kind: 'error', error: { message: expect.stringContaining('左侧边栏的 Fusion 面板配置 Lead 和 Worker') } } } })
   })
 
   it('drains a live Worker before leaving Fusion through the ordinary model menu', async () => {
