@@ -68,12 +68,12 @@ read them before assuming a platform is covered.
   integration suite, which now runs green (see below).
 
 ### Validation
-- `pnpm test`: 470 tests in 62 files pass (the earlier Node 24 dangling-symlink `EEXIST` cases are fixed in the tests
+- `pnpm test`: 487 tests in 63 files pass (the earlier Node 24 dangling-symlink `EEXIST` cases are fixed in the tests
   with `unlinkSync`; their assertions are unchanged). `pnpm typecheck` is clean, and `pnpm build` regenerates `lib/`.
-- `native-tests/coordinator.spec.ts` against the pinned Harness (`DSHX_HARNESS`): 230 of 230 tests pass, including the
+- `native-tests/coordinator.spec.ts` against the pinned Harness (`DSHX_HARNESS`): 233 of 233 tests pass, including the
   new bound-text-report cases, the interrupted-request case (an older step's valid block is never adopted), the
-  per-order evidence case and the check-receipt snapshot regression. The whole file is green on this machine; the
-  earlier `91 environment failures` were the missing check snapshots, not the Harness.
+  per-order evidence case and the check-receipt snapshot regression. The whole file is green on this machine once the
+  pinned Harness is supplied via `DSHX_HARNESS`.
 
 ## 0.3.7 — 2026-11-09
 
