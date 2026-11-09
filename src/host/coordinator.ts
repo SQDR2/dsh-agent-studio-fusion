@@ -49,7 +49,8 @@ import { NativeWorkerTransport } from './native-worker.js'
 import { NativeFusionActivity } from './native-activity.js'
 import { captureExploration, citedEvidenceChanged } from './native-exploration.js'
 import { workspaceWriterDenial } from './workspace-guard.js'
-import { absentWorkerOutcome, workerNoReportCause, workerStopExplanation, workerUnreachableFor, workerUnreachableReply } from './worker-terminal.js'
+import { absentWorkerOutcome, boundedWorkerText, workerNoReportCause, workerStopExplanation, workerUnreachableFor, workerUnreachableReply } from './worker-terminal.js'
+import { parseTextReport, textReportInstruction, textReportRepair } from './text-report.js'
 import { resolveModelOutputLimits } from './model-output.js'
 import { assertWorkerBriefRequest, captureWorkerBrief, workerToolBriefProblem } from './native-worker-brief.js'
 import { changedPaths, grantOf, pathAllowed, snapshotWorkspace, workspacePath, workspaceRelative } from './workspace.js'
@@ -99,6 +100,13 @@ interface RuntimeRecord {
   briefRevision?: number
   background?: boolean
   submitted?: { summary: string; unresolved: string[]; status: WorkerReport['status'] }
+  /**
+   * This report arrived as the strictly-bound `fusionTextReport` block of a
+   * text-only order, because its route could call no Host tool. The review path
+   * is unchanged; the provenance only keeps the Lead from presenting prose as a
+   * tool-verified submission.
+   */
+  textReport?: true
   explorationSubmitted?: ExplorationReport
   verification?: 'unverified' | 'partial' | 'verified'
   verificationReasons?: readonly string[]
@@ -120,7 +128,15 @@ interface RuntimeRecord {
    * handoff as live (session-16660dfd: the task stayed WORKER_RUNNING with no way
    * forward, because only a settle could rediscover a fact already known).
    */
-  workerUnreachable?: { workOrderId: WorkOrderId; childId: string; provider: string; model: string }
+  workerUnreachable?: { workOrderId: WorkOrderId; childId: string; provider: string; model: string
+    /** The order's mode, so a re-report knows whether the text protocol applied. */
+    mode?: WorkOrder['mode']
+    /** The Worker's own words from the captured request, already cut to `WORKER_QUOTE_MAX`. */
+    workerText?: string
+    /** Whether `workerText` was cut when it was stored, so every re-report says so. */
+    workerTextTruncated?: boolean
+    /** Why a text-protocol block was refused, when the Worker sent one and it did not bind. */
+    textReportRejected?: string }
 }
 const STUB_REVIEW = /^(?:placeholder|todo|tbd|n\/?a|none|ok|okay|lgtm|done|accept(?:ed)?|looks good|fine|test)\.?$/i
 
@@ -128,6 +144,11 @@ const STUB_REVIEW = /^(?:placeholder|todo|tbd|n\/?a|none|ok|okay|lgtm|done|accep
 export function substantiveReview(reason: string): boolean {
   const text = reason.trim()
   return text.length >= 20 && !STUB_REVIEW.test(text)
+}
+
+/** Whether one logged step belongs to the order that started at `start` (absent = judge the whole log). */
+function atOrAfter(start: { turn: number; step: number } | undefined, step: { turn: number; step: number }): boolean {
+  return start === undefined || step.turn > start.turn || step.turn === start.turn && step.step >= start.step
 }
 
 /**
@@ -456,7 +477,16 @@ export class FusionCoordinator {
       let instruction: string | undefined
       if (role === 'lead' && state.phase === 'REVIEWING') instruction = 'The current report has not been accepted. Inspect its evidence and call fusion_review_result; failed checks cannot be accepted. Use needs-decision for a genuine missing user decision.'
       else if (role === 'lead' && adaptiveWorkflow(binding) && state.phase === 'REWORK') instruction = 'Your review requires a correction. Send the specific feedback to the same Sidekick through fusion_rework; do not end the task before the correction and its checks. If a real user decision is missing, explain it explicitly.'
-      else if (role === 'worker' && state.currentWorkOrder && !this.#runtime(binding.taskId).submitted) instruction = 'Submit the current work through fusion_submit_result with its actual status and unresolved requirements. Prose alone cannot complete this work order.'
+      else if (role === 'worker' && state.currentWorkOrder && !this.#runtime(binding.taskId).submitted) {
+        // A text order whose Worker already emitted a valid, bound text report has
+        // reported: sending the repair instruction would spend a whole generation
+        // asking for what is on the table (session-6113b527 spent its second step
+        // explaining it could not submit).
+        if (state.currentWorkOrder.mode === 'text' && this.#pendingTextReport(agent, binding)) return
+        instruction = state.currentWorkOrder.mode === 'text'
+          ? textReportRepair({ ...state.currentWorkOrder, briefRevision: this.#runtime(binding.taskId).briefRevision ?? 0 })
+          : 'Submit the current work through fusion_submit_result with its actual status and unresolved requirements. Prose alone cannot complete this work order.'
+      }
       else if (role === 'lead' && !state.currentWorkOrder && this.workflow.deniedEffect(binding)) instruction = 'A requested effect was blocked and has not executed. Delegate it through fusion_delegate, or explain the blocker. This task cannot be recorded as completed by a text-only response.'
       if (!instruction) return
       if (!this.workflow.repairStop(agent, binding, role, instruction)) this.modelControl.failure(binding, role, {
@@ -747,23 +777,148 @@ export class FusionCoordinator {
       && (event.data.source === undefined || event.data.source.kind === 'user'))?.seq ?? 0
   }
 
+  /** One durable `worker-request:` row: the identity of a request and the brief it saw. */
+  #workerRequestRows(taskId: TaskId, childId: string): { turn: number; step: number; briefRevision: number; workOrderId?: string }[] {
+    const rows: { turn: number; step: number; briefRevision: number; workOrderId?: string }[] = []
+    for (const id of this.store.listDocumentIds(`worker-request:${childId}:`)) {
+      const row = this.store.readDocument(id)?.value as { schemaVersion?: number; taskId?: string; sessionId?: string
+        turn?: number; step?: number; briefRevision?: number; workOrderId?: string } | undefined
+      if (!row || row.schemaVersion !== 1 || row.taskId !== taskId || row.sessionId !== childId) continue
+      if (!Number.isSafeInteger(row.turn) || !Number.isSafeInteger(row.step) || !Number.isSafeInteger(row.briefRevision)) continue
+      rows.push({ turn: row.turn!, step: row.step!, briefRevision: row.briefRevision!, ...(row.workOrderId ? { workOrderId: row.workOrderId } : {}) })
+    }
+    return rows.sort((left, right) => left.turn - right.turn || left.step - right.step)
+  }
+
+  /**
+   * The captured request that produced the Worker's current generation.
+   *
+   * A report or a quote may only come from the request that saw the *current* brief:
+   * its row must name the current brief revision and work order. Rework keeps the
+   * frozen order revision, so the brief revision is the only durable boundary between
+   * the generation that already answered and the one that must answer again. No row
+   * means no identity: this fails closed instead of widening to the whole log
+   * (`workerToolBriefProblem`'s rule, applied to evidence rather than to a tool call).
+   */
+  #capturedWorkerRequest(binding: SessionBinding, childId: string | undefined):
+  { turn: number; step: number; briefRevision: number } | undefined {
+    const order = this.state(binding.taskId).currentWorkOrder, revision = this.#runtime(binding.taskId).briefRevision ?? 0
+    if (!order || !childId) return undefined
+    const row = this.#workerRequestRows(binding.taskId, childId)
+      .filter(item => item.briefRevision === revision && item.workOrderId === order.id).at(-1)
+    return row === undefined ? undefined : { turn: row.turn, step: row.step, briefRevision: row.briefRevision }
+  }
+
+  /** The one complete, non-interrupted assistant message of a captured request. */
+  #capturedMessage<E extends { type: string; seq: number; data: unknown }>(events: readonly E[],
+    request: { turn: number; step: number }): { seq: number; text: string } | undefined {
+    for (const event of events) {
+      if (event.type !== 'assistant/message') continue
+      const data = event.data as { turn?: number; step?: number; interrupted?: boolean
+        message?: { content: { type: string; text?: string }[] } }
+      if (data.turn !== request.turn || data.step !== request.step || data.interrupted) continue
+      const text = (data.message?.content ?? []).flatMap(block => block.type === 'text' && typeof block.text === 'string' ? [block.text] : []).join('\n')
+      return text.trim() ? { seq: event.seq, text } : undefined
+    }
+    return undefined
+  }
+
   /**
    * What the Worker was actually offered and what it dispatched, read from its own
-   * session log so a disposed Worker still answers. `offered` comes from the recorded
-   * request header — the table the route really received — never from this plugin's
-   * configured ceiling: a text assignment is offered the three Worker Fusion tools
-   * and nothing else, so a configured-count guess would report it as tool-less.
-   * An unreadable log yields zeroes, which merely keeps the generic verdict.
+   * session log so a disposed Worker still answers. `offered` comes from the request
+   * header immediately before the captured message — the table that request really
+   * received — never from this plugin's configured ceiling and never from an older
+   * request. `dispatched` counts tool calls since the current order began, so an
+   * earlier order's calls cannot vouch for this one. Without the captured identity or
+   * the order boundary both counts fail closed to zero and keep the generic verdict.
+   *
+   * `captured` is the *only* message a text report or the quoted Worker words may come
+   * from: the newest captured request of the current brief. `texts` lists every complete
+   * message of that same brief for refusal diagnostics; an older step's valid block is
+   * never a fallback for a captured request that produced no complete message.
    */
-  async #workerToolEvidence(childId: string | undefined): Promise<{ offered: number; dispatched: number }> {
-    if (!childId) return { offered: 0, dispatched: 0 }
+  async #workerToolEvidence(binding: SessionBinding, childId: string | undefined):
+  Promise<{ offered: number; dispatched: number; texts: string[]; captured?: { seq: number; text: string }; briefRevision?: number }> {
+    if (!childId) return { offered: 0, dispatched: 0, texts: [] }
     try {
+      const order = this.state(binding.taskId).currentWorkOrder
+      const request = this.#capturedWorkerRequest(binding, childId)
       const live = this.ctx.agents.get(NativeSessionId(childId))
       const events = live ? live.session.snapshotEvents() : (await this.ctx.sessionQuery.readSession(NativeSessionId(childId))).events
-      const header = events.findLast(event => event.type === 'request/header')
-      return { offered: header?.type === 'request/header' ? header.data.header.tools?.length ?? 0 : 0,
-        dispatched: events.filter(event => event.type === 'tool/call').length }
-    } catch { return { offered: 0, dispatched: 0 } }
+      const rows = this.#workerRequestRows(binding.taskId, childId)
+      const start = order === undefined ? undefined : rows.filter(row => row.workOrderId === order.id)[0]
+      const dispatched = start === undefined ? 0 : events.filter(event => event.type === 'tool/call' && atOrAfter(start, event.data)).length
+      // Only the current brief's own requests may contribute text: an older brief's
+      // answer (rework keeps the frozen order revision) is not evidence for this one.
+      // `captured` is the newest request of that brief and the sole adoption candidate;
+      // `texts` keeps every complete message for refusal diagnostics only.
+      const current = order === undefined || request === undefined ? undefined
+        : rows.filter(row => row.briefRevision === request.briefRevision && row.workOrderId === order.id)
+      const captured = request === undefined ? undefined : this.#capturedMessage(events, request)
+      const texts = current === undefined ? [] : current
+        .flatMap(row => { const message = this.#capturedMessage(events, row); return message ? [message.text] : [] })
+      const header = captured === undefined ? undefined
+        : events.filter(event => event.type === 'request/header' && event.seq < captured.seq).at(-1)
+      return { offered: header?.type === 'request/header' ? header.data.header.tools?.length ?? 0 : 0, dispatched, texts,
+        ...(captured === undefined ? {} : { captured }), ...(request ? { briefRevision: request.briefRevision } : {}) }
+    } catch { return { offered: 0, dispatched: 0, texts: [] } }
+  }
+
+  /**
+   * Whether the Worker's captured message already carries a valid text report for the
+   * current brief. The turn-stopping repair is skipped on `true`: the Worker has
+   * reported in the only channel its route has, and asking again would spend a whole
+   * generation (session-6113b527's second step explained it could not submit).
+   */
+  #pendingTextReport(agent: Agent, binding: SessionBinding): boolean {
+    const order = this.state(binding.taskId).currentWorkOrder
+    if (!order || order.mode !== 'text') return false
+    const request = this.#capturedWorkerRequest(binding, agent.id)
+    const message = request === undefined ? undefined : this.#capturedMessage(agent.session.snapshotEvents(), request)
+    if (message === undefined || request === undefined) return false
+    return parseTextReport(message.text, { ...order, briefRevision: request.briefRevision }).kind === 'report'
+  }
+
+  /**
+   * Consume the strictly-bound text report of a text-only order, before the Host
+   * calls the route unreachable.
+   *
+   * Only `mode: 'text'`, only the captured request of the current brief (order id,
+   * frozen revision and brief revision must all match), and only that request's single
+   * complete message. Plain prose, an older step's block or a stale brief's block never
+   * answer for it — an older step of the same brief (its valid block included) is read
+   * only to explain a refused block, never as a fallback when the captured request was
+   * interrupted or produced no complete message. An adopted report takes the normal
+   * path — `fusion_submit_result`'s report shape, the frozen (empty) check set, the
+   * review ticket and Lead acceptance — so the protocol adds a delivery channel, not an
+   * acceptance shortcut.
+   */
+  async #consumeTextReport(binding: SessionBinding): Promise<{ rejected?: string } | undefined> {
+    const order = this.state(binding.taskId).currentWorkOrder
+    if (!order || order.mode !== 'text' || this.#runtime(binding.taskId).submitted) return undefined
+    const evidence = await this.#workerToolEvidence(binding, this.state(binding.taskId).acceptedChild)
+    if (evidence.briefRevision === undefined) return undefined
+    const context = { ...order, briefRevision: evidence.briefRevision }
+    // Adoption is only ever the captured request's complete message. The newest complete
+    // message in the same brief would adopt a report from a generation that already
+    // answered and whose request is now interrupted (or produced no complete message).
+    const captured = evidence.captured
+    if (captured !== undefined) {
+      const parsed = parseTextReport(captured.text, context)
+      if (parsed.kind === 'report') {
+        this.#saveRuntime({ ...this.#runtime(binding.taskId), submitted: parsed.submitted, textReport: true, workerUnreachable: undefined })
+        this.ctx.logger.info(`[dsh-fusion] adopted the structured text report of work order ${order.id}`)
+        return undefined
+      }
+    }
+    // A refused block is diagnostic only, so any step of this brief may explain it.
+    for (const text of [...evidence.texts].reverse()) {
+      const parsed = parseTextReport(text, context)
+      if (parsed.kind !== 'invalid') continue
+      this.ctx.logger.warn(`[dsh-fusion] refused a text report for work order ${order.id}: ${parsed.reason}`)
+      return { rejected: parsed.reason }
+    }
+    return undefined
   }
 
   /**
@@ -772,12 +927,19 @@ export class FusionCoordinator {
    * outside this Host's tool loop. That is an adapter/configuration mismatch, so
    * it is named instead of a generic incomplete turn the Lead would retry in vain.
    */
-  async #unreachableTools(binding: SessionBinding, childId: string | undefined): Promise<string | undefined> {
-    const evidence = await this.#workerToolEvidence(childId)
+  async #unreachableTools(binding: SessionBinding, childId: string | undefined, rejected?: string): Promise<string | undefined> {
+    const evidence = await this.#workerToolEvidence(binding, childId)
     if (workerNoReportCause({ requestedTools: evidence.offered, dispatchedToolCalls: evidence.dispatched }) !== 'unreachable-tools') return undefined
     const route = this.modelControl.route(binding, 'worker')
-    this.#recordWorkerUnreachable(binding, childId, route)
-    return workerUnreachableReply(childId, route)
+    // Only the captured request's message is quoted: an older step's words are not
+    // evidence about the generation that stopped without a report.
+    const last = evidence.captured?.text
+    const quoted = last === undefined ? undefined : boundedWorkerText(last)
+    const record = this.#recordWorkerUnreachable(binding, childId, route, last, rejected)
+      ?? { ...route, childId: childId!, mode: this.state(binding.taskId).currentWorkOrder?.mode,
+        ...(quoted === undefined ? {} : { workerText: quoted.text, workerTextTruncated: quoted.truncated }),
+        ...(rejected ? { textReportRejected: rejected.slice(0, 300) } : {}) }
+    return workerUnreachableReply(childId, record)
   }
 
   /**
@@ -788,13 +950,22 @@ export class FusionCoordinator {
    * order still "owned" the task, leaving the task in WORKER_RUNNING with no exit
    * (session-16660dfd). The record is keyed by work order, so a replacement route
    * under a new order is judged on its own dispatch.
+   *
+   * Everything stored here is bounded: the Worker quote is cut to `WORKER_QUOTE_MAX`
+   * at write time (with an honest truncation flag) and a refused report's reason is
+   * capped, so "bounded" is true of the ledger and not only of the reply.
    */
-  #recordWorkerUnreachable(binding: SessionBinding, childId: string | undefined, route: { provider: string; model: string }): void {
+  #recordWorkerUnreachable(binding: SessionBinding, childId: string | undefined,
+    route: { provider: string; model: string }, workerText?: string, textReportRejected?: string): RuntimeRecord['workerUnreachable'] {
     const order = this.state(binding.taskId).currentWorkOrder
-    if (!order || !childId) return
+    if (!order || !childId) return undefined
     const runtime = this.#runtime(binding.taskId)
-    const record = { workOrderId: order.id, childId, provider: route.provider, model: route.model }
+    const quoted = workerText === undefined ? undefined : boundedWorkerText(workerText)
+    const record = { workOrderId: order.id, childId, provider: route.provider, model: route.model, mode: order.mode,
+      ...(quoted === undefined ? {} : { workerText: quoted.text, workerTextTruncated: quoted.truncated }),
+      ...(textReportRejected ? { textReportRejected: textReportRejected.slice(0, 300) } : {}) }
     if (digestOf(runtime.workerUnreachable ?? null) !== digestOf(record)) this.#saveRuntime({ ...runtime, workerUnreachable: record })
+    return record
   }
 
   /** The recorded verdict for the current order, when it still owns the handoff. */
@@ -1458,7 +1629,9 @@ export class FusionCoordinator {
     const knownText = known.length ? `\n\nPre-existing failures the Host observed on the untouched workspace before you started (not part of this task; these checks pass while only these fail, so do not change unrelated code to fix them):\n${known.join('\n')}` : ''
     const brief = `${request}${hard}Current stage brief (Lead-authored; later feedback may advance or replace this stage without changing the frozen work order):\n${args.brief}\n\nFrozen work order (goal and constraints apply throughout this work order, across all implementation stages):\n${JSON.stringify(shownOrder)}\n\n${mode === 'explore'
       ? 'Read-only exploration: return findings and source ranges through fusion_submit_result. Do not implement, run commands, or claim task completion.'
-      : `Acceptance commands:\n${JSON.stringify(args.checks)}${knownText}`}`
+      : mode === 'text'
+        ? `Text-only assignment: no workspace and no acceptance command. Submit the answer through fusion_submit_result. ${textReportInstruction({ ...order, briefRevision: this.#runtime(binding.taskId).briefRevision ?? 0 })}`
+        : `Acceptance commands:\n${JSON.stringify(args.checks)}${knownText}`}`
     const payload = this.store.putArtifact(binding.taskId, Buffer.from(brief), 'text/plain')
     const prepared = this.state(binding.taskId)
     this.store.transact(binding.taskId, prepared.seq, persisted => ({
@@ -1656,17 +1829,24 @@ export class FusionCoordinator {
     const deliveryId = `worker-delivery:${binding.taskId}:${randomUUID()}`
     try {
       const briefRevision = (runtime.briefRevision ?? 0) + 1
-      const payload = this.store.putArtifact(binding.taskId, Buffer.from(feedback), 'text/plain')
+      // Whatever the Lead wrote, a text order's Worker must also learn the new brief
+      // identity: rework keeps the frozen order revision, and a report bound to the
+      // previous brief is refused. Re-stating the protocol here keeps it discoverable
+      // without inflating the frozen brief.
+      const message = state.currentWorkOrder.mode === 'text'
+        ? `${feedback}\n\n${textReportInstruction({ ...state.currentWorkOrder, briefRevision })}`
+        : feedback
+      const payload = this.store.putArtifact(binding.taskId, Buffer.from(message), 'text/plain')
       this.store.writeDocument(deliveryId, 0, { schemaVersion: 1, taskId: binding.taskId, childId: state.acceptedChild,
         workOrderId: state.currentWorkOrder.id, state: 'prepared', briefRevision, delivery, feedbackKind, payloadRef: payload.id, causeId: exec.callId })
       this.#saveRuntime({ ...runtime, briefRevision, background: !block, takeover: false,
-        submitted: undefined, explorationSubmitted: undefined, verification: undefined, verificationReasons: undefined, workerFailure: undefined,
+        submitted: undefined, textReport: undefined, explorationSubmitted: undefined, verification: undefined, verificationReasons: undefined, workerFailure: undefined,
         reworkRounds: runtime.reworkRounds + (feedbackKind === 'rework' ? 1 : 0),
         continuationRounds: continuationRounds + (feedbackKind === 'continuation' ? 1 : 0) })
       this.activity.link(agent.session, childId, binding.taskId, exec.callId)
       const accepted = delivery === 'interrupt-generation'
-        ? await this.transport.interruptAndContinue(agent, state.acceptedChild, feedback, exec.signal)
-        : await this.transport.continue(agent, state.acceptedChild, feedback, exec.signal)
+        ? await this.transport.interruptAndContinue(agent, state.acceptedChild, message, exec.signal)
+        : await this.transport.continue(agent, state.acceptedChild, message, exec.signal)
       this.append(binding.taskId, 'child/accepted', { operationId: state.currentWorkOrder.operationId, child: state.acceptedChild, messageId: accepted.messageId })
       const prepared = this.store.readDocument(deliveryId)!
       this.store.writeDocument(deliveryId, prepared.revision, { ...(prepared.value as object), state: 'accepted', messageId: accepted.messageId })
@@ -1685,6 +1865,9 @@ export class FusionCoordinator {
   async #validate(agent: Agent, binding: SessionBinding, exec: ToolRunContext): Promise<string> {
     await this.#prepareStatus(binding.taskId, exec.signal)
     if (this.#binding(agent, 'lead').taskId !== binding.taskId) throw new Error('Fusion task changed during status preparation')
+    // A text-only order's Worker may have answered in the only channel its route
+    // has. Adopt it before any gate calls the route unreachable.
+    const textReport = await this.#consumeTextReport(binding)
     const runtime = this.#runtime(binding.taskId), state = this.state(binding.taskId), order = state.currentWorkOrder!
     if (!runtime.submitted) {
       const waiting = this.modelControl.waiting(binding, 'worker')
@@ -1692,7 +1875,7 @@ export class FusionCoordinator {
       // route could not call the advertised tools at all, or the Worker simply
       // stopped short of reporting. The first is a configuration mismatch the
       // Lead must not retry, so it is decided before the generic explanation.
-      const unreachable = waiting?.code === 'WORKFLOW_INCOMPLETE' ? await this.#unreachableTools(binding, state.acceptedChild) : undefined
+      const unreachable = waiting?.code === 'WORKFLOW_INCOMPLETE' ? await this.#unreachableTools(binding, state.acceptedChild, textReport?.rejected) : undefined
       if (unreachable) return unreachable
       if (waiting) {
         const explanation = workerStopExplanation(waiting.code)
@@ -1714,7 +1897,7 @@ export class FusionCoordinator {
       }
       const spent = this.#workerStepLimit(binding.taskId)
       if (spent) this.#recordWorkerStepStop(binding.taskId, spent)
-      const cause = await this.#unreachableTools(binding, state.acceptedChild)
+      const cause = await this.#unreachableTools(binding, state.acceptedChild, textReport?.rejected)
       if (cause) return cause
       return JSON.stringify({ status: 'needs-decision', reason: 'worker ended without submitting a report',
         reasonCode: spent ? 'worker-step-limit' : 'workflow-incomplete',
@@ -1821,6 +2004,10 @@ export class FusionCoordinator {
     const knownFailures = checked.receipts.flatMap(receipt => receipt.counts?.knownFailures?.length ? [{
       check: runtime.checks.find(check => digestOf(check.plan) === receipt.planDigest)?.definition.id, preExisting: receipt.counts.knownFailures }] : [])
     return JSON.stringify({ status: 'review-ready', verification: checked.verdict, report: checked.report,
+      // The report is genuine but arrived as text because the route cannot call Host
+      // tools; the Lead must not describe it as a tool-verified submission.
+      ...(runtime.textReport ? { submittedVia: 'text-report',
+        textReportWarning: 'This report arrived as the structured fusionTextReport block of a text-only order, not through a Host tool call. It is unverified Worker prose in a validated envelope: review it as you would any report, and say it came via the text fallback if it matters.' } : {}),
       changedPaths: changes, ticketId: ticket.id, automatedChecks: runtime.checks.length,
       ...(requirements.length ? { requirements: requirements.map((item, index) => ({ index: index + 1, text: item.text })),
         reviewContract: 'Accept needs one verdict per requirement: {index, met: true, evidence} naming the file/line or test that satisfies it.' } : {}),
@@ -2041,7 +2228,7 @@ export class FusionCoordinator {
           }
           const explorationSubmitted = order.mode === 'explore'
             ? captureExploration(this.store, order, runtime.base, current, submitted, args.sources ?? [], snapshotFailure) : undefined
-          this.#saveRuntime({ ...runtime, submitted, explorationSubmitted })
+          this.#saveRuntime({ ...runtime, submitted, textReport: undefined, explorationSubmitted })
           if (role === 'lead') { this.#release(binding.taskId); return this.#validate(agent, binding, exec) }
           exec.concludeTurn()
           return 'Report persisted. The Lead will review after this Worker becomes quiescent.'
@@ -2083,7 +2270,7 @@ export class FusionCoordinator {
         const runtime = state.currentWorkOrder ? this.#runtime(binding.taskId)
           : { schemaVersion: 1 as const, taskId: binding.taskId, root: base.root, base, checks: [], reworkRounds: 0, continuationRounds: 0 }
         const leadSubmissions = (runtime.leadSubmissions ?? 0) + 1
-        this.#saveRuntime({ ...runtime, takeover: true, background: false, submitted: undefined,
+        this.#saveRuntime({ ...runtime, takeover: true, background: false, submitted: undefined, textReport: undefined,
           ...(escalation ? { escalation, leadSubmissions } : {}) })
         if (escalation && state.currentWorkOrder) {
           // Recorded for Fusion history: how often the frontier model had to write, and why.
