@@ -18,3 +18,17 @@ export interface FusionActivityPage {
     more: boolean;
     done: boolean;
 }
+/** A recorded agy step replayed through a bridge route's transport. */
+export interface MirrorStep {
+    run: string;
+    step: number;
+    tool: string;
+}
+/** Recover the recorded step cursor and real tool from a generated mirror wrapper. */
+export declare function mirrorStepInvocation(code: string): MirrorStep | undefined;
+/**
+ * Whether one child tool event is real Worker activity this plugin presents in
+ * the parent conversation. Answering this needs the recorded arguments only to
+ * recognize the bounded Code Mode wrapper; nothing is executed or replayed.
+ */
+export declare function presentsActivity(name: string, rawArguments: string): boolean;

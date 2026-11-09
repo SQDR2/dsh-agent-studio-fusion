@@ -15,6 +15,42 @@ own tags and releases.
 Entry format: what changed, then what was actually validated. "Not claimed" lines mark what a release did *not* test —
 read them before assuming a platform is covered.
 
+## 0.3.7 — 2026-11-09
+
+### Changes
+
+- **An agy Sidekick now shows its steps inside the parent conversation.** A bridge route (antigravity) reports every
+  completed agy step as a real `tool/call` on its own transport, `agy_tool`, but the inline projection only listed the
+  Host's built-in tools. Both the live collector and the historical replay therefore dropped those events, so a session
+  whose Sidekick ran on an agy model looked idle — the operations were only visible in a separate task panel that
+  required `dsh-composer-plus` or `dsh-better-sidebar`. The projection now accepts the registered route transports
+  (and the exact Code Mode `run_code` mirror wrapper, parsed from the recorded code and never evaluated), so the same
+  `fusion_explore` / `fusion_delegate` card lists the real steps with no extra plugin installed.
+  Each row names the operation the route actually ran — `run_command` with its `CommandLine`/`Command` and `Cwd`,
+  `view_file`, `write_to_file`, `replace_file_content`, MCP shapes — and shows its recorded output and failure state.
+  An unknown inner tool falls back to its readable name and raw arguments; malformed arguments stay readable instead
+  of crashing the card. Exit codes are read only in the producing tool's own format, so a `view_file` result that
+  merely quotes an exit line is not marked failed. Write and edit steps show their real path and output but never a
+  diff synthesized from tool input.
+- **A Worker delivered before this fix still replays.** Such a task kept its durable activity link while storing no
+  activity rows at all, and the historical reader treated any link as "already cached", so cold history stayed blank
+  forever. It now falls back to the accepted message ids when the store really holds no rows, keeping the parent/child
+  ownership check, writing nothing and activating nothing; a genuine cache hit, including an exhausted cursor, is
+  unchanged.
+
+### Validation
+
+- `tests/agy-activity.spec.ts`: 17 tests over the projection predicate, the wrapper parser, argument unwrapping and
+  the rendered rows (shell command/cwd/exit code, file path and output with no fabricated diff, unknown tool,
+  malformed arguments, `pwsh` and `bash` cards unchanged).
+- `native-tests/coordinator.spec.ts -t agy`: 3 tests — live collection with deduplication and no re-run, historical
+  replay, and recovery of a legacy link-only task.
+- `pnpm test`: 462 tests in 61 files pass; the only failures are the two pre-existing symlink `EEXIST` cases in
+  `tests/change-evidence.spec.ts` and `tests/native-boundaries.spec.ts`, which also fail on the untouched branch.
+  `pnpm typecheck` and `pnpm build` are clean.
+- Not claimed: the cards appear when the adapter closes a step, so a running step is not shown live; and no browser or
+  live-provider check was run — the results above are unit, host-fixture and build evidence.
+
 ## 0.3.6 — 2026-11-09
 
 ### Changes

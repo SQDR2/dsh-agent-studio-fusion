@@ -2,6 +2,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-session-query'
+import { presentsActivity } from '../activity.js'
 import type { FusionActivity, FusionActivityPage } from '../activity.js'
 import type { SqliteFusionStore } from '../task/sqlite-store.js'
 
@@ -17,7 +18,6 @@ interface ActivityLink {
   done?: boolean
 }
 const prefix = 'activity-link:'
-const visibleTools = new Set(['bash', 'pwsh', 'read', 'write', 'edit', 'glob', 'grep', 'job_output', 'job_kill', 'str_replace_editor'])
 const parentPrefix = (parentId: string) => `activity:${encodeURIComponent(parentId)}:`
 const callPrefix = (parentId: string, callId: string) => `${parentPrefix(parentId)}${encodeURIComponent(callId)}:`
 
@@ -43,7 +43,13 @@ export async function readHistoricalFusionActivity(ctx: Context, store: SqliteFu
     const row = store.readDocument(id)!.value as ActivityLink
     return row.parentId === parentId && row.callId === callId
   })
-  if (linked || !parentId || !callId) return cached
+  if (!parentId || !callId) return cached
+  // A link only says the call was tracked, not that rows were stored for it: a task
+  // delivered before a route transport was projected keeps its link while holding
+  // zero activity documents, so a cold history read would stay blank forever.
+  // Decide on stored rows, never on the paginated page, so an exhausted `after`
+  // cursor still returns the (empty, done) cached page instead of a fallback.
+  if (linked && store.listDocumentIds(callPrefix(parentId, callId)).length !== 0) return cached
   const tasks = store.listTaskIds().map(id => store.load(id)!).filter(task => task.parent === parentId)
   for (const task of tasks) {
     if (!task.acceptedChild) continue
@@ -67,7 +73,7 @@ export async function readHistoricalFusionActivity(ctx: Context, store: SqliteFu
     const all: FusionActivity[] = []
     for (const source of child.events) {
       if (source.seq <= start.seq) continue
-      if (source.type === 'tool/call' && source.seq < end && visibleTools.has(source.data.name)) calls.add(source.data.callId)
+      if (source.type === 'tool/call' && source.seq < end && presentsActivity(source.data.name, source.data.arguments)) calls.add(source.data.callId)
       else if (source.type !== 'tool/result' || !calls.has(source.data.message.source.callId)) continue
       if (source.type !== 'tool/call' && source.type !== 'tool/result') continue
       all.push({ schemaVersion: 1, taskId: task.taskId, childSessionId: task.acceptedChild, parentCallId: callId,
@@ -163,7 +169,7 @@ export class NativeFusionActivity {
     const callKey = `${child.id}:${sourceCallId}`
     let origin: Omit<FusionActivity, 'source'> | undefined = calls.get(callKey)
     if (event.type === 'tool/call') {
-      if (!visibleTools.has(event.data.name)) return
+      if (!presentsActivity(event.data.name, event.data.arguments)) return
       const links = this.store.listDocumentIds(`${prefix}${child.id}:`).map(id => ({ id, ...this.store.readDocument(id)! }))
         .filter(row => (row.value as ActivityLink).parentId === parent.id)
         .sort((a, b) => (b.value as ActivityLink).anchorSeq - (a.value as ActivityLink).anchorSeq)
