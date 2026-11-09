@@ -15,6 +15,33 @@ own tags and releases.
 Entry format: what changed, then what was actually validated. "Not claimed" lines mark what a release did *not* test —
 read them before assuming a platform is covered.
 
+## 0.3.6 — 2026-11-09
+
+### Changes
+
+- **A timed-out Lead no longer strands its conversation.** When a Lead request failed, `NativeModelControl` recorded a
+  durable `waits.lead` pause (`TIMEOUT` in session-8ead78f7). Every later turn was then rejected before any request, so
+  the loop ended it as `blocked` with nothing in the conversation — pressing "continue" looked like the session
+  instantly ending, and the only apparent way forward was a new session. A human message is now the local continuation
+  control: an ordinary user message, and an empty "continue", lift the Lead's pause so the same conversation runs again.
+  Only quota and credential stops (`QUOTA`, `ACCOUNT_QUOTA`, `INVALID_CREDENTIAL`) keep the pause, because a retry
+  cannot fix them; a Sidekick pause stays behind the bounded `leadRecover` path so a delegation cannot silently retry.
+  Synthetic wakes are unaffected: a Sidekick settlement or a goal round still carries content and never lifts a pause.
+- **A gated step now says why.** A gate that rejects the pre-step (a paused role, a closing runtime, an unfinished
+  recovery, a missing scope install) never reaches the model, so the turn ended with no trace in the conversation. The
+  Host now writes one durable bilingual notice into the Lead's session per gate state, naming the paused role, the
+  reason, and the controls that lift it ("继续一次" / "Continue once", or simply another message). Repeated attempts on
+  the same state stay silent; a new gate state speaks once. A gated Sidekick transcript is untouched: the Lead already
+  learns about it from the delegation result.
+
+### Validation
+
+- `pnpm typecheck` and `pnpm test`: 455 tests in 61 files pass locally (Node 22.23.2), including the new
+  `tests/user-continuation.spec.ts`, which drives the real `NativeModelControl` listener over a SQLite ledger and the
+  real `NativeFusionScopes` pre-step gate.
+- Not claimed: the fix was not exercised against a live provider against a real timeout in a running Host; the gate and
+  the pause lift are covered at the unit/integration level with the durable ledger.
+
 ## 0.3.5 — 2026-11-08
 
 ### Changes
