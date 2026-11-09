@@ -2,7 +2,10 @@ import { readFileSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
+import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions } from '@deepseek-ai/dsh-llm'
+import { bi } from '../bilingual.js'
+import { FUSION_SOURCE_KIND } from '../message-source.js'
 import { NativeWorkerNotices } from './native-worker-notices.js'
 import { SessionId as NativeSessionId } from '@deepseek-ai/dsh-session'
 import { defineTool } from '@deepseek-ai/dsh-tools'
@@ -125,6 +128,21 @@ const STUB_REVIEW = /^(?:placeholder|todo|tbd|n\/?a|none|ok|okay|lgtm|done|accep
 export function substantiveReview(reason: string): boolean {
   const text = reason.trim()
   return text.length >= 20 && !STUB_REVIEW.test(text)
+}
+
+/**
+ * What the conversation says when Fusion rejects a step before any request.
+ * It gives the reason the user can act on: the same pause that made every later
+ * turn end at once, plus the local controls that actually lift it.
+ * @param role - Role whose next request the gate refused.
+ * @param reason - The Host's own gate explanation.
+ */
+export function blockedNoticeText(role: Role, reason: string): string {
+  const who = role === 'lead' ? 'Lead' : 'Sidekick'
+  return bi(
+    `Fusion 没有把这一轮发给模型：${who} 当前被暂停（${reason}）。在 Fusion 状态面板点「继续一次」，或直接再发一条消息继续；只有额度或凭据类错误需要先更换模型。`,
+    `Fusion did not send this turn to the model: ${who} is paused (${reason}). Continue from the Fusion status panel ("Continue once"), or send another message; only quota and credential stops need a route change first.`,
+  )
 }
 
 type LooseCheck = { command: string; id?: string; description?: string; parser?: CheckDefinition['parser']; kind?: CheckDefinition['kind'];
@@ -298,6 +316,7 @@ export class FusionCoordinator {
       canAccess: (agent, binding, role) => this.#accessBlocked(agent, binding, role),
       prepareRequest: (_agent, binding, _role, signal) => this.#prepareStatus(binding.taskId, signal),
       canRequest: (agent, binding, role) => this.#requestBlocked(agent, binding, role),
+      blockedNotice: (agent, binding, role, reason) => this.#announceBlocked(agent, binding, role, reason),
       canExecute: (exec, binding, role) => this.#toolBlocked(exec, binding, role),
       modelLimits: (provider, model) => resolveModelOutputLimits(this.ctx, provider, model),
       beforeRequest: (agent, turn, step, binding, role) => {
@@ -664,6 +683,31 @@ export class FusionCoordinator {
       if (runtime.submitted) return 'Worker report was submitted; wait for Lead feedback'
     }
     return undefined
+  }
+
+  /**
+   * A gate that rejects the next step never reaches the model, so the loop ends
+   * the turn as `blocked` with nothing in the conversation. Write the reason
+   * into the Lead's session once per gate state, so the user always learns why
+   * the turn ended and how to continue instead of having to start a new
+   * session. A gated Worker already reports through the Lead's delegation
+   * result, so its own subagent transcript stays untouched.
+   * Never throws: a notice failure must not become a second gate.
+   */
+  #announceBlocked(agent: Agent, binding: SessionBinding, role: Role, reason: string): void {
+    if (role !== 'lead') return
+    try {
+      const view = readModelControl(this.store, binding)
+      // The control revision moves whenever a wait is lifted or added, so a
+      // repeated attempt on the same state stays silent while a new gate speaks.
+      const id = `blocked-notice:${binding.taskId}:${digestOf({ role, reason, revision: view?.revision ?? 0 })}`
+      if (this.store.readDocument(id)) return
+      const message = createUserMessage({ source: { kind: FUSION_SOURCE_KIND, form: 'notice',
+        summary: bi('Fusion 暂停了这一轮', 'Fusion stopped this turn') },
+        content: [{ type: 'text', text: blockedNoticeText(role, reason) }] })
+      const event = agent.session.append('user/message', message, { surfaceOp: 'append' })
+      this.store.writeDocument(id, 0, { schemaVersion: 1, taskId: binding.taskId, role, reason, eventSeq: event.seq })
+    } catch (error) { this.ctx.logger.warn(`[dsh-fusion] blocked-step notice failed: ${String(error)}`) }
   }
 
   async #prepareStatus(taskId: TaskId, signal?: AbortSignal): Promise<void> {

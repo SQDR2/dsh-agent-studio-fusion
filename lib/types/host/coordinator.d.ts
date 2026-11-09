@@ -42,6 +42,14 @@ export interface CoordinatorOptions {
 }
 /** At least a sentence that is not a stock stub. */
 export declare function substantiveReview(reason: string): boolean;
+/**
+ * What the conversation says when Fusion rejects a step before any request.
+ * It gives the reason the user can act on: the same pause that made every later
+ * turn end at once, plus the local controls that actually lift it.
+ * @param role - Role whose next request the gate refused.
+ * @param reason - The Host's own gate explanation.
+ */
+export declare function blockedNoticeText(role: Role, reason: string): string;
 type LooseCheck = {
     command: string;
     id?: string;

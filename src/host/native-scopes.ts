@@ -21,6 +21,13 @@ export interface FusionScopeCallbacks {
   /** Shared gates plus limits that apply only to admitting a new generation. */
   prepareRequest?(agent: Agent, binding: SessionBinding, role: Role, signal: AbortSignal): Promise<void>
   canRequest(agent: Agent, binding: SessionBinding, role: Role): string | undefined
+  /**
+   * Report a gate that rejects the next step. A rejected step never reaches the
+   * model, so the turn ends as `blocked` with nothing in the conversation; the
+   * Host uses this to write the reason once instead of leaving a silent dead
+   * end the user can only escape by starting a new session.
+   */
+  blockedNotice?(agent: Agent, binding: SessionBinding, role: Role, reason: string): void
   canExecute(exec: Readonly<ToolExecution>, binding: SessionBinding, role: Role): string | undefined
   beforeRequest(agent: Agent, turn: number, step: number, binding: SessionBinding, role: Role): void
   /** Disclosed context window for this physical model, read when the request is built. */
@@ -107,10 +114,17 @@ export class NativeFusionScopes {
       } catch (error) { entry.ready = false; throw error }
     }))
     entry.dispose.push(scope.on('agent/pre-step', async (payload, next) => {
-      if (payload.agent !== agent || !entry.ready) return { kind: 'reject' }
+      if (payload.agent !== agent || !entry.ready) {
+        this.callbacks.blockedNotice?.(agent, entry.binding, role, 'Fusion scope initialization failed')
+        return { kind: 'reject' }
+      }
       await this.callbacks.prepareRequest?.(agent, entry.binding, role, payload.signal)
       payload.signal.throwIfAborted()
-      if (this.callbacks.canRequest(agent, entry.binding, role)) return { kind: 'reject' }
+      const blocked = this.callbacks.canRequest(agent, entry.binding, role)
+      if (blocked) {
+        this.callbacks.blockedNotice?.(agent, entry.binding, role, blocked)
+        return { kind: 'reject' }
+      }
       this.callbacks.beforeStep?.(agent, entry.binding, role)
       const decision = await next()
       if (decision.kind === 'reject') return decision
