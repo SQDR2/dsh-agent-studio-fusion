@@ -1383,6 +1383,138 @@ describe('bridge-route Worker', () => {
     expect(coordinator.state(taskId), results).toMatchObject({ phase: 'COMPLETED' })
     expect(store.readDocument(`runtime:${taskId}`)?.value).not.toHaveProperty('workerFailure')
   })
+
+  /**
+   * The route reports every completed step under its transport, so the child
+   * session really holds tool/call + tool/result events for `agy_tool`. Projecting
+   * them is what puts the Sidekick's operations in the parent conversation; while
+   * the presentation allowlist omitted the transport, those rows were dropped and
+   * the parent card stayed empty even though the events existed.
+   */
+  it('shows completed agy steps inline, deduplicates replay and never re-runs a step', async () => {
+    const { ctx, parent, coordinator, store, adapter, taskId } = await setup([
+      explore(), textResponse('Findings received.'),
+    ], [
+      toolCallResponse('agy-read', 'agy_tool', { run: 'run-1', step: 1, tool: 'read' }),
+      findings(),
+    ], { bridgeTransport: true })
+    const observed: unknown[] = []
+    const unobserve = ctx.on('session/event', (session, event) => {
+      if (session.header.parentSession === parent.id && (event.type === 'tool/call' || event.type === 'tool/result')) observed.push(event)
+    })
+    parent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Find the addition bug.' }] }))
+    await parent.whenIdle(); await coordinator.activity.flush()
+    expect(coordinator.state(taskId), JSON.stringify(toolResults(parent))).toMatchObject({ phase: 'PLANNING' })
+    expect(coordinator.state(taskId).exploration?.sources).toHaveLength(1)
+    expect(coordinator.activity.errors.size).toBe(0)
+    unobserve()
+
+    const page = readFusionActivity(store, parent.id, 'explore')
+    expect(page.events.map(event => event.source.type)).toEqual(['tool/call', 'tool/result'])
+    expect(page.events.map(event => event.parentCallId)).toEqual(['explore', 'explore'])
+    expect(page.events.map(event => event.childSessionId)).toEqual(Array(2).fill(coordinator.state(taskId).acceptedChild))
+    const call = page.events[0]!.source
+    expect(call.type).toBe('tool/call')
+    if (call.type === 'tool/call') {
+      expect(call.data.name).toBe('agy_tool')
+      expect(JSON.parse(call.data.arguments)).toEqual({ run: 'run-1', step: 1, tool: 'read' })
+    }
+    for (const event of page.events) expect(observed).toContainEqual(event.source)
+    expect(page.done).toBe(true)
+    expect(readFusionActivity(store, parent.id, 'explore', page.cursor).events).toEqual([])
+
+    const rows = activityRows(page.events)
+    expect(rows).toHaveLength(1)
+    expect(rows[0]!.call.data.name).toBe('agy_tool')
+    expect(rows[0]!.result?.type).toBe('tool/result')
+
+    // A call that already stored rows keeps serving them: the fallback only runs
+    // when the store really holds nothing, so `done` and pagination stay as they are.
+    const history = await readHistoricalFusionActivity(ctx, store, parent.id, 'explore')
+    expect(history.events).toEqual(page.events)
+    expect(history.done).toBe(true)
+    expect(readFusionActivity(store, parent.id, 'explore', page.cursor)).toMatchObject({ events: [], done: true })
+
+    // Replay/HMR restores the identical rows and never executes the mirrored step.
+    const requests = adapter.requests.length, documents = store.listDocumentIds('').length
+    const parentMessages = JSON.stringify(parent.session.deriveMessages())
+    expect(parentMessages).not.toContain('replayed bridge step')
+    await coordinator.activity.close()
+    const restored = new NativeFusionActivity(ctx, store)
+    await restored.flush(); await restored.close()
+    expect(readFusionActivity(store, parent.id, 'explore').events).toEqual(page.events)
+    expect(store.listDocumentIds('')).toHaveLength(documents)
+    expect(adapter.requests).toHaveLength(requests)
+    expect(JSON.stringify(parent.session.deriveMessages())).toBe(parentMessages)
+  })
+
+  /** The durable child log is the only fallback for a task delivered before the
+   * transport was projected; accepted message ids correlate it, nothing is inferred. */
+  it('replays a historical agy Worker from accepted native history without new writes', async () => {
+    const { ctx, parent, coordinator, store, adapter } = await setup([
+      explore(), textResponse('Findings received.'),
+    ], [
+      toolCallResponse('agy-read', 'agy_tool', { run: 'run-1', step: 1, tool: 'read' }),
+      findings(),
+    ], { bridgeTransport: true })
+    await coordinator.activity.close()
+    vi.spyOn(coordinator.activity, 'link').mockImplementation(() => {})
+    parent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Find the addition bug.' }] }))
+    await parent.whenIdle(); await ctx.sessions.flush(parent.session)
+    const requests = adapter.requests.length, documents = store.listDocumentIds(''), log = parent.session.snapshotEvents()
+    const page = await readHistoricalFusionActivity(ctx, store, parent.id, 'explore')
+    expect(page.events.map(event => event.source.type)).toEqual(['tool/call', 'tool/result'])
+    const call = page.events[0]!.source
+    expect(call.type).toBe('tool/call')
+    if (call.type === 'tool/call') expect(call.data.name).toBe('agy_tool')
+    expect(page.done).toBe(true)
+    expect((await readHistoricalFusionActivity(ctx, store, parent.id, 'explore', page.cursor)).events).toEqual([])
+    expect(adapter.requests).toHaveLength(requests)
+    expect(store.listDocumentIds('')).toEqual(documents)
+    expect(parent.session.snapshotEvents()).toEqual(log)
+  })
+
+  /** A pre-fix task kept its link but stored no rows, because the presentation
+   * allowlist dropped the transport. Upgrading must not leave that cold history
+   * blank: with no stored rows the accepted-id fallback has to run even though a
+   * link exists, and it must not write, activate or re-execute anything. */
+  it('recovers a legacy agy Worker that kept only its activity link', async () => {
+    const { ctx, parent, coordinator, store, adapter, taskId } = await setup([
+      explore(), textResponse('Findings received.'),
+    ], [
+      toolCallResponse('agy-read', 'agy_tool', { run: 'run-1', step: 1, tool: 'read' }),
+      findings(),
+    ], { bridgeTransport: true })
+    // Reproduce the old behaviour: the link was written, no activity row was stored.
+    await coordinator.activity.close()
+    vi.spyOn(coordinator.activity, 'link').mockImplementation(() => {})
+    parent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Find the addition bug.' }] }))
+    await parent.whenIdle(); await ctx.sessions.flush(parent.session)
+    const call = parent.session.snapshotEvents().find(event => event.type === 'tool/call' && event.data.name === 'fusion_explore')
+    expect(call?.type).toBe('tool/call')
+    const child = coordinator.state(taskId).acceptedChild!
+    const documents = store.listDocumentIds('')
+    expect(documents.some(id => id.startsWith('activity:'))).toBe(false)
+    store.writeDocument('activity-link:' + child + ':' + (call as { seq: number }).seq, 0, {
+      parentId: parent.id, childId: child, taskId, callId: 'explore', turn: 1, step: 1,
+      anchorSeq: (call as { seq: number }).seq, fromSeq: null,
+    })
+    expect(store.listDocumentIds('activity:' + encodeURIComponent(parent.id) + ':')).toHaveLength(0)
+    const requests = adapter.requests.length, log = parent.session.snapshotEvents()
+    const page = await readHistoricalFusionActivity(ctx, store, parent.id, 'explore')
+    expect(page.events.map(event => event.source.type)).toEqual(['tool/call', 'tool/result'])
+    const recovered = page.events[0]!.source
+    expect(recovered.type).toBe('tool/call')
+    if (recovered.type === 'tool/call') expect(recovered.data.name).toBe('agy_tool')
+    expect(page.events.map(event => event.parentCallId)).toEqual(['explore', 'explore'])
+    expect(page.done).toBe(true)
+    const exhausted = await readHistoricalFusionActivity(ctx, store, parent.id, 'explore', page.cursor)
+    expect(exhausted.events).toEqual([])
+    expect(exhausted.done).toBe(true)
+    expect(adapter.requests).toHaveLength(requests)
+    expect(parent.session.snapshotEvents()).toEqual(log)
+    expect(store.listDocumentIds('activity:' + encodeURIComponent(parent.id) + ':')).toHaveLength(0)
+  })
 })
 
 describe('exhausted Worker feedback', () => {
