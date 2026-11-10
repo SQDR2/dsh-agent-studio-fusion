@@ -15,6 +15,39 @@ own tags and releases.
 Entry format: what changed, then what was actually validated. "Not claimed" lines mark what a release did *not* test —
 read them before assuming a platform is covered.
 
+## Unreleased
+
+### Fixes
+- **A skill the user invokes can now actually reach the Lead.** The Host publishes the session skill catalog and
+  injects a `/<name>` invocation's body as instructions, but `skill` was missing from the Lead's read-tool ceiling, so
+  the body arrived as an instruction to call a tool the Lead did not have. `/grill-me` reached the Lead as "Call the
+  Skill tool with 'grilling'" and stopped there: `grilling`'s rules — in particular that finding repository facts is
+  the Lead's job — never loaded, so the Lead interrogated the user from the task text alone instead of the code
+  (session-2a7a61bd-fb83-4697-ae44-86934c0e4556). That session's recorded Lead request advertises exactly 13 tools —
+  `bash`, the `fusion_*` family, `glob`, `grep`, `job_output`, `read` — and no `skill`. `skill` is now a read tool in
+  `src/host/read-tools.ts`, next to
+  `read`/`grep`/`glob`: loading one returns instructions and never writes, so it is offered in every
+  enforced-workflow Lead catalog and stays callable while a Worker holds the write lease. Both Lead prompts
+  (`prompts/lead.md`, `prompts/model-lead.md`) now also say to load a matching or user-invoked skill before acting —
+  including when a loaded skill names another one to load — and to find repository facts before putting a question to
+  the user.
+- Tests: `tests/read-tools.spec.ts` covers the ceiling membership, the `str_replace_editor view` carve-out and the
+  Lead-table projection. The host regression in `native-tests/coordinator.spec.ts` registers the Host's global
+  `skill` loader, turns a `/grill-me`-shaped message into a `skill {name: 'grilling'}` call, and asserts that every
+  Lead request advertises `skill` and that the call returns the skill body without an error. Both ceilings covered by
+  that case — `enforced-v3` and the legacy one — fail before this change (the request lists `bash`,
+  `fusion_delegate`, … and no `skill`) and pass after it.
+
+### Not claimed
+- `session-2a7a61bd-fb83-4697-ae44-86934c0e4556` was not replayed end to end. The evidence is the unit test plus the
+  host integration suite, which exercises the Host's real request assembly, tool registration and ceiling projection.
+
+### Validation
+- `pnpm test`: 489 tests in 64 files pass. `pnpm typecheck` is clean, and `pnpm build` regenerates `lib/` with only
+  the expected `lib/dsh-fusion.js` change plus the new `lib/types/host/read-tools.d.ts`.
+- `pnpm test:host` against the pinned Harness via `DSHX_HARNESS`: 278 of 279 pass. The one skip is the Windows ACL
+  confinement suite, which only runs on Windows; the platform-neutral coordinator suite is 235 of 235.
+
 ## 0.3.8 — 2026-11-09
 
 ### Fixes

@@ -61,13 +61,11 @@ import type { ChangeBase } from './change-evidence.js'
 import { evidencePage } from './evidence-page.js'
 import { readNativeEvidence } from './native-evidence.js'
 import { isRouteTransportName, registeredRouteTransport, withRouteTransport } from './route-transport.js'
+import { isRead, READ_TOOLS } from './read-tools.js'
 
 const textOutput = { schema: { type: 'string' as const }, render: (_args: unknown, text: string) => [{ type: 'text' as const, text }] }
 const stringList = { type: 'array' as const, items: { type: 'string' as const }, required: true as const }
 const optionalStringList = { type: 'array' as const, items: { type: 'string' as const } }
-const READ_TOOLS = new Set(['fusion_read_state', 'glob', 'grep', 'read', 'fusion_read_evidence', 'job_output'])
-const isRead = (exec: Readonly<ToolExecution>) => READ_TOOLS.has(exec.name)
-  || exec.name === 'str_replace_editor' && (exec.arguments as { command?: unknown }).command === 'view'
 const FUSION_TOOLS = new Set(['fusion_read_state', 'fusion_delegate_text', 'fusion_explore', 'fusion_delegate', 'fusion_rework', 'fusion_wait', 'fusion_review_result', 'fusion_submit_result', 'fusion_takeover', 'fusion_finish_direct', 'fusion_read_evidence'])
 const WORKER_FUSION_TOOLS = new Set(['fusion_submit_result', 'fusion_read_state', 'fusion_read_evidence'])
 export interface CoordinatorOptions {
