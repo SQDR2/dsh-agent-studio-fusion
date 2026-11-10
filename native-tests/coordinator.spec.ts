@@ -91,6 +91,8 @@ async function setup(script: Script, workerScript?: Script, options: {
   files?: boolean
   toolMode?: 'native' | 'both'
   presetTools?: boolean
+  /** Register the Host's `skill` loader globally, as a preset-level tool-skill mount exposes it. */
+  skillTool?: boolean
   modelLike?: boolean
   enforcedWorkflow?: boolean | 'enforced-v2' | 'enforced-v3'
   /** Register a sandbox-policy service that folds `sandbox/mode` events like the Host's. */
@@ -200,6 +202,16 @@ async function setup(script: Script, workerScript?: Script, options: {
     } })
   const bridgeDispose = options.bridgeTransport ? ctx.tools.register(bridgeTool) : undefined
   if (bridgeDispose) cleanups.push(async () => { bridgeDispose() })
+  // The Host's tool-skill plugin registers one global `skill` loader and publishes
+  // the session catalog only while the calling agent resolves it; a user-invoked
+  // `/<name>` then arrives as an instruction to load another skill name.
+  const skillDispose = options.skillTool ? ctx.tools.register(defineTool({
+    name: 'skill', description: 'Load the full instructions for a skill',
+    parameters: { name: { type: 'string', required: true } },
+    output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] },
+    execute: async args => `<skill_content name="${(args as { name: string }).name}">\nInterview the user relentlessly.\n</skill_content>`,
+  })) : undefined
+  if (skillDispose) cleanups.push(async () => { skillDispose() })
   const parent = (await ctx.agents.create({ sessionId: SessionId('lead'), meta: options.noCwd ? {} : { cwd: workspace },
     ...(options.presetTools ? { setup: async (scope: Context) => { await ctx.agentPresets.mount(scope, 'scoped-files') } } : {}),
     agentOptions: { provider: 'test-native', model: 'ordinary', maxTokens: options.parentMaxTokens } })).agent
@@ -447,6 +459,26 @@ describe('read-only exploration before a Lead plan', () => {
       const names = request.tools!.map(tool => tool.name)
       expect(names).toEqual(expect.arrayContaining([shellTool, 'write', 'edit', ...(hostPublishesRunCode ? ['run_code'] : [])]))
     }
+  })
+
+  it.each([
+    { label: 'enforced-v3', options: { modelLike: true, enforcedWorkflow: 'enforced-v3' as const, sandbox: true } },
+    { label: 'legacy', options: {} },
+  ])('lets the Lead load the skill a user-invoked /<name> names ($label)', async ({ options }) => {
+    const { parent, adapter } = await setup([
+      toolCallResponse('load-grilling', 'skill', { name: 'grilling' }),
+      textResponse('Loaded the grilling instructions. Next I will read the GIS code before asking.'),
+    ], undefined, { skillTool: true, ...options })
+    parent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: '/grill-me does this plan hold?' }] }))
+    await parent.whenIdle()
+    const lead = adapter.requests.filter(request => request.model === 'lead')
+    // The ceiling used to drop the loader while the Host still published the catalog
+    // and injected `/grill-me`'s "call the Skill tool" line, so the Lead could only improvise.
+    expect(lead.length).toBeGreaterThanOrEqual(2)
+    for (const request of lead) expect(request.tools!.map(tool => tool.name)).toContain('skill')
+    const results = toolResults(parent)
+    expect(JSON.stringify(results)).toContain('Interview the user relentlessly.')
+    expect(results.filter(block => block.role === 'tool' && block.isError)).toEqual([])
   })
 
   it('returns actionable blocked exploration and permits feedback to the same Worker without accepting the failure', async () => {
