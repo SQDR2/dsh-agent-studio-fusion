@@ -73,3 +73,20 @@ describe('Worker prompt contract', () => {
     expect(WORKER.model).toMatch(/permissions?/)
   })
 })
+
+describe('brief-shape rule scope', () => {
+  /**
+   * The phase-5 pilot (benchmark/rebench/results-p5/REPORT.md) found that an
+   * unconditional "pass a fenced snippet of the edit" brief lost one task: the
+   * Lead handed over a narrow edit and skipped the rework that would have
+   * covered the case next to it. The rule is still worth having, but it must
+   * read as advice about one spot, not as the boundary of the change.
+   */
+  it('keeps the snippet as advice and says the Worker still covers the surroundings', () => {
+    for (const [variant, text] of Object.entries(LEAD)) {
+      expect(text, variant).toMatch(/fenced snippet/)
+      expect(text, variant).toMatch(/boundary of the change|不是改动范围的边界/)
+      expect(text, variant).toMatch(/surrounding code|周边情形/)
+    }
+  })
+})
