@@ -102,14 +102,37 @@ Fusion 在 DeepSeek Harness（DSH）的模型菜单里就是一个普通模型�
 > Windows 把 `bash` 换成 `pwsh`；改过 `workerTools` 就跟着改。完整配置面、验证步骤与排障对照见
 > [dsh-agy-worker 的 MCP 桥接文档](https://github.com/SQDR2/dsh-agy-worker/blob/main/docs/MCP-BRIDGE-SETUP.md)。
 
-### 其它 agent 线路（ACP 等）：这里没有工具桥
+### ACP 线路（内置 `deepseek-harness-acp`）
 
-上面的 `mcpBridge` / `permissionMode` / `agy_tool` 三件套是 **agy 专属**的，因为那条线路由本插件的桥接层接管。把别的
-agent 接进来（例如第三方 `dsh-tauri-acp` 提供的 ACP 线路）不属于这种情况：这类适配器可能在自己的会话里根本不带 MCP
-servers（实测的 `dsh-tauri-acp` 构建即是如此，但这取决于适配器而不是协议），**本插件没有任何设置能替它补上这座桥**。这种线路交给 Sidekick 做文本问答时，
-Fusion 现在允许它用一份严格限定的文本报告交回结果（`fusionTextReport` 块，绑定当前 `workOrderId` + `revision`，字段与
-`fusion_submit_result` 同构；散文、旧单、错 revision、多余字段一律拒绝，报告仍由 Lead 审查）；而需要读写文件、跑命令的
-workspace 任务仍然必须走真实工具，这条线路依然会明确失败并给出现实可行的出路（换直连模型线路）。细节见
+本插件现在自带 ACP 线路，不必再单独安装 `dsh-tauri-acp`（其 Host 实现以 MIT 许可并入，见
+[`docs/ATTRIBUTION-ACP.md`](docs/ATTRIBUTION-ACP.md)）。在 `cordis.patch.yml` 里给本插件加一段 `acp.agents` 即可，
+键是模型选择器里的 provider 路由名：
+
+```yaml
+- id: dsh-fusion
+  config:
+    acp:
+      agents:
+        codex:
+          displayName: Codex (ACP)
+          command: /absolute/path/to/codex-acp
+          args: []
+          permission: ask
+```
+
+ACP 线路作为 Sidekick 时，本插件会在该会话的 ACP `session/new` 里挂一个**只有 Sidekick 拿得到**的 MCP 工具桥：
+URL 里带一次性令牌，且每次调用都会重新核对「是这张任务的 Worker + 当前工作单 + 这条 ACP 路由」，只放行
+`workerTools` 里配置的工具，并全部走 DSH 的 `tools.guard`、审批与 Fusion 的路径/租约检查。Lead 的 ACP 会话、
+普通 ACP 线路调用、模型发现与压缩请求、text 单、以及别的 Fusion 任务都拿不到工具桥（`mcpServers` 为空）。
+改动与限制记录在 [`docs/ATTRIBUTION-ACP.md`](docs/ATTRIBUTION-ACP.md)。
+
+### 其它 agent 线路：这里没有工具桥
+
+上面的 `mcpBridge` / `permissionMode` / `agy_tool` 三件套是 **agy 专属**的，因为那条线路由本插件的桥接层接管。别的
+适配器（不是本插件内置 ACP 线路的那些）可能在自己的会话里根本不带 MCP servers，**本插件没有任何设置能替它补上这座桥**。
+这种线路交给 Sidekick 做文本问答时，Fusion 允许它用一份严格限定的文本报告交回结果（`fusionTextReport` 块，绑定当前
+`workOrderId` + `revision`，字段与 `fusion_submit_result` 同构；散文、旧单、错 revision、多余字段一律拒绝，报告仍由
+Lead 审查）；而需要读写文件、跑命令的 workspace 任务仍然必须走真实工具。细节见
 [`docs/WORKER-TOOLS-UNREACHABLE.md`](docs/WORKER-TOOLS-UNREACHABLE.md)。
 
 ## 本 fork 做了什么

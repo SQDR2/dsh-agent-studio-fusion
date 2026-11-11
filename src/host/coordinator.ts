@@ -61,6 +61,7 @@ import type { ChangeBase } from './change-evidence.js'
 import { evidencePage } from './evidence-page.js'
 import { readNativeEvidence } from './native-evidence.js'
 import { isRouteTransportName, registeredRouteTransport, withRouteTransport } from './route-transport.js'
+import type { AcpWorkerFacts } from './acp/bridge.js'
 import { isRead, READ_TOOLS } from './read-tools.js'
 import { AUTHORITY_ACTIONS, workerAuthorityProblem } from './authority.js'
 
@@ -636,6 +637,36 @@ export class FusionCoordinator {
     if (!row || row.parent !== agent.session.header.parentSession || typeof row.parent !== 'string') return undefined
     const binding = this.bindings.read(row.parent)?.binding
     return binding?.selected && binding.taskId === row.taskId ? { binding, role: 'worker' } : undefined
+  }
+
+  /**
+   * The ACP bridge's exact view of one live Agent: this task's Worker, its current work
+   * order, and the route the Worker is actually dispatched on. Anything else — the Lead, a
+   * session that is not a Fusion Worker, a task without a current work order, text mode —
+   * answers `undefined`, which is how the bridge refuses to exist for that request.
+   *
+   * An explicit accessor rather than the ACP module reaching into bindings and runtime
+   * records: the coordinator owns which Agent is which role.
+   */
+  acpWorkerFacts(agent: Agent): AcpWorkerFacts | undefined {
+    const owner = this.owner(agent)
+    if (!owner || owner.role !== 'worker') return undefined
+    const state = this.state(owner.binding.taskId)
+    const order = state.currentWorkOrder
+    if (!order || order.mode === 'text') return undefined
+    const route = this.modelControl.route(owner.binding, 'worker')
+    let briefRevision = 0
+    try { briefRevision = this.#runtime(owner.binding.taskId).briefRevision ?? 0 }
+    catch { /* a task whose runtime record is gone owns no ACP bridge */ }
+    return {
+      dshSessionId: agent.id,
+      taskId: owner.binding.taskId as unknown as string,
+      workOrderId: order.id as unknown as string,
+      workOrderRevision: order.revision,
+      briefRevision,
+      mode: order.mode === 'explore' ? 'explore' : 'implement',
+      route: { provider: route.provider, model: route.model },
+    }
   }
 
   async select(agent: Agent, resolved: ResolvedProfile = this.options.profile): Promise<void> {

@@ -25,6 +25,7 @@ import { NativeWorkerTransport } from './native-worker.js';
 import { NativeFusionActivity } from './native-activity.js';
 import { CachePolicy } from './cache-policy.js';
 import type { ChangeBase } from './change-evidence.js';
+import type { AcpWorkerFacts } from './acp/bridge.js';
 export interface CoordinatorOptions {
     profile: ResolvedProfile;
     workerTools: readonly string[];
@@ -164,6 +165,16 @@ export declare class FusionCoordinator {
         binding: SessionBinding;
         role: Role;
     } | undefined;
+    /**
+     * The ACP bridge's exact view of one live Agent: this task's Worker, its current work
+     * order, and the route the Worker is actually dispatched on. Anything else — the Lead, a
+     * session that is not a Fusion Worker, a task without a current work order, text mode —
+     * answers `undefined`, which is how the bridge refuses to exist for that request.
+     *
+     * An explicit accessor rather than the ACP module reaching into bindings and runtime
+     * records: the coordinator owns which Agent is which role.
+     */
+    acpWorkerFacts(agent: Agent): AcpWorkerFacts | undefined;
     select(agent: Agent, resolved?: ResolvedProfile): Promise<void>;
     /** Only at idle selection or native running reservation, before prompt assembly. */
     selectBeforeAssembly(agent: Agent, resolved: ResolvedProfile): void;

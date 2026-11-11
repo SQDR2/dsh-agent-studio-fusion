@@ -12,6 +12,7 @@ import type {} from '@deepseek-ai/dsh-api-session-controller'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import type {} from '@deepseek-ai/dsh-commands'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
+import type { Agent } from '@deepseek-ai/dsh-agent'
 import { FusionCatalogAdapter, FUSION_PROVIDER, FUSION_MODEL, installNativeFusionSelection } from './host/native-selection.js'
 import type { FusionModelEntry } from './host/native-selection.js'
 import type { ResolvedProfile } from './profile/resolve.js'
@@ -34,17 +35,28 @@ import { readHistoricalFusionActivity } from './host/native-activity.js'
 import { nativeShellTool } from './host/shell.js'
 import { adoptLegacyStateDirectory } from './store-migration.js'
 import { FUSION_API_PATH, LEGACY_FUSION_API_PATH, LEGACY_PLUGIN_NAME, isFusionProvider } from './identity.js'
+import { AcpConfigSchema, agentsOf } from './host/acp/config.js'
+import type { AcpConfig } from './host/acp/types.js'
+import { installAcp } from './host/acp/index.js'
 
 export * from './index.js'
 
 export const name = 'dsh-fusion'
 export const inject = ['agents', 'sessions', 'llm', 'tools', 'subagents', 'systemPrompt', 'webServer', 'sessionController', 'sessionQuery', 'commands', 'agentDefaultModel', 'tokenMeter']
-export interface Config { profilePath?: string; authorizationPath?: string; databasePath?: string; workerTools?: string[] }
+// The ACP route set is part of this plugin's own config: `acp.agents` maps a provider
+// route to the agent command that serves it. An absent block means no ACP routes.
+export interface Config {
+  profilePath?: string
+  authorizationPath?: string
+  databasePath?: string
+  workerTools?: string[]
+  acp?: AcpConfig
+}
 const defaultWorkerTools = [nativeShellTool, 'read', 'write', 'edit', 'glob', 'grep', 'job_output', 'job_kill']
 // Schemastery otherwise normalizes an omitted array to [], bypassing ?? below.
 // An explicitly empty list must remain empty, so the default belongs in the schema.
 export const Config: z<Config> = z.object({ profilePath: z.string(), authorizationPath: z.string(), databasePath: z.string(),
-  workerTools: z.array(z.string()).default(defaultWorkerTools) })
+  workerTools: z.array(z.string()).default(defaultWorkerTools), acp: AcpConfigSchema })
 
 export async function apply(ctx: Context, config: Config = {}): Promise<void> {
   const dshHome = process.env.DSH_HOME || join(homedir(), '.dsh')
@@ -160,6 +172,14 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
     })().finally(() => { creating = undefined })
     return creating
   }
+  // ACP agent routes and the Sidekick-only MCP bridge. The bridge reads the live
+  // coordinator through this accessor, so it can only exist once a Worker is actually
+  // dispatched on an ACP route; every other ACP session opens with no Host tools.
+  ctx.effect(() => installAcp(ctx, {
+    workerTools: config.workerTools ?? defaultWorkerTools,
+    profiles: () => agentsOf(config),
+    coordinator: () => runtime && { workerFacts: (agent: Agent) => runtime!.acpWorkerFacts(agent) },
+  }))
   // Each combo's entry admits what its own Lead admits: the Lead is the only
   // role that reads user content, while the Worker receives text work orders.
   // This resolves through the other providers' own model info, never through

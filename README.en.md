@@ -112,12 +112,37 @@ Recommended configuration:
 > surface, verification steps and troubleshooting, see
 > [dsh-agy-worker's MCP bridge guide](https://github.com/SQDR2/dsh-agy-worker/blob/main/docs/MCP-BRIDGE-SETUP.md).
 
+### ACP routes (the built-in `deepseek-harness-acp` port)
+
+This plugin now hosts ACP routes itself; a separate `dsh-tauri-acp` install is no longer needed (its Host implementation
+is merged here under the MIT license, see [`docs/ATTRIBUTION-ACP.md`](docs/ATTRIBUTION-ACP.md)). Add an `acp.agents`
+block to this plugin's entry in `cordis.patch.yml`; each key is the provider route shown in the model picker:
+
+```yaml
+- id: dsh-fusion
+  config:
+    acp:
+      agents:
+        codex:
+          displayName: Codex (ACP)
+          command: /absolute/path/to/codex-acp
+          args: []
+          permission: ask
+```
+
+When an ACP route is the Sidekick, this plugin declares a Host-tool MCP bridge in that session's ACP `session/new` — and
+only there: the URL carries a single-use token, and every call re-checks that the session still is this task's Worker on
+the current work order of this ACP route, exposes only the configured `workerTools`, and dispatches through DSH's
+`tools.guard`, approvals and Fusion's path/lease checks. A Lead ACP session, an ordinary ACP route call, model discovery
+and compaction requests, a text order, and any other Fusion task all open with an empty `mcpServers` list. Details and
+limits: [`docs/ATTRIBUTION-ACP.md`](docs/ATTRIBUTION-ACP.md).
+
 ### Other agent routes (ACP and friends): there is no tool bridge here
 
 The `mcpBridge` / `permissionMode` / `agy_tool` trio above is **agy-only**, because that route is wired by this plugin's
-bridge layer. Bringing in a different agent (for example an ACP route served by a third-party `dsh-tauri-acp`) is not that
-case: such a provider may open its session with no MCP server at all (the observed `dsh-tauri-acp` build does), and
-Fusion cannot add that bridge for it, so **no Fusion setting can make it call Fusion's tools**. For text-only questions on such a route, Fusion now accepts a strictly
+bridge layer. A different agent adapter (anything that is not this plugin's built-in ACP routes) may open its session
+with no MCP server at all, and **no Fusion setting can make it call Fusion's tools**. For text-only questions on such a
+route, Fusion now accepts a strictly
 bounded text report instead (`fusionTextReport` block bound to the current `workOrderId` + `revision`, same fields as
 `fusion_submit_result`; prose, another order, another revision and extra fields are all refused, and the Lead still
 reviews it). Workspace work that needs files or commands still requires real tool calls, so that route still fails

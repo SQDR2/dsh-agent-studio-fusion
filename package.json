@@ -35,7 +35,8 @@
     "RELEASING.zh.md",
     "LICENSE",
     "docs/COMPATIBILITY.md",
-    "docs/EVIDENCE.md"
+    "docs/EVIDENCE.md",
+    "docs/ATTRIBUTION-ACP.md"
   ],
   "exports": {
     ".": {
@@ -64,6 +65,9 @@
     "bundle": {
       "patch": "./cordis.patch.yml"
     }
+  },
+  "dependencies": {
+    "@agentclientprotocol/sdk": "1.4.0"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "^4.0.4",
