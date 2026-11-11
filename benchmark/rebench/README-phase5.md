@@ -115,3 +115,27 @@ rework`) to find which one costs correctness.
 `docs/REBENCH_DEVIN.md`: it cannot rank the two arms statistically, and every
 task is public, so training-data contamination is shared by both arms rather
 than measured. Report the raw counts and name the pilot as such.
+## Result of the first round
+
+Ran 2026-11-11 against a dedicated bench Host (`~/.dsh-bench`, port 3099) with the
+gz pair, 4 tasks, 1 attempt per arm, `--concurrency 1`. Full write-up:
+`results-p5/REPORT.md`; data `results-p5/results-p5-{A,B}.jsonl`;
+`python3 compare_arms.py results-p5/results-p5-A.jsonl results-p5/results-p5-B.jsonl`.
+
+| metric | A (96c5e3b) | B (facbd4b) | verdict |
+|---|---|---|---|
+| resolved | 3/4 | 2/4 | FAIL |
+| wall s (median) | 1559 | 869 (−44%) | PASS |
+| worker tool calls (median) | 84 | 54.5 (−35%) | PASS |
+| rework rounds (median) | 1 | 2 | FAIL |
+| cost USD (median) | 0.80 | 0.79 (−1%) | FAIL |
+
+The speed axis moved exactly as the Devin comparison predicted; the correctness
+axis moved the wrong way on one task (`ucfopen__canvasapi-716`, one FAIL_TO_PASS
+test, all 60 PASS_TO_PASS still passing). The implicated rule — "pass a fenced
+snippet of the settled edit" — has been narrowed to advice about one spot rather
+than the boundary of the change, and `tests/prompts.spec.ts` now pins that scope.
+
+Next round: re-run the same four tasks with arm C (narrowed snippet rule, check
+damping and batch rework kept) and compare against A and B. That needs a new
+budget decision; nothing here was rerun automatically.
