@@ -66,9 +66,20 @@ read them before assuming a platform is covered.
   completes and verifies, and an action granted in the work order runs.
 
 ### Prompts
+- **Measured, and the brief-shape rule was narrowed because of the measurement.** A pilot
+  (`benchmark/rebench/results-p5/REPORT.md`) ran the same committed code and the same Fusion pair over four tasks, varying
+  only `prompts/`: arm A the pre-change prompts, arm B the rules below. Arm B was clearly faster — wall time 1559 s → 869 s
+  median (−44%), worker tool calls 84 → 54.5 (−35%) — and resolved **less**: 3/4 → 2/4, losing
+  `ucfopen__canvasapi-716` on one FAIL_TO_PASS test with all 60 PASS_TO_PASS still passing (an incomplete fix, not a
+  regression). Cost did not move (−1%) and rework rounds rose (1 → 2), so under the plan's own admission thresholds
+  (`docs/DEVIN-LOCAL-FUSION.md` §7.4) the change cannot merge unchanged. The rule the data implicates is now narrower in
+  both Lead variants: a fenced snippet is advice about one settled spot, explicitly *not* the boundary of the change, and
+  the Worker still reads the surrounding code and covers the cases next to it. `tests/prompts.spec.ts` pins that scope.
+  Check damping, consolidated rework and mid-handoff steering stay: nothing in the pilot points at them, and the next
+  round (arm C) tests them without the wide snippet rule.
 - **Delegation economy, aligned with the Devin rules that explain its 3.4× wall-time advantage** (measured on the same
   model pair in `benchmark/rebench/results-devin-r1`: 4/4 resolved at $2.73 in 20.1 min vs 3/4 at $4.81 in 6.0 min).
-  `prompts/lead.md` / `prompts/model-lead.md` now say to hand over the *shape* once an edit is settled — exact file,
+  `prompts/lead.md` / `prompts/model-lead.md` say to hand over the *shape* once an edit is settled — exact file,
   location and a fenced snippet — instead of only stating "what must be true", with the explicit reason Devin gives:
   never leave alternatives for a model to pick, because it guesses and a wrong guess costs a rework round. Open design
   questions are settled before an implementation brief. Review is batched: finish the whole review, then send every
@@ -118,9 +129,10 @@ read them before assuming a platform is covered.
 - The authority guard was not measured on a real delegation, and it is a command-text guard, not a sandbox: a command
   assembled at runtime (`python -c`, a script piped on stdin) or run through `run_code` is outside it. It also does not
   ask the user whether they wanted the action; the grant is the Lead's judgement, recorded in the work order.
-- The prompt changes were **not** A/B measured. No new model call was made, so this release claims no tool-call, wall
-  time or cost improvement — only that the rules are present in both variants and pinned by tests.
-  `docs/DEVIN-LOCAL-FUSION.md` §7.4 fixes the protocol and admission thresholds a later round must meet first.
+- The prompt changes **were** A/B measured once (see the measurement entry above), and that measurement is n=1 per cell over
+  four public tasks: it cannot rank the two arms statistically and is reported as an observation. The narrowed snippet
+  rule has **not** been re-measured; the next round (arm C) is what would show whether the loss is gone.
+  `deepseek-v4.1-flash` has no list price in `plan-phase5.json`, so every cost figure is a lead-only lower bound.
 - Preserving a Worker's background processes **across handoffs** is not achievable from the plugin: the Host cancels a
   job when its owner Agent's scope is disposed, which is exactly what a settled handoff does. The shipped
   `preserveRuntime` covers one handoff (report lands while the job runs, the next brief is told what it was) and never
@@ -129,7 +141,7 @@ read them before assuming a platform is covered.
   inspection gate, not by a host test that restarts the Host process with a live retained job.
 
 ### Validation
-- `pnpm test`: 503 tests in 66 files pass (14 of them new: 7 in `tests/authority.spec.ts`, 7 in
+- `pnpm test`: 504 tests in 66 files pass (15 of them new: 7 in `tests/authority.spec.ts`, 8 in
   `tests/prompts.spec.ts`). `pnpm typecheck` is clean, and `pnpm build` regenerates `lib/` with the expected
   `lib/dsh-fusion.js` change plus the new `lib/types/host/authority.d.ts` and the `lib/types/host/read-tools.d.ts`
   from the previous entry.
