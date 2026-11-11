@@ -15,7 +15,7 @@ own tags and releases.
 Entry format: what changed, then what was actually validated. "Not claimed" lines mark what a release did *not* test —
 read them before assuming a platform is covered.
 
-## Unreleased
+## 0.3.9 — 2026-11-11
 
 ### Runtime
 - **A Worker can report while a background process it declared is still running**, instead of stopping it first, and
