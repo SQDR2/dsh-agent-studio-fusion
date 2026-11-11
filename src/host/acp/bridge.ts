@@ -8,20 +8,33 @@
  *
  * Security properties (all enforced here, not by the adapter):
  * - A server declaration is issued only when `sessionId` resolves to a live Agent whose
- *   Fusion coordinator owner is role `worker`, whose current work order permits tools,
- *   and whose selected route is this ACP route.
- * - The URL carries an unguessable token bound to the Agent id, DSH session id, Fusion
- *   task id, current work order id/revision and the configured `workerTools` set.
+ *   Fusion coordinator owner is role `worker`, whose current work order permits tools, and
+ *   whose selected route *and model* are this ACP route call.
+ * - The declaration's URL is the Host's own public origin plus the fixed
+ *   {@link ACP_MCP_PATH}; the client's streamable-HTTP POST goes to exactly that path.
+ *   The capability itself is an unguessable bearer token carried only in the
+ *   `Authorization` header, bound to the Agent id, DSH session id, Fusion task id, current
+ *   work order id/revision, brief revision, mode, route and the configured
+ *   `workerTools` ceiling. No part of the URL ever carries the token, so nothing that
+ *   logs or echoes a URL (agent process logs, proxies, browser history) can replay it.
+ * - A request is trusted against that same configured origin, not a fixed loopback list:
+ *   `Host` must equal the origin's authority, a present `Origin` must equal the origin, a
+ *   cross-site request is refused, and the peer must be this machine (loopback or the exact
+ *   address the Host binds). No forwarding header is consulted, so a configured non-loopback
+ *   bind keeps working for its own local callers while remote peers and proxies cannot.
  * - Every tool call re-resolves the Agent from the DSH registry and re-checks the owner,
- *   route, task, work order and ceiling. Stale, forged, cross-session, canceled or
- *   expired tokens are refused; a refused grant is revoked.
+ *   route, model, task, work order, brief revision and ceiling. Stale, forged,
+ *   cross-session, canceled or expired tokens are refused; a refused grant is revoked.
  * - Only tool schemas visible in the Worker's own scope and allowed by `workerTools` are
- *   listed; Fusion's `fusion_*` internals and route transports are never exposed.
+ *   listed; Fusion's `fusion_*` internals and route transports are never exposed. An
+ *   `explore` order is the intersection of `workerTools` with the read-only tools, so it
+ *   can only ever narrow the configured ceiling.
  * - Calls dispatch through `ctx.tools.execute` with the exact live Agent and a branded
  *   `ToolCallId`, so DSH guards, approvals, sandbox policy and Fusion's coordinator
  *   checks stay authoritative. No tool implementation is called directly.
  * - An AbortController per call is abandoned when the HTTP request closes, the ACP turn
- *   aborts, the ACP session closes, or the bridge is disposed.
+ *   aborts or times out, the ACP session closes or is replaced, the grant is revoked, or
+ *   the bridge is disposed.
  */
 
 import type { IncomingMessage, ServerResponse } from 'node:http'
@@ -31,13 +44,13 @@ import type { ToolSchema } from '@deepseek-ai/dsh-llm'
 import type { AcpMcpServerHttp } from './types.js'
 import { randomBytes, randomUUID } from 'node:crypto'
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
-import { json, readJson, trustedRequest } from '../http.js'
+import { json, readJson } from '../http.js'
 import { isRouteTransportName } from '../route-transport.js'
-import { READ_TOOL_NAMES } from '../read-tools.js'
+import { READ_TOOLS } from '../read-tools.js'
 
 const PLUGIN_ID = 'dsh-fusion'
 
-/** The MCP endpoint every bridge token lives under. */
+/** The one MCP endpoint of this Host; the route is mounted at exactly this path. */
 export const ACP_MCP_PATH = '/api/fusion/acp-mcp'
 
 /** How long one issued bridge token may live before it must be re-issued. */
@@ -78,7 +91,12 @@ export interface AcpBridgeAuthority {
 export interface AcpBridgeOptions {
   /** The configured Sidekick ceiling (`workerTools`). */
   workerTools: readonly string[]
-  /** Origin the ACP agent can reach, resolved when a session is opened. */
+  /**
+   * The Host's own public origin, resolved when an ACP session is opened. It must come
+   * from the running web server (`ctx.webServer.getOrigin()`), so an HTTPS bind or a
+   * non-default local interface is reachable exactly as configured; there is no
+   * loopback fallback, and a Host that cannot name its origin gets no bridge.
+   */
   origin: () => string
   now?: () => number
   ttlMs?: number
@@ -124,6 +142,67 @@ function isInternalTool(name: string): boolean {
   return name.startsWith('fusion_') || isRouteTransportName(name)
 }
 
+/**
+ * The request target as a URL, or undefined when it is unparseable. A malformed target
+ * must fail closed, never throw out of the request handler.
+ */
+function requestUrl(target: string | undefined): URL | undefined {
+  try {
+    return new URL(target ?? '/', 'http://localhost')
+  }
+  catch {
+    return undefined
+  }
+}
+
+/** `::ffff:127.0.0.1` names the IPv4 address it maps; anything else stays as it is. */
+function unmappedAddress(address: string): string {
+  const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/i.exec(address)
+  return mapped?.[1] ?? address
+}
+
+function isLoopbackAddress(address: string): boolean {
+  return address === '::1' || address === '127.0.0.1' || address.startsWith('127.')
+}
+
+/** A URL hostname without the brackets IPv6 literals carry. */
+function unbracketed(hostname: string): string {
+  return hostname.startsWith('[') && hostname.endsWith(']') ? hostname.slice(1, -1) : hostname
+}
+
+/**
+ * Request trust for this bridge, evaluated against the origin the Host itself advertises
+ * instead of a fixed loopback list, so a Host bound to a concrete local interface is served
+ * while arbitrary remote peers are not:
+ *
+ * - the `Host` header must be exactly the configured origin's authority;
+ * - an `Origin` header, when present, must be exactly the configured origin;
+ * - a cross-site browser request is always refused;
+ * - the peer address must be this machine: loopback, or the exact address the Host binds.
+ *
+ * No forwarding header (`x-forwarded-*`) is consulted, so a proxy in front of the Host can
+ * never widen this, and no value from the request can name a different machine.
+ */
+function trustedBridgeRequest(req: IncomingMessage, origin: URL): boolean {
+  if (req.headers['sec-fetch-site'] === 'cross-site') return false
+  const host = req.headers.host
+  if (typeof host !== 'string' || host.length === 0) return false
+  if (host.toLowerCase() !== origin.host.toLowerCase()) return false
+  const declared = req.headers.origin
+  if (typeof declared === 'string' && declared.toLowerCase() !== origin.origin.toLowerCase()) return false
+  const peer = req.socket.remoteAddress
+  if (typeof peer !== 'string' || peer.length === 0) return false
+  const address = unmappedAddress(peer)
+  return isLoopbackAddress(address) || address === unbracketed(origin.hostname)
+}
+
+/** The bearer capability of one request: header only. Nothing in the URL authenticates. */
+function bearerToken(header: string | undefined): string | undefined {
+  if (typeof header !== 'string') return undefined
+  const match = /^Bearer[ ]+([^ ]+)$/.exec(header.trim())
+  return match?.[1]
+}
+
 function textContent(content: readonly unknown[] | undefined): { type: 'text'; text: string }[] {
   const out: { type: 'text'; text: string }[] = []
   for (const block of content ?? []) {
@@ -160,12 +239,18 @@ export class AcpToolBridge {
    */
   serversFor(request: AcpBridgeRequest): AcpMcpServerHttp[] {
     const decision = this.#decision(request)
-    if (decision === undefined) return []
+    if (decision === undefined) {
+      this.#disqualify(request)
+      return []
+    }
+    // Resolve the origin before issuing anything: a Host that cannot name its own
+    // reachable origin must leave no grant behind.
+    const origin = this.#origin()
     const grant = this.#issue(decision.agent, decision.facts, decision.allowedTools)
     return [{
       type: 'http',
       name: 'dsh-fusion-sidekick',
-      url: `${this.options.origin()}${ACP_MCP_PATH}/${grant.token}`,
+      url: `${origin}${ACP_MCP_PATH}`,
       headers: [{ name: 'Authorization', value: `Bearer ${grant.token}` }],
     }]
   }
@@ -175,23 +260,35 @@ export class AcpToolBridge {
    *
    * A reused ACP session never runs `session/new` again, so its bridge token is the one
    * issued earlier. When the request would now need a bridge but the existing token no
-   * longer matches the current task/work order/route (or expired), the session must be
-   * replaced instead of reused — otherwise the Sidekick silently loses its tools.
+   * longer matches the current agent, task, work order, brief, mode, route or ceiling (or
+   * expired), the session must be replaced instead of reused — otherwise the Sidekick
+   * silently loses its tools.
+   *
+   * The opposite direction matters just as much: a session that used to hold a bridge and
+   * has stopped qualifying (demoted to Lead, text order, submitted report, paused task,
+   * route change) must lose that grant and must not reuse the ACP session that carries it.
    */
   canReuse(request: AcpBridgeRequest): boolean {
+    // An auxiliary request is not this session's dispatch: it never touches its grant.
+    if (request.purpose !== undefined) return true
     const decision = this.#decision(request)
-    if (decision === undefined) return true
+    if (decision === undefined) {
+      const previous = request.sessionId === undefined ? undefined : this.#grantOfSession(request.sessionId)
+      if (previous === undefined) return true
+      this.revokeSession(previous.dshSessionId)
+      return false
+    }
     const grant = this.#grantOfSession(decision.facts.dshSessionId)
     if (grant === undefined || grant.revoked) return false
     const now = this.options.now ?? Date.now
-    if (now() > grant.expiresAt) return false
-    const { facts } = decision
-    if (grant.taskId !== facts.taskId) return false
-    if (grant.workOrderId !== facts.workOrderId) return false
-    if (grant.workOrderRevision !== facts.workOrderRevision) return false
-    if (grant.mode !== facts.mode) return false
-    if (grant.routeProvider !== facts.route.provider) return false
-    if (grant.routeModel !== facts.route.model) return false
+    if (now() > grant.expiresAt) {
+      this.revokeSession(grant.dshSessionId)
+      return false
+    }
+    if (!this.#matches(grant, decision.agent, decision.facts)) {
+      this.revokeSession(grant.dshSessionId)
+      return false
+    }
     const current = new Set(decision.allowedTools)
     return grant.allowedTools.every(name => current.has(name))
   }
@@ -201,13 +298,31 @@ export class AcpToolBridge {
     if (request.sessionId === undefined || request.sessionId.length === 0) return undefined
     if (request.purpose !== undefined) return undefined
     const agent = this.authority.agentOf(request.sessionId)
-    if (!agent) return undefined
+    if (!agent || agent.id !== request.sessionId) return undefined
     const facts = this.authority.workerFacts(agent)
     if (!facts) return undefined
+    // The facts must be about the very Agent and session this request asked for; a
+    // grant issued from another session's facts would be a cross-session capability.
+    if (facts.dshSessionId !== request.sessionId) return undefined
     if (facts.mode !== 'implement' && facts.mode !== 'explore') return undefined
+    // Both halves of the route identity: the same provider on another model is another
+    // dispatch, and its tool authority is bound to the model the Worker actually runs.
     if (facts.route.provider !== request.route) return undefined
+    if (facts.route.model !== request.model) return undefined
     const allowedTools = this.allowedTools(agent, facts)
     return allowedTools.length === 0 ? undefined : { agent, facts, allowedTools }
+  }
+
+  /**
+   * A session that used to hold a bridge and no longer qualifies loses it now. The ACP
+   * session itself is replaced by the adapter, so the next `session/new` declares no MCP
+   * server at all. Auxiliary requests are some other dispatch reusing the session id, so
+   * they never revoke anything.
+   */
+  #disqualify(request: AcpBridgeRequest): void {
+    if (request.purpose !== undefined) return
+    if (request.sessionId === undefined) return
+    if (this.#grantOfSession(request.sessionId) !== undefined) this.revokeSession(request.sessionId)
   }
 
   #grantOfSession(dshSessionId: string): Grant | undefined {
@@ -219,7 +334,7 @@ export class AcpToolBridge {
 
   /** Revoke every token bound to one DSH session (ACP session close or replacement). */
   revokeSession(dshSessionId: string): void {
-    for (const [token, grant] of this.grants) {
+    for (const [token, grant] of [...this.grants]) {
       if (grant.dshSessionId === dshSessionId) this.#revoke(token, grant)
     }
   }
@@ -235,12 +350,17 @@ export class AcpToolBridge {
 
   /** Revoke every grant and abort every call (plugin unload). */
   dispose(): void {
-    for (const [token, grant] of this.grants) this.#revoke(token, grant)
+    for (const [token, grant] of [...this.grants]) this.#revoke(token, grant)
   }
 
   /** The tools this exact Agent may reach right now: ceiling ∩ own scope − internals. */
   allowedTools(agent: Agent, facts: AcpWorkerFacts): readonly string[] {
-    const ceiling = facts.mode === 'explore' ? READ_TOOL_NAMES : this.options.workerTools
+    // An explore order is the read-only tools *within* the configured ceiling. Using the
+    // read-only list on its own would widen `workerTools` whenever a read tool was
+    // deliberately left out of it.
+    const ceiling = facts.mode === 'explore'
+      ? this.options.workerTools.filter(name => READ_TOOLS.has(name))
+      : this.options.workerTools
     const visible = new Set(this.authority.schemasOf(agent).map(schema => schema.name))
     return ceiling.filter(name => visible.has(name) && !isInternalTool(name))
   }
@@ -250,13 +370,25 @@ export class AcpToolBridge {
    * `202`, a request gets `application/json`.
    */
   async handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
-    if (!trustedRequest(req)) return json(res, 403, { error: 'forbidden' })
+    // Fail closed when the Host cannot name the origin it advertises: nothing can be
+    // trusted against an address that does not exist.
+    let origin: URL
+    try {
+      origin = new URL(this.#origin())
+    }
+    catch {
+      return json(res, 403, { error: 'forbidden' })
+    }
+    if (!trustedBridgeRequest(req, origin)) return json(res, 403, { error: 'forbidden' })
     if (req.method !== 'POST') {
       res.writeHead(405, { allow: 'POST' })
       res.end()
       return
     }
-    const url = new URL(req.url ?? '/', 'http://localhost')
+    // The route is exact: a suffix path, a malformed target or a token spliced into the
+    // URL is not this endpoint and fails closed without throwing.
+    const url = requestUrl(req.url)
+    if (url === undefined || url.pathname !== ACP_MCP_PATH) return json(res, 404, { error: 'not found' })
     const grant = this.#grantFor(req, url)
     if (grant === undefined) {
       const body = await readJson(req).catch(() => undefined)
@@ -300,6 +432,14 @@ export class AcpToolBridge {
     return typeof requested === 'string' && requested.length > 0 ? requested : '2024-11-05'
   }
 
+  /** The Host's own public origin, normalized, or a refusal that leaves no grant behind. */
+  #origin(): string {
+    const origin = this.options.origin()
+    if (typeof origin !== 'string' || origin.trim().length === 0)
+      throw new Error(`${PLUGIN_ID}: the Host web server reports no origin; refusing to declare an ACP Sidekick bridge`)
+    return origin.trim().replace(/\/+$/, '')
+  }
+
   #issue(agent: Agent, facts: AcpWorkerFacts, allowedTools: readonly string[]): Grant {
     // One live ACP session holds exactly one bridge; re-opening it replaces the grant.
     this.revokeSession(facts.dshSessionId)
@@ -333,15 +473,13 @@ export class AcpToolBridge {
   }
 
   #grantFor(req: IncomingMessage, url: URL): Grant | undefined {
-    const header = req.headers.authorization
-    const fromHeader = typeof header === 'string' && header.startsWith('Bearer ') ? header.slice('Bearer '.length).trim() : undefined
-    const fromPath = decodeURIComponent(url.pathname.slice(ACP_MCP_PATH.length).replace(/^\//, ''))
-    const token = fromHeader !== undefined && fromHeader.length > 0 ? fromHeader : fromPath
-    if (token.length === 0) return undefined
+    // Exact endpoint, bearer header only: a token in a path segment or a query is not
+    // authentication, and the URL is never consulted for it.
+    if (url.pathname !== ACP_MCP_PATH) return undefined
+    const token = bearerToken(req.headers.authorization)
+    if (token === undefined) return undefined
     const grant = this.grants.get(token)
     if (grant === undefined) return undefined
-    // A header token and a path token must name the same grant, never widen it.
-    if (fromHeader !== undefined && fromHeader.length > 0 && fromPath.length > 0 && fromPath !== fromHeader) return undefined
     if (grant.revoked) return undefined
     const now = this.options.now ?? Date.now
     if (now() > grant.expiresAt) {
@@ -351,19 +489,30 @@ export class AcpToolBridge {
     return grant
   }
 
+  /**
+   * Whether one grant still describes this Agent's current dispatch: the same live Agent,
+   * DSH session, task, work order, brief revision, mode and route (provider and model).
+   */
+  #matches(grant: Grant, agent: Agent, facts: AcpWorkerFacts): boolean {
+    if (agent.id !== grant.agentId) return false
+    if (facts.dshSessionId !== grant.dshSessionId) return false
+    if (facts.taskId !== grant.taskId) return false
+    if (facts.workOrderId !== grant.workOrderId) return false
+    if (facts.workOrderRevision !== grant.workOrderRevision) return false
+    if (facts.briefRevision !== grant.briefRevision) return false
+    if (facts.mode !== grant.mode) return false
+    if (facts.route.provider !== grant.routeProvider) return false
+    if (facts.route.model !== grant.routeModel) return false
+    return true
+  }
+
   /** Re-resolve the Agent and every bound fact; a mismatch revokes the grant. */
   #live(grant: Grant): { agent: Agent; facts: AcpWorkerFacts } | undefined {
     const agent = this.authority.agentOf(grant.dshSessionId)
-    if (!agent || agent.id !== grant.agentId) return this.#stale(grant)
+    if (!agent) return this.#stale(grant)
     const facts = this.authority.workerFacts(agent)
     if (!facts) return this.#stale(grant)
-    if (facts.dshSessionId !== grant.dshSessionId) return this.#stale(grant)
-    if (facts.taskId !== grant.taskId) return this.#stale(grant)
-    if (facts.workOrderId !== grant.workOrderId) return this.#stale(grant)
-    if (facts.workOrderRevision !== grant.workOrderRevision) return this.#stale(grant)
-    if (facts.mode !== grant.mode) return this.#stale(grant)
-    if (facts.route.provider !== grant.routeProvider) return this.#stale(grant)
-    if (facts.route.model !== grant.routeModel) return this.#stale(grant)
+    if (!this.#matches(grant, agent, facts)) return this.#stale(grant)
     return { agent, facts }
   }
 

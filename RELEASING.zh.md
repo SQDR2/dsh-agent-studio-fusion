@@ -68,8 +68,9 @@ npm CLI 建不了信任配置：`npm trust github` 需要交互式 2FA 凭据，
 #    这一节就是 GitHub Release 的正文。
 # 2. 重建 lib/ —— 它纳入版本库并随包发布，lib/ 陈旧等于发布了
 #    与 tag 源码不一致的代码。
-DSHX_HARNESS=/path/to/deepseek-harness-0.2.0-rc.2 pnpm build
+DSHX_HARNESS=/path/to/deepseek-harness pnpm build   # 指向你实际测试用的 Host checkout
 pnpm typecheck && pnpm test
+DSHX_HARNESS=/path/to/deepseek-harness pnpm test:host
 # 3. 源码、重建后的 lib/ 和 CHANGELOG.md 一起提交。
 git add -A && git commit -m "chore(release): 0.3.1"
 # 4. 打 tag 并一起推。
@@ -85,8 +86,14 @@ workflow 随后依次执行 `pnpm install`、`pnpm build`、`pnpm test`，在 ta
 
 ### 构建被钉死的两处
 
-`scripts/build.mjs` 只接受 `engines.dsh` 里列出的 Host 版本（`0.2.0-rc.2` 和 `0.2.1-rc.2`），其余直接报错。
-CI 因此 checkout `dsh-v0.2.0-rc.2`。
+`scripts/build.mjs` 不再按 Host 版本把关：它用 `DSHX_HARNESS` 指向的 checkout 构建（没给时走本地 esbuild），
+因此任何受支持版本的 checkout 都能复现一次发布构建。受支持范围只在一处声明——`engines.dsh`
+（`>=0.2.1-rc.5 <0.3.0-0`）与 `engines.node`（`>=24.0.0`）——并由 `scripts/link-host.mjs` 与 peer 范围检查，
+不再由打包脚本检查。
+
+CI 仍然 checkout 较旧的 devkit tag 来跑 `pnpm build` / `pnpm test`。那是本仓库的构建期依赖，不代表受支持的运行时：
+发布出去的插件应当能在 `engines.dsh` 覆盖的任何版本上运行。验证候选版本时，用
+`DSHX_HARNESS=<checkout> pnpm test:host` 对着你实际测试的 Host 跑一遍。
 
 workflow 里的打包器版本精确钉在 `tsdown@0.22.2`。`lib/` 是提交进仓库的，换个打包器就会提交一份与测试结果不一致的产物；
 比如 `0.22.14` 会重写几百行格式。
@@ -116,5 +123,5 @@ grep -o 'id: "[^"]*"' node_modules/@sqdr2/dsh-fusion/lib/client.js | head -1
 | 推了 tag，`0 workflow runs` | fork 上没有启用 Actions |
 | `npm publish` 报 `404` 或 `ENEEDAUTH` | npm 上没有信任配置，或它过期未验证 |
 | `tag vX != package.json Y` | 版本号只改了一处 |
-| `Unsupported Host package version` | `HARNESS_REF` 与 `engines.dsh` 不一致 |
+| `Unsupported Host package version` | CI 的 devkit checkout 与它自己预期的 tag 不一致（构建期问题，不是运行时支持范围） |
 | 重建后的 bundle 与已提交的 `lib/` 不同 | 打包器没钉在 `0.22.2` |

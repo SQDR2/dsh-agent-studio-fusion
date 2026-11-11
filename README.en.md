@@ -131,8 +131,19 @@ block to this plugin's entry in `cordis.patch.yml`; each key is the provider rou
 ```
 
 When an ACP route is the Sidekick, this plugin declares a Host-tool MCP bridge in that session's ACP `session/new` — and
-only there: the URL carries a single-use token, and every call re-checks that the session still is this task's Worker on
-the current work order of this ACP route, exposes only the configured `workerTools`, and dispatches through DSH's
+only there. The endpoint is this Host's own public origin (`ctx.webServer.getOrigin()`) plus the fixed
+`/api/fusion/acp-mcp` path, and the capability is 32 random bytes carried **only** in the `Authorization: Bearer` header,
+never in the URL (a token in a path segment or a query string is not authentication, and the path must match exactly).
+Each request is also trusted against that origin: `Host` must match it, a present `Origin` must equal it, a cross-site
+request is refused, and the peer must be this machine (loopback, or the exact address the Host binds). No forwarding
+header is consulted, so a Host bound to a concrete interface serves its own callers while remote peers cannot.
+The token is bound to this task's Worker session, the current work order and its revision, the brief revision, the
+implement/explore mode, this ACP route's provider *and* model, and the configured `workerTools`; every call re-checks
+all of it. It is revoked, with in-flight calls aborted, when the task pauses, gates, recovers, completes or stops, when
+an approval or a budget blocks it, when the Worker has submitted its report, when the runtime closes, when the route's
+configuration changes, when the ACP session is replaced, and on abort or timeout. Only `workerTools` ∩ the Agent's own
+visible tools are exposed (an explore order additionally intersects the read-only tools, so the ceiling can only
+narrow), Fusion internals and route transports are never listed, and every call dispatches through DSH's
 `tools.guard`, approvals and Fusion's path/lease checks. A Lead ACP session, an ordinary ACP route call, model discovery
 and compaction requests, a text order, and any other Fusion task all open with an empty `mcpServers` list. Details and
 limits: [`docs/ATTRIBUTION-ACP.md`](docs/ATTRIBUTION-ACP.md).
@@ -181,7 +192,9 @@ While the Lead waits for the Sidekick, often for several minutes, the model's pr
 
 ## Support
 
-- **DSH version:** **0.2.0-rc.2** and **0.2.1-rc.2**, desktop app or Web. Other versions are not guaranteed; new releases will be adapted separately.
+- **DSH version:** **0.2.1-rc.5 and later 0.2.1 releases** (`>=0.2.1-rc.5 <0.3.0-0`), desktop app or Web. The 0.2.0
+  series is no longer supported. Other versions are not guaranteed; new releases will be adapted separately.
+- **Node version:** **Node 24 or newer** (`engines.node` is `>=24.0.0`).
 - **Models:** DSH's built-in providers, plus the subscription routes of [dsh-oauth-login](https://github.com/aa2246740/dsh-oauth-login) and dsh-antigravity-oauth, and the Antigravity route of [dsh-agy-worker](https://github.com/SQDR2/dsh-agy-worker). Other third-party model plugins are untested.
 - **Operating systems:**
   - **macOS:** verified (Seatbelt sandbox).
@@ -193,7 +206,7 @@ While the Lead waits for the Sidekick, often for several minutes, the model's pr
   3. If the file is created, the Lead's read-only limit does not work on your system. Don't use Fusion there, and please report it.
   - Where DSH has no sandbox at all, every Lead shell command is refused (it fails safe). The Lead still reads code with its file and search tools.
 
-### Windows validation in v0.2.1
+### Windows validation in v0.2.1 (historical, predates the current 0.2.1-rc.5 / Node 24 baseline)
 
 On Windows Server 2022 with Node 22.23.3, PowerShell 7.6.6 and DSH 0.1.7-rc.2, all **253 unit tests and 236 Host tests** passed, as did type checking. The repair candidate passed plugin installation, a cold start, the Fusion settings page and both settings/cache APIs. The v0.2.1 server and client bundles are byte-for-byte identical to that candidate. Later releases (v0.2.2: the Lead can widen the allowed files during rework; v0.2.3–v0.2.5: DSH 0.2.0-rc.2 support; v0.2.6: cheaper cache keepalive) are platform-independent and were re-tested on macOS, not on Windows.
 
@@ -217,9 +230,9 @@ The real PowerShell ACL test denied the Lead's `Set-Content probe.txt test` comm
 
 ```sh
 corepack pnpm@9.15.9 install --frozen-lockfile
-node scripts/link-host.mjs /path/to/deepseek-harness-0.2.0-rc.2   # or 0.2.1-rc.2; link DSH sources for development
-DSHX_HARNESS=/path/to/deepseek-harness-0.2.0-rc.2 pnpm build
-pnpm test && DSHX_HARNESS=/path/to/deepseek-harness-0.2.0-rc.2 pnpm test:host
+node scripts/link-host.mjs /path/to/deepseek-harness-0.2.1-rc.5   # the supported baseline; link DSH sources for development
+DSHX_HARNESS=/path/to/deepseek-harness-0.2.1-rc.5 pnpm build
+pnpm test && DSHX_HARNESS=/path/to/deepseek-harness-0.2.1-rc.5 pnpm test:host
 ```
 
 For Windows development, put PowerShell 7 (`pwsh`), Node and Python on the test process PATH. Native tests use `DSHX_HARNESS` to read the built, pinned Host checkout; no Host source changes are required.

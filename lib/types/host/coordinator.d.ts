@@ -171,6 +171,13 @@ export declare class FusionCoordinator {
      * session that is not a Fusion Worker, a task without a current work order, text mode —
      * answers `undefined`, which is how the bridge refuses to exist for that request.
      *
+     * It fails closed on every gate that already stops the Worker's own turn: `#accessBlocked`
+     * covers a paused/blocked/recovering/unknown/completed task, pending approval, an
+     * exhausted budget, a stopping or closing runtime, the model-control waits and a
+     * submitted report. Only the session this task actually dispatched (accepted, else
+     * reserved) may hold a grant, and a task whose runtime record is gone owns no bridge at
+     * all — a replaced or demoted Worker loses the capability instead of keeping it.
+     *
      * An explicit accessor rather than the ACP module reaching into bindings and runtime
      * records: the coordinator owns which Agent is which role.
      */

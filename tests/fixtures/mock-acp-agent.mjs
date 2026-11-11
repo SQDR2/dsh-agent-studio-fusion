@@ -8,6 +8,8 @@ import { appendFileSync } from 'node:fs'
 import { createInterface } from 'node:readline'
 
 const log = process.env.ACP_MCP_LOG
+/** Advertised model ids (`ACP_MODELS=default,other-model`), for model-selection fixtures. */
+const models = process.env.ACP_MODELS?.split(',').filter(Boolean)
 
 function send(message) {
   process.stdout.write(`${JSON.stringify(message)}\n`)
@@ -33,10 +35,32 @@ lines.on('line', line => {
   }
   if (method === 'session/new') {
     if (log !== undefined) appendFileSync(log, `${JSON.stringify({ mcpServers: params?.mcpServers ?? [] })}\n`)
-    send({ jsonrpc: '2.0', id, result: { sessionId: 'acp-session-1', configOptions: [] } })
+    // A setup failure *after* the bridge declaration: the client must revoke what it issued.
+    if (process.env.ACP_FAIL_NEW_SESSION !== undefined) {
+      send({ jsonrpc: '2.0', id, error: { code: -32603, message: 'session/new refused by the test fixture' } })
+      return
+    }
+    send({ jsonrpc: '2.0', id, result: {
+      sessionId: 'acp-session-1',
+      configOptions: [],
+      // The legacy model list, so `session/set_model` is a supported operation here.
+      ...(models === undefined ? {} : { models: {
+        currentModelId: models[0],
+        availableModels: models.map(id => ({ modelId: id, name: id })),
+      } }),
+    } })
+    return
+  }
+  if (method === 'session/set_model') {
+    send({ jsonrpc: '2.0', id, result: {} })
     return
   }
   if (method === 'session/prompt') {
+    // A prompt the agent refuses outright: the client's `agent.prompt` rejects.
+    if (process.env.ACP_FAIL_PROMPT !== undefined) {
+      send({ jsonrpc: '2.0', id, error: { code: -32603, message: 'prompt refused by the test fixture' } })
+      return
+    }
     const delay = Number(process.env.ACP_PROMPT_DELAY_MS ?? '0')
     setTimeout(() => {
     send({ jsonrpc: '2.0', method: 'session/update', params: {

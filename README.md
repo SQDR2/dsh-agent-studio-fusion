@@ -121,9 +121,16 @@ Fusion 在 DeepSeek Harness（DSH）的模型菜单里就是一个普通模型�
 ```
 
 ACP 线路作为 Sidekick 时，本插件会在该会话的 ACP `session/new` 里挂一个**只有 Sidekick 拿得到**的 MCP 工具桥：
-URL 里带一次性令牌，且每次调用都会重新核对「是这张任务的 Worker + 当前工作单 + 这条 ACP 路由」，只放行
-`workerTools` 里配置的工具，并全部走 DSH 的 `tools.guard`、审批与 Fusion 的路径/租约检查。Lead 的 ACP 会话、
-普通 ACP 线路调用、模型发现与压缩请求、text 单、以及别的 Fusion 任务都拿不到工具桥（`mcpServers` 为空）。
+地址是本机 Web 服务自己的公开 origin（`ctx.webServer.getOrigin()`）加固定路径 `/api/fusion/acp-mcp`，令牌是 32 字节
+随机数、**只放在 `Authorization: Bearer` 头里，不写进 URL**（也不接受路径或查询串里的令牌，路径必须精确匹配）。
+请求还会按这个 origin 校验：`Host` 必须与它一致、`Origin`（若有）必须等于它、跨站请求一律拒绝、对端必须是本机
+（回环或 Host 实际绑定的那个地址）；不看任何转发头，所以绑定具体网卡时本机调用可用，远端与代理仍不可达。
+令牌绑定「这张任务的 Worker 会话 + 当前工作单及 revision + brief revision + implement/explore 模式 + 这条 ACP 路由的
+provider 与 model + 配置的 `workerTools`」，每次调用都会重新核对；任务暂停/重跑/恢复/完成、待审批、额度阻断、
+Worker 已交报告、运行时关闭、路由配置改动、会话替换、超时或中断时都会立即撤销并中断在途调用。只放行
+`workerTools` ∩ 该 Agent 自己可见的工具表（explore 单再与只读工具取交集，只收窄不放大），排除 Fusion 内部工具与
+线路传输工具，并全部走 DSH 的 `tools.guard`、审批与 Fusion 的路径/租约检查。Lead 的 ACP 会话、普通 ACP 线路调用、
+模型发现与压缩请求、text 单、以及别的 Fusion 任务都拿不到工具桥（`mcpServers` 为空）。
 改动与限制记录在 [`docs/ATTRIBUTION-ACP.md`](docs/ATTRIBUTION-ACP.md)。
 
 ### 其它 agent 线路：这里没有工具桥
@@ -167,7 +174,8 @@ Lead 等 Sidekick 干活时，可能要等好几分钟。模型的输入缓存�
 
 ## 支持范围
 
-- **DSH 版本：** 支持 **0.2.0-rc.2** 和 **0.2.1-rc.2**，桌面版和 Web 版都可以。其他版本不保证可用；新版本发布后会另行适配。
+- **DSH 版本：** 支持 **0.2.1-rc.5 及之后的 0.2.1 版本**（`>=0.2.1-rc.5 <0.3.0-0`），桌面版和 Web 版都可以；0.2.0 系列已不再支持。其他版本不保证可用，新版本发布后会另行适配。
+- **Node 版本：** 需要 **Node 24 或更新版本**（`engines.node` 为 `>=24.0.0`）。
 - **模型：** DSH 官方自带的模型线路，以及 [dsh-oauth-login](https://github.com/aa2246740/dsh-oauth-login)、dsh-antigravity-oauth 提供的订阅登录线路，还有 [dsh-agy-worker](https://github.com/SQDR2/dsh-agy-worker) 的 Antigravity 线路。其他第三方模型插件未经测试。
 - **系统：**
   - **macOS：** 已验证（Seatbelt 沙盒）。
@@ -179,7 +187,7 @@ Lead 等 Sidekick 干活时，可能要等好几分钟。模型的输入缓存�
   3. 如果文件被创建出来，说明你的系统上 Lead 的只读限制没有生效，请不要使用，并反馈给我们。
   - 如果 DSH 在你的系统上没有沙盒，Lead 的 shell 命令会被全部拒绝（安全的失败方式），它仍然可以用读文件和搜索工具看代码。
 
-### v0.2.1 的 Windows 验证
+### v0.2.1 的 Windows 验证（历史记录，早于当前 0.2.1-rc.5 / Node 24 基线）
 
 在 Windows Server 2022、Node 22.23.3、PowerShell 7.6.6、DSH 0.1.7-rc.2 上，**253 项单元测试和 236 项 Host 测试全部通过**，类型检查通过。修复候选完成了插件安装、冷启动、Fusion 设置页及 settings/cache 两个 API 验证。v0.2.1 的服务端和客户端构建文件与该候选完全一致。之后的版本（v0.2.2 返工时扩大可改文件范围、v0.2.3–v0.2.5 适配 DSH 0.2.0-rc.2、v0.2.6 改进缓存保活）都与平台无关，在 macOS 上复测，未在 Windows 上重跑。
 
@@ -203,9 +211,9 @@ Lead 等 Sidekick 干活时，可能要等好几分钟。模型的输入缓存�
 
 ```sh
 corepack pnpm@9.15.9 install --frozen-lockfile
-node scripts/link-host.mjs /path/to/deepseek-harness-0.2.0-rc.2   # 或 0.2.1-rc.2；开发时链接 DSH 源码
-DSHX_HARNESS=/path/to/deepseek-harness-0.2.0-rc.2 pnpm build
-pnpm test && DSHX_HARNESS=/path/to/deepseek-harness-0.2.0-rc.2 pnpm test:host
+node scripts/link-host.mjs /path/to/deepseek-harness-0.2.1-rc.5   # 支持的基线；开发时链接 DSH 源码
+DSHX_HARNESS=/path/to/deepseek-harness-0.2.1-rc.5 pnpm build
+pnpm test && DSHX_HARNESS=/path/to/deepseek-harness-0.2.1-rc.5 pnpm test:host
 ```
 
 Windows 开发环境需将 PowerShell 7（`pwsh`）、Node 和 Python 加入运行测试的进程 PATH。原生测试通过 `DSHX_HARNESS` 读取已构建的指定 Host；不需要修改 Host 源码。

@@ -1,8 +1,11 @@
 # DSH compatibility
 
-Fusion supports **DeepSeek Harness 0.2.0-rc.2 and 0.2.1-rc.2**. It is an ordinary external plugin: it uses only DSH's public
-plugin APIs and never patches, replaces or rebuilds DSH itself. `scripts/build.mjs` accepts either of those two Host
-checkouts, `engines.dsh` declares the supported runtime, and every `@deepseek-ai/dsh*` peer uses the same range.
+Fusion supports **DeepSeek Harness 0.2.1-rc.5 and later 0.2.1 releases** (`>=0.2.1-rc.5 <0.3.0-0`) on **Node 24 or
+newer** (`engines.node` is `>=24.0.0`). It is an ordinary external plugin: it uses only DSH's public plugin APIs and
+never patches, replaces or rebuilds DSH itself. `engines.dsh` declares the supported runtime, and every
+`@deepseek-ai/dsh*` peer uses the same range. 0.2.1-rc.5 is the tested floor rather than a guess: this release is
+developed and verified against that Host checkout on Node 24.13.0, and it publishes the `WebServer.getOrigin()`
+origin accessor the ACP Sidekick bridge resolves its endpoint from (0.2.0-rc.2 did not).
 
 ## What Fusion depends on
 
@@ -30,7 +33,7 @@ client packages `dsh-client-ui-*` and `dsh-client-store`. Only package entry poi
 Fusion writes only public session events (messages, tool calls and results, and `sandbox/mode` for the Lead's read-only
 sandbox) and stores its own records in its plugin directory.
 
-## Changes from 0.2.0-rc.2 to 0.2.1-rc.2
+## Historical: changes from 0.2.0-rc.2 to 0.2.1-rc.2
 
 The subagent seam was renamed and widened; the delegation composition knobs moved. Everything else Fusion imports
 kept its shape — all 25 non-client `@deepseek-ai/*` symbols Fusion imports still exist with unchanged signatures.
@@ -70,31 +73,52 @@ Workers, so 0.2.0 behaviour is unchanged. Text and explore modes already returne
 
 ### Version declarations
 
-The old `>=0.2.0-rc.1 <0.2.1` range was **not** what blocked 0.2.1. DSH evaluates plugin requirements with
-`includePrerelease: true`, and `0.2.1-rc.2` sorts *below* `0.2.1`, so that range already satisfied the 0.2.1 gate.
-What broke was the code (`startContinuable` is gone). `scripts/link-host.mjs` checks the same peers with **plain**
-semver, where a prerelease only matches a comparator that has a prerelease on the same major.minor.patch, so
-`>=0.2.0-rc.1 <0.2.1` rejects `0.2.1-rc.2`.
-
-`engines.dsh` and every `@deepseek-ai/dsh*` peer therefore use:
+`engines.dsh` and every `@deepseek-ai/dsh*` peer use one range:
 
 ```text
->=0.2.0-rc.1 <0.2.1-0 || >=0.2.1-rc.2 <0.3.0-0
+>=0.2.1-rc.5 <0.3.0-0
 ```
 
-Dev dependencies and `pnpm-lock.yaml` stay on the published 0.2.0-rc.2 packages (the CI devkit pins that tag). The
-0.2.1-only methods are local structural types, so typecheck does not need the 0.2.1 packages installed.
+Two consumers read it differently, and both accept exactly the supported set:
+
+- DSH's plugin gate evaluates requirements with `includePrerelease: true`, where a prerelease sorts below its own
+  release. The upper bound `<0.3.0-0` is what keeps `0.3.0-rc.*` out; a plain `<0.3.0` would admit it.
+- `scripts/link-host.mjs` uses **plain** semver, where a prerelease only matches a comparator carrying a prerelease
+  on the same major.minor.patch. That is why the lower bound names `0.2.1-rc.5` explicitly: `>=0.2.1` would reject the
+  prerelease devkit the range exists to describe.
 
 | Version | plain `satisfies` | `{ includePrerelease: true }` |
 | --- | --- | --- |
-| `0.2.0-rc.1` | accept | accept |
-| `0.2.0-rc.2` | accept | accept |
-| `0.2.1-rc.1` | reject | reject |
-| `0.2.1-rc.2` | accept | accept |
-| `0.2.1-rc.3` | accept | accept |
+| `0.2.0-rc.2` | reject | reject |
+| `0.2.1-rc.2` | reject | reject |
+| `0.2.1-rc.4` | reject | reject |
+| `0.2.1-rc.5` | accept | accept |
+| `0.2.1-rc.6` | accept | accept |
 | `0.2.1` | accept | accept |
+| `0.3.0-0` | reject | reject |
 | `0.3.0-rc.1` | reject | reject |
 | `0.3.0` | reject | reject |
+
+Node is declared separately: `engines.node` is `>=24.0.0`, `scripts/build.mjs` bundles the Host module for the `node24`
+target, and the Host suite is run on Node 24.
+
+Dev dependencies and `pnpm-lock.yaml` still resolve the published 0.2.0-rc.2 packages (the CI devkit pins that tag), so
+the lockfile carries no dependency churn for this baseline change. Every newer API Fusion needs — the 0.2.1 subagent
+seam and `WebServer.getOrigin()` — is read through a local structural type, so neither typecheck nor the build needs
+those packages installed.
+
+### Historical: how the 0.2.x ranges behaved
+
+This part is history, kept because it explains why the bounds look the way they do. It does not describe supported
+versions.
+
+The old `>=0.2.0-rc.1 <0.2.1` range was **not** what blocked 0.2.1. DSH evaluates plugin requirements with
+`includePrerelease: true`, and `0.2.1-rc.2` sorts *below* `0.2.1`, so that range already satisfied the 0.2.1 gate.
+What broke was the code (`startContinuable` is gone). `scripts/link-host.mjs` checks the same peers with plain semver,
+where a prerelease only matches a comparator that has a prerelease on the same major.minor.patch, so
+`>=0.2.0-rc.1 <0.2.1` rejected `0.2.1-rc.2`. The interim range
+`>=0.2.0-rc.1 <0.2.1-0 || >=0.2.1-rc.2 <0.3.0-0` spanned both releases; 0.2.0-rc.2 is no longer supported, so that
+alternative span is gone.
 
 ## Changes from 0.1.5 to 0.1.7 (an example of what an upgrade touches)
 
@@ -111,10 +135,10 @@ Dev dependencies and `pnpm-lock.yaml` stay on the published 0.2.0-rc.2 packages 
 1. Check out the new Harness release and point `DSHX_HARNESS` at it.
 2. Update the version check in `scripts/build.mjs`, `engines.dsh` and the `@deepseek-ai/*` `peerDependencies`; relink
    with `node scripts/link-host.mjs <harness>`. Pick the range carefully: DSH's gate uses `includePrerelease`, where a
-   prerelease sorts below its own release, so a stale upper bound like `<0.2.1` still admits `0.2.1-rc.2` and silently
-   passes — while `scripts/link-host.mjs` uses plain semver and rejects it. A prerelease only matches a plain
-   comparator that carries a prerelease on the same major.minor.patch, which is why the current span is
-   `>=0.2.0-rc.1 <0.2.1-0 || >=0.2.1-rc.2 <0.3.0-0`. Verify both consumers.
+   prerelease sorts below its own release, so a stale upper bound like `<0.3.0` still admits `0.3.0-rc.1` and silently
+   passes — while `scripts/link-host.mjs` uses plain semver and rejects a prerelease unless a comparator carries one on
+   the same major.minor.patch, which is why the current range names `>=0.2.1-rc.5 <0.3.0-0`. Verify both consumers;
+   `node -e` with `semver.satisfies(v, range, { includePrerelease: true })` is enough.
 3. Read the release notes and run `dshx check` for compatibility rules; fix type errors (`pnpm typecheck`). Renames in
    the subagent seam are not caught by type checking when the old name is simply gone — grep `ctx.subagents` calls by
    hand, and check the client packages too (`TerminalBlockLabels` gained a required field this time).
@@ -153,10 +177,11 @@ These show up next to Fusion's own gates. Fusion does not patch the host to remo
   host file or process effects that were not in its own journal. Use `/fusion recover <inspection note>`, then continue
   or switch the Sidekick from the recovery panel. Saving a new pair in Settings changes the default for new
   conversations only.
-- **Natural Worker disposal.** DSH `0.2.0-rc.2` disposes a continuable child in `finishDisposal` and only then sends
-  `subagent-settled`. `fusion_wait` reads the persisted task when that handle is already gone. It asks for recovery
+- **Natural Worker disposal.** On the supported 0.2.1 releases the settlement flushes the child log and then closes the
+  persistence handle, so `fusion_wait` reads the persisted task when that handle is already gone. It asks for recovery
   only when a native effect is still pending or the outcome is unknown. An ended Worker with no report is
-  `WORKFLOW_INCOMPLETE`, not a quota or provider outage. On `0.2.1-rc.2` the same settlement flushes the child log
-  and then closes the persistence handle. A later `stop` that sees `SessionHandleClosedError` treats that log as
-  already durable, kills any recorded job, and releases the writer. Host unload while `runtime.background` is set
-  records `recovery/needed` before that settlement can clear the flag.
+  `WORKFLOW_INCOMPLETE`, not a quota or provider outage. A later `stop` that sees `SessionHandleClosedError` treats
+  that log as already durable, kills any recorded job, and releases the writer. Host unload while
+  `runtime.background` is set records `recovery/needed` before that settlement can clear the flag. (Historically
+  0.2.0-rc.2 disposed the child in `finishDisposal` and only then sent `subagent-settled`; that release is no longer
+  supported.)

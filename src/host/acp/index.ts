@@ -55,6 +55,28 @@ interface AttachmentsService {
   }>
 }
 
+/**
+ * The one web-server method the bridge needs: the Host's own public origin.
+ *
+ * `WebServer.getOrigin()` is the supported way to learn where this Host is actually
+ * reachable (it follows the configured protocol, bind address and listening port). The
+ * devkit typings this package develops against predate it, so it is read through this
+ * narrow structural seam rather than from a guessed loopback URL. A Host that answers no
+ * origin gets no bridge at all — never a fallback address.
+ */
+interface WebServerOrigin {
+  getOrigin?: () => string
+}
+
+/** Resolve the Host origin at declaration time; throws when the Host cannot name one. */
+function hostOrigin(ctx: Context): string {
+  const server = ctx.webServer as unknown as WebServerOrigin | undefined
+  const origin = server?.getOrigin?.()
+  if (typeof origin !== 'string' || origin.trim().length === 0)
+    throw new Error(`${PLUGIN_ID}: the Host web server reports no origin; an ACP Sidekick bridge cannot be addressed`)
+  return origin
+}
+
 /** Where this plugin's learned ACP facts persist: `$DSH_HOME`, as dsh resolves it. */
 function cacheFile(name: string): string {
   const configured = process.env.DSH_HOME?.trim()
@@ -120,7 +142,7 @@ export function installAcp(ctx: Context, options: InstallAcpOptions): () => void
     execute: (input): Promise<ToolExecutionResult> => ctx.tools.execute(input),
   }, {
     workerTools: options.workerTools,
-    origin: () => `http://127.0.0.1:${ctx.webServer.port}`,
+    origin: () => hostOrigin(ctx),
   })
   const disposeRoute = installAcpBridgeRoute(ctx, ACP_MCP_PATH, (req, res) => bridge.handle(req, res))
   const adapter = new AcpAdapter(

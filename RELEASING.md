@@ -76,8 +76,9 @@ first step.
 #    the top of CHANGELOG.md. That section becomes the GitHub release body.
 # 2. Rebuild lib/ — it is tracked in git and shipped in the tarball, so a stale
 #    lib/ publishes code that does not match the tagged source.
-DSHX_HARNESS=/path/to/deepseek-harness-0.2.0-rc.2 pnpm build
+DSHX_HARNESS=/path/to/deepseek-harness pnpm build   # the Host checkout you test against
 pnpm typecheck && pnpm test
+DSHX_HARNESS=/path/to/deepseek-harness pnpm test:host
 # 3. Commit the source, the rebuilt lib/ and CHANGELOG.md together.
 git add -A && git commit -m "chore(release): 0.3.1"
 # 4. Tag and push both.
@@ -94,8 +95,14 @@ history stays in the upstream repository.
 
 ### Two things the build is pinned to
 
-`scripts/build.mjs` accepts only the Host versions in `engines.dsh` (`0.2.0-rc.2` and `0.2.1-rc.2`) and fails
-otherwise. CI checks out `dsh-v0.2.0-rc.2` for that reason.
+`scripts/build.mjs` no longer version-gates the Host. It builds with whatever checkout `DSHX_HARNESS` names (or with the
+local esbuild pass when none is given), so a release build is reproducible from any checkout of a supported release. The
+supported runtime is declared once, in `engines.dsh` (`>=0.2.1-rc.5 <0.3.0-0`) plus `engines.node` (`>=24.0.0`), and
+checked by `scripts/link-host.mjs` and the peer ranges rather than by the bundler.
+
+CI still checks out an older devkit tag to run `pnpm build`/`pnpm test`. That is a build-time dependency of this
+repository, not a statement about supported runtimes: the published plugin is expected to run on any release in
+`engines.dsh`. Verify a release candidate with `DSHX_HARNESS=<checkout> pnpm test:host` against the Host you tested with.
 
 The bundler version in the workflow is pinned to exactly `tsdown@0.22.2`. `lib/` is committed, so a different bundler
 would commit a bundle that does not match what was tested; `0.22.14`, for instance, reformats several hundred lines.
@@ -125,5 +132,5 @@ The host bundle must export `dsh-fusion`, and the client bundle's registration i
 | Tag pushed, `0 workflow runs` | Actions not enabled on the fork |
 | `404` or `ENEEDAUTH` from `npm publish` | No trusted publisher on npm, or it expired unvalidated |
 | `tag vX != package.json Y` | Version bumped in one place only |
-| `Unsupported Host package version` | `HARNESS_REF` drifted from `engines.dsh` |
+| `Unsupported Host package version` | CI's devkit checkout does not match the tag that workflow expects (a build-time issue, not the supported runtime) |
 | Bundle rebuild differs from committed `lib/` | Bundler version not pinned to `0.22.2` |

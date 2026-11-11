@@ -8,6 +8,14 @@
  * authority accepts (a live Fusion Sidekick turn on this route), the adapter attaches the
  * Host-tool MCP bridge to that `session/new`. Every other request — Lead turns, plain ACP
  * route use, discovery, compaction, text mode, absent sessions — opens with no servers.
+ *
+ * The bridge lives exactly as long as the dispatch that earned it. The adapter revokes it
+ * (and aborts its in-flight calls) when the turn aborts, times out or is abandoned by its
+ * consumer, when the ACP session is replaced, when setup fails after the declaration, when
+ * the route's profile changes or disappears, when the adapter is disposed, and whenever
+ * the bridge itself reports that the reused session's authorization no longer holds. A
+ * plain successful turn keeps it, because that same session is reused for the next step of
+ * the same work order.
  */
 import type { GenerateOptions, LlmModelInfo, LlmProviderInfo, LlmResolvedModelInfo, ResolvedRetryPolicy, StreamChunk } from '@deepseek-ai/dsh-llm';
 import type { AcpHost } from './host.js';
@@ -22,7 +30,8 @@ export interface AcpBridgeMount {
     serversFor(request: AcpBridgeRequest): AcpMcpServerHttp[];
     /**
      * Whether an ACP session may keep being reused: a reused session never runs
-     * `session/new`, so its bridge token must still match the current work order.
+     * `session/new`, so its bridge token must still match the current work order. `false`
+     * means the session is replaced, and the bridge it carried has been revoked.
      */
     canReuse?(request: AcpBridgeRequest): boolean;
     revokeSession(dshSessionId: string): void;
@@ -38,6 +47,8 @@ export declare class AcpAdapter extends LlmAdapter {
     private readonly agents;
     private readonly bindings;
     private readonly turns;
+    /** DSH sessions this adapter declared a Host-tool bridge for, so teardown can revoke them. */
+    private readonly bridged;
     private readonly retryPolicy;
     constructor(host: AcpHost, profiles: () => ReadonlyMap<string, AcpAgentProfile>, contextWindows?: ContextWindows, capabilities?: PromptCapabilitiesCache, bridge?: AcpBridgeMount | undefined);
     sync(): void;

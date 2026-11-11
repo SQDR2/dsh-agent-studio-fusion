@@ -61,7 +61,7 @@ async function buildWithEsbuild() {
   // The Host module ships without a sourcemap, like the client bundle the harness
   // serves with one: keep the artifact set identical to the dshx build.
   await build({ entryPoints: [resolve(root, 'src/dsh-fusion.ts')], outfile: resolve(root, 'lib/dsh-fusion.js'),
-    bundle: true, format: 'esm', platform: 'node', target: 'node22', packages: 'external', sourcemap: false, logLevel: 'warning' })
+    bundle: true, format: 'esm', platform: 'node', target: 'node24', packages: 'external', sourcemap: false, logLevel: 'warning' })
   await build({ entryPoints: [resolve(root, 'src/client/index.ts')], outfile: resolve(root, 'lib/client.js'),
     bundle: true, format: 'cjs', platform: 'browser', target: 'es2022', packages: 'external', jsx: 'automatic',
     sourcemap: true, logLevel: 'warning', banner: { js: clientBanner }, footer: { js: clientFooter } })

@@ -645,27 +645,44 @@ export class FusionCoordinator {
    * session that is not a Fusion Worker, a task without a current work order, text mode —
    * answers `undefined`, which is how the bridge refuses to exist for that request.
    *
+   * It fails closed on every gate that already stops the Worker's own turn: `#accessBlocked`
+   * covers a paused/blocked/recovering/unknown/completed task, pending approval, an
+   * exhausted budget, a stopping or closing runtime, the model-control waits and a
+   * submitted report. Only the session this task actually dispatched (accepted, else
+   * reserved) may hold a grant, and a task whose runtime record is gone owns no bridge at
+   * all — a replaced or demoted Worker loses the capability instead of keeping it.
+   *
    * An explicit accessor rather than the ACP module reaching into bindings and runtime
    * records: the coordinator owns which Agent is which role.
    */
   acpWorkerFacts(agent: Agent): AcpWorkerFacts | undefined {
     const owner = this.owner(agent)
     if (!owner || owner.role !== 'worker') return undefined
-    const state = this.state(owner.binding.taskId)
-    const order = state.currentWorkOrder
-    if (!order || order.mode === 'text') return undefined
-    const route = this.modelControl.route(owner.binding, 'worker')
-    let briefRevision = 0
-    try { briefRevision = this.#runtime(owner.binding.taskId).briefRevision ?? 0 }
-    catch { /* a task whose runtime record is gone owns no ACP bridge */ }
-    return {
-      dshSessionId: agent.id,
-      taskId: owner.binding.taskId as unknown as string,
-      workOrderId: order.id as unknown as string,
-      workOrderRevision: order.revision,
-      briefRevision,
-      mode: order.mode === 'explore' ? 'explore' : 'implement',
-      route: { provider: route.provider, model: route.model },
+    try {
+      if (this.#accessBlocked(agent, owner.binding, 'worker') !== undefined) return undefined
+      const state = this.state(owner.binding.taskId)
+      // The Worker this task dispatched, or the one reserved for its next dispatch. A
+      // session that was rolled over, replaced or is a stranger to this task has no claim.
+      const dispatched = owner.binding.workerId ?? state.acceptedChild ?? state.reservedChild
+      if (dispatched === undefined || dispatched !== agent.id) return undefined
+      const order = state.currentWorkOrder
+      if (!order || order.mode === 'text') return undefined
+      const runtime = this.#runtime(owner.binding.taskId)
+      const route = this.modelControl.route(owner.binding, 'worker')
+      return {
+        dshSessionId: agent.id,
+        taskId: owner.binding.taskId as unknown as string,
+        workOrderId: order.id as unknown as string,
+        workOrderRevision: order.revision,
+        briefRevision: runtime.briefRevision ?? 0,
+        mode: order.mode === 'explore' ? 'explore' : 'implement',
+        route: { provider: route.provider, model: route.model },
+      }
+    }
+    catch {
+      // A task whose state or runtime record cannot be read owns no bridge. Failing closed
+      // here is the only safe answer: this accessor grants tool authority.
+      return undefined
     }
   }
 

@@ -3,12 +3,13 @@ import { existsSync, mkdtempSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { GenerateOptions, StreamChunk, ToolSchema } from '@deepseek-ai/dsh-llm'
 import type { ToolExecutionResult } from '@deepseek-ai/dsh-tools'
 import { AcpToolBridge, ACP_MCP_PATH, type AcpBridgeAuthority, type AcpWorkerFacts } from '../src/host/acp/bridge.js'
 import { AcpAdapter, type AcpBridgeMount } from '../src/host/acp/adapter.js'
+import { AcpAgentProcess } from '../src/host/acp/agent-process.js'
 import type { AcpHost } from '../src/host/acp/host.js'
 import type { AcpAgentProfile } from '../src/host/acp/types.js'
 
@@ -38,6 +39,7 @@ function factsFor(mode: 'implement' | 'explore' = 'implement', route = 'devin'):
 interface HarnessOptions {
   workerTools?: readonly string[]
   schemas?: readonly ToolSchema[]
+  origin?: string
   execute?: (input: { agent: Agent; name: string; arguments: unknown; callId: unknown; signal: AbortSignal }) => Promise<ToolExecutionResult>
 }
 
@@ -65,7 +67,7 @@ function harness(options: HarnessOptions = {}) {
   }
   const bridge = new AcpToolBridge(authority, {
     workerTools: options.workerTools ?? ['read', 'bash'],
-    origin: () => 'http://127.0.0.1:4123',
+    origin: () => options.origin ?? 'http://127.0.0.1:4123',
     tokenFactory: () => `token-${SESSION}`,
   })
   agents.set(SESSION, agentOf(SESSION))
@@ -102,25 +104,52 @@ async function until(check: () => boolean, label: string): Promise<void> {
   throw new Error(`timed out waiting for ${label}`)
 }
 
-async function rpc(bridge: AcpToolBridge, token: string, method: string, params?: unknown, id: number | string | null = 1) {
+interface RequestOverrides {
+  url?: string
+  /** The `Host` header the client addressed. Defaults to the harness loopback origin. */
+  host?: string
+  origin?: string
+  remoteAddress?: string
+  secFetchSite?: string
+}
+
+async function rpc(bridge: AcpToolBridge, token: string | undefined, method: string, params?: unknown,
+  id: number | string | null = 1, overrides: RequestOverrides = {}) {
   const res = new FakeResponse()
-  await bridge.handle(fakeRequest(token, { jsonrpc: '2.0', id, method, ...(params === undefined ? {} : { params }) }), res as unknown as ServerResponse)
+  await bridge.handle(fakeRequest(token, { jsonrpc: '2.0', id, method, ...(params === undefined ? {} : { params }) }, overrides), res as unknown as ServerResponse)
   return { status: res.status, body: res.payload.length > 0 ? JSON.parse(res.payload) as Record<string, unknown> : undefined }
 }
 
-function fakeRequest(token: string, body: unknown): IncomingMessage {
+/**
+ * One streamable-HTTP POST. The capability travels only in the Authorization header, so a
+ * test that wants to prove a URL token is not authentication passes it in `url` instead.
+ */
+function fakeRequest(token: string | undefined, body: unknown, overrides: RequestOverrides = {}): IncomingMessage {
   const req = new EventEmitter() as unknown as IncomingMessage & { [Symbol.asyncIterator]: () => AsyncGenerator<Buffer> }
   req.method = 'POST'
-  req.url = `${ACP_MCP_PATH}/${token}`
-  req.headers = { host: '127.0.0.1:4123', authorization: `Bearer ${token}`, 'content-type': 'application/json' }
-  ;(req as unknown as { socket: { remoteAddress: string } }).socket = { remoteAddress: '127.0.0.1' }
+  req.url = overrides.url ?? ACP_MCP_PATH
+  req.headers = {
+    host: overrides.host ?? '127.0.0.1:4123',
+    'content-type': 'application/json',
+    ...(overrides.origin === undefined ? {} : { origin: overrides.origin }),
+    ...(overrides.secFetchSite === undefined ? {} : { 'sec-fetch-site': overrides.secFetchSite }),
+    ...(token === undefined ? {} : { authorization: `Bearer ${token}` }),
+  }
+  ;(req as unknown as { socket: { remoteAddress: string } }).socket = { remoteAddress: overrides.remoteAddress ?? '127.0.0.1' }
   req[Symbol.asyncIterator] = async function* () {
     yield Buffer.from(JSON.stringify(body))
   }
   return req
 }
 
-function profile(log: string, env: Record<string, string> = {}): AcpAgentProfile {
+/** The tool names an authorized `tools/list` returned, or undefined when it was refused. */
+async function listedTools(bridge: AcpToolBridge, token: string | undefined, overrides: RequestOverrides = {}): Promise<string[] | undefined> {
+  const response = await rpc(bridge, token, 'tools/list', undefined, 1, overrides)
+  const result = response.body?.result as { tools?: { name: string }[] } | undefined
+  return result?.tools?.map(tool => tool.name)
+}
+
+function profile(log: string, env: Record<string, string> = {}, extra: Partial<AcpAgentProfile> = {}): AcpAgentProfile {
   return {
     command: process.execPath,
     args: [join(import.meta.dirname, 'fixtures', 'mock-acp-agent.mjs')],
@@ -134,6 +163,7 @@ function profile(log: string, env: Record<string, string> = {}): AcpAgentProfile
     contextWindow: 1000,
     startupTimeoutMs: 20_000,
     idleTimeoutMs: 20_000,
+    ...extra,
   }
 }
 
@@ -168,13 +198,29 @@ function sessionNews(log: string): { mcpServers: { type?: string; name?: string;
 }
 
 describe('ACP Sidekick MCP bridge — declaration gating', () => {
-  it('gives a live Fusion Worker ACP session exactly one bridge server', () => {
+  it('gives a live Fusion Worker ACP session exactly one bridge server at the exact endpoint', () => {
     const h = harness()
     const servers = h.bridge.serversFor({ sessionId: SESSION, route: 'devin', model: 'default' })
     expect(servers).toHaveLength(1)
     expect(servers[0]!.type).toBe('http')
-    expect(servers[0]!.url).toBe(`http://127.0.0.1:4123${ACP_MCP_PATH}/token-${SESSION}`)
+    // The URL is the Host's origin plus the fixed path: the capability is never in it.
+    expect(servers[0]!.url).toBe(`http://127.0.0.1:4123${ACP_MCP_PATH}`)
+    expect(servers[0]!.url).not.toContain('token')
     expect(servers[0]!.headers).toEqual([{ name: 'Authorization', value: `Bearer token-${SESSION}` }])
+  })
+
+  it('uses the Host origin as configured, without a loopback fallback', () => {
+    // A non-default concrete bind behind TLS: the declaration must follow the Host, not a guess.
+    const h = harness({ origin: 'https://198.51.100.7:8443/' })
+    const servers = h.bridge.serversFor({ sessionId: SESSION, route: 'devin', model: 'default' })
+    expect(servers[0]!.url).toBe(`https://198.51.100.7:8443${ACP_MCP_PATH}`)
+  })
+
+  it('issues no bridge at all when the Host cannot name its origin', () => {
+    const h = harness({ origin: '' })
+    expect(() => h.bridge.serversFor({ sessionId: SESSION, route: 'devin', model: 'default' })).toThrow(/no origin/)
+    // Nothing was issued, so there is nothing to reuse either.
+    expect(h.bridge.canReuse({ sessionId: SESSION, route: 'devin', model: 'default' })).toBe(false)
   })
 
   it('gives a Lead ACP session no bridge', () => {
@@ -187,6 +233,12 @@ describe('ACP Sidekick MCP bridge — declaration gating', () => {
     const h = harness()
     expect(h.bridge.serversFor({ sessionId: 'session-somebody-else', route: 'devin', model: 'default' })).toEqual([])
     expect(h.bridge.serversFor({ sessionId: undefined, route: 'devin', model: 'default' })).toEqual([])
+  })
+
+  it('gives facts that describe another DSH session no bridge', () => {
+    const h = harness()
+    h.facts.current = { ...factsFor(), dshSessionId: 'session-worker-2' }
+    expect(h.bridge.serversFor({ sessionId: SESSION, route: 'devin', model: 'default' })).toEqual([])
   })
 
   it('gives a discovery or compaction request no bridge', () => {
@@ -205,6 +257,12 @@ describe('ACP Sidekick MCP bridge — declaration gating', () => {
     const h = harness()
     h.facts.current = factsFor('implement', 'openai-completions')
     expect(h.bridge.serversFor({ sessionId: SESSION, route: 'devin', model: 'default' })).toEqual([])
+  })
+
+  it('refuses a request for another model on the same ACP route', () => {
+    const h = harness()
+    h.facts.current = { ...factsFor(), route: { provider: 'devin', model: 'default' } }
+    expect(h.bridge.serversFor({ sessionId: SESSION, route: 'devin', model: 'another-model' })).toEqual([])
   })
 
   it('exposes only the configured ceiling, never Fusion internals or route transports', () => {
@@ -228,9 +286,87 @@ describe('ACP Sidekick MCP bridge — declaration gating', () => {
     expect(h.bridge.canReuse(request)).toBe(false)
   })
 
+  it('revokes a former bridge and refuses reuse when the session stops qualifying', async () => {
+    const h = harness()
+    const request = { sessionId: SESSION, route: 'devin', model: 'default' }
+    h.bridge.serversFor(request)
+    expect(await rpc(h.bridge, `token-${SESSION}`, 'tools/list')).toMatchObject({ status: 200 })
+    // The Worker's order became a text order (or its task was gated): no facts at all.
+    h.facts.current = undefined
+    // The ACP session is not reused, and the capability it carried is gone.
+    expect(h.bridge.canReuse(request)).toBe(false)
+    expect((await rpc(h.bridge, `token-${SESSION}`, 'tools/list')).body!.error).toMatchObject({ code: -32001 })
+    // The replacement session opens with no MCP server, and nothing is left to revoke.
+    expect(h.bridge.serversFor(request)).toEqual([])
+    expect(h.bridge.canReuse(request)).toBe(true)
+  })
+
+  it('revokes a former bridge when the Worker is demoted to Lead', async () => {
+    const h = harness()
+    const request = { sessionId: SESSION, route: 'devin', model: 'default' }
+    h.bridge.serversFor(request)
+    h.role.current = 'lead'
+    expect(h.bridge.canReuse(request)).toBe(false)
+    expect((await rpc(h.bridge, `token-${SESSION}`, 'tools/list')).body!.error).toMatchObject({ code: -32001 })
+  })
+
+  it('never lets an auxiliary request revoke the live session’s grant', async () => {
+    const h = harness()
+    const request = { sessionId: SESSION, route: 'devin', model: 'default' }
+    h.bridge.serversFor(request)
+    // Compaction borrows the Worker's session id while the Sidekick keeps running.
+    expect(h.bridge.serversFor({ ...request, purpose: 'compaction' })).toEqual([])
+    expect(h.bridge.canReuse({ ...request, purpose: 'compaction' })).toBe(true)
+    expect(h.bridge.canReuse(request)).toBe(true)
+    expect(await rpc(h.bridge, `token-${SESSION}`, 'tools/list')).toMatchObject({ status: 200 })
+  })
+
+  it('refuses to reuse a session whose brief moved on, and revokes the grant', async () => {
+    const h = harness()
+    const request = { sessionId: SESSION, route: 'devin', model: 'default' }
+    h.bridge.serversFor(request)
+    expect(await listedTools(h.bridge, `token-${SESSION}`)).toEqual(['read', 'bash'])
+    h.facts.current = { ...factsFor(), briefRevision: 1 }
+    expect(h.bridge.canReuse(request)).toBe(false)
+    expect((await rpc(h.bridge, `token-${SESSION}`, 'tools/list')).body!.error).toMatchObject({ code: -32001 })
+  })
+
+  it('refuses to reuse a session whose route model no longer matches the request', async () => {
+    const h = harness()
+    const request = { sessionId: SESSION, route: 'devin', model: 'default' }
+    h.bridge.serversFor(request)
+    // The Worker was moved to another model on the same route: the grant describes the old
+    // model, so the ACP session must be replaced rather than reused.
+    h.facts.current = { ...factsFor(), route: { provider: 'devin', model: 'other-model' } }
+    expect(h.bridge.canReuse(request)).toBe(false)
+    // Brought back in step with the request, a fresh grant is issued again.
+    expect(h.bridge.canReuse({ ...request, model: 'other-model' })).toBe(false)
+    expect(h.bridge.serversFor({ ...request, model: 'other-model' })).toHaveLength(1)
+    expect(h.bridge.canReuse({ ...request, model: 'other-model' })).toBe(true)
+  })
+
+  it('refuses to reuse a session whose grant was issued for another agent', () => {
+    const h = harness()
+    const request = { sessionId: SESSION, route: 'devin', model: 'default' }
+    h.bridge.serversFor(request)
+    // The same DSH session id answering with a different Agent object: the grant is not
+    // transferable, so the ACP session must be replaced rather than reused.
+    h.agents.set(SESSION, { ...agentOf(SESSION), id: 'session-worker-replaced' } as unknown as Agent)
+    expect(h.bridge.canReuse(request)).toBe(false)
+  })
+
   it('narrows an explore order to its read-only tools', () => {
     const h = harness({ workerTools: ['read', 'bash', 'write'] })
     expect(h.bridge.allowedTools(h.agents.get(SESSION)!, factsFor('explore'))).toEqual(['read'])
+  })
+
+  it('never widens the configured ceiling for an explore order', () => {
+    // `read` is visible and read-only, but the user did not grant it to the Sidekick.
+    const h = harness({ workerTools: ['bash'] })
+    expect(h.bridge.allowedTools(h.agents.get(SESSION)!, factsFor('explore'))).toEqual([])
+    expect(h.bridge.allowedTools(h.agents.get(SESSION)!, factsFor('implement'))).toEqual(['bash'])
+    h.facts.current = factsFor('explore')
+    expect(h.bridge.serversFor({ sessionId: SESSION, route: 'devin', model: 'default' })).toEqual([])
   })
 })
 
@@ -252,7 +388,77 @@ describe('ACP Sidekick MCP bridge — MCP endpoint', () => {
     expect(response.body!.error).toMatchObject({ code: -32001 })
   })
 
-  it('refuses an expired token and drops its grant', async () => {
+  it('accepts a request addressed to a configured non-loopback local interface', async () => {
+    // The Host is bound to a concrete interface, so the declaration advertises that address
+    // and its own local clients must be served — while nothing else is.
+    const h = harness({ origin: 'http://192.0.2.10:4000' })
+    h.bridge.serversFor({ sessionId: SESSION, route: 'devin', model: 'default' })
+    const listed = await rpc(h.bridge, `token-${SESSION}`, 'tools/list',
+      undefined, 1, { host: '192.0.2.10:4000', remoteAddress: '192.0.2.10' })
+    expect(listed.status).toBe(200)
+    expect((listed.body!.result as { tools: { name: string }[] }).tools.map(tool => tool.name)).toEqual(['read', 'bash'])
+    // The same request with the configured Origin header present is still accepted.
+    expect(await listedTools(h.bridge, `token-${SESSION}`,
+      { host: '192.0.2.10:4000', remoteAddress: '192.0.2.10', origin: 'http://192.0.2.10:4000' })).toEqual(['read', 'bash'])
+  })
+
+  it('refuses a request whose peer is not this machine', async () => {
+    const h = harness({ origin: 'http://192.0.2.10:4000' })
+    h.bridge.serversFor({ sessionId: SESSION, route: 'devin', model: 'default' })
+    const response = await rpc(h.bridge, `token-${SESSION}`, 'tools/list',
+      undefined, 1, { host: '192.0.2.10:4000', remoteAddress: '203.0.113.9' })
+    expect(response.status).toBe(403)
+    expect(h.calls).toHaveLength(0)
+  })
+
+  it('refuses a request addressed to another Host authority or a foreign Origin', async () => {
+    const h = harness()
+    h.bridge.serversFor({ sessionId: SESSION, route: 'devin', model: 'default' })
+    // A valid token does not help a request that was not addressed to this Host.
+    expect((await rpc(h.bridge, `token-${SESSION}`, 'tools/list', undefined, 1, { host: 'evil.example:4123' })).status).toBe(403)
+    expect((await rpc(h.bridge, `token-${SESSION}`, 'tools/list', undefined, 1, { origin: 'http://evil.example' })).status).toBe(403)
+    expect((await rpc(h.bridge, `token-${SESSION}`, 'tools/list', undefined, 1, { secFetchSite: 'cross-site' })).status).toBe(403)
+  })
+
+  it('accepts an IPv4-mapped loopback peer and refuses a missing Host header', async () => {
+    const h = harness()
+    h.bridge.serversFor({ sessionId: SESSION, route: 'devin', model: 'default' })
+    expect(await listedTools(h.bridge, `token-${SESSION}`, { remoteAddress: '::ffff:127.0.0.1' })).toEqual(['read', 'bash'])
+    expect((await rpc(h.bridge, `token-${SESSION}`, 'tools/list', undefined, 1, { host: '' })).status).toBe(403)
+  })
+
+  it('requires the bearer header: a request without one is unauthorized', async () => {
+    const h = harness()
+    h.bridge.serversFor({ sessionId: SESSION, route: 'devin', model: 'default' })
+    const response = await rpc(h.bridge, undefined, 'tools/list')
+    expect(response.body!.error).toMatchObject({ code: -32001 })
+  })
+
+  it('does not accept a token carried in the URL path', async () => {
+    const h = harness()
+    h.bridge.serversFor({ sessionId: SESSION, route: 'devin', model: 'default' })
+    // The old capability shape: the token as a path segment. It is not an endpoint.
+    const response = await rpc(h.bridge, undefined, 'tools/list', undefined, 1, { url: `${ACP_MCP_PATH}/token-${SESSION}` })
+    expect(response.status).toBe(404)
+    expect(h.calls).toHaveLength(0)
+  })
+
+  it('does not accept a token carried in the query string', async () => {
+    const h = harness()
+    h.bridge.serversFor({ sessionId: SESSION, route: 'devin', model: 'default' })
+    const response = await rpc(h.bridge, undefined, 'tools/list', undefined, 1, { url: `${ACP_MCP_PATH}?token=token-${SESSION}` })
+    expect(response.body!.error).toMatchObject({ code: -32001 })
+  })
+
+  it('refuses a malformed or suffix target without throwing', async () => {
+    const h = harness()
+    h.bridge.serversFor({ sessionId: SESSION, route: 'devin', model: 'default' })
+    expect((await rpc(h.bridge, `token-${SESSION}`, 'tools/list', undefined, 1, { url: `${ACP_MCP_PATH}x` })).status).toBe(404)
+    expect((await rpc(h.bridge, `token-${SESSION}`, 'tools/list', undefined, 1, { url: `${ACP_MCP_PATH}/%zz` })).status).toBe(404)
+    expect((await rpc(h.bridge, `token-${SESSION}`, 'tools/list', undefined, 1, { url: '/elsewhere' })).status).toBe(404)
+  })
+
+  it('refuses an expired token, refuses to reuse its session, and drops the grant', async () => {
     const now = { value: 1_000 }
     const h = harness()
     const bridge = new AcpToolBridge(h.authority, {
@@ -260,9 +466,16 @@ describe('ACP Sidekick MCP bridge — MCP endpoint', () => {
       origin: () => 'http://127.0.0.1:4123',
       now: () => now.value,
       ttlMs: 50,
+      // Deterministic token, so the endpoint check really exercises expiry — not a guess.
+      tokenFactory: () => `token-${SESSION}`,
     })
-    bridge.serversFor({ sessionId: SESSION, route: 'devin', model: 'default' })
+    const request = { sessionId: SESSION, route: 'devin', model: 'default' }
+    bridge.serversFor(request)
+    // Before the deadline the very same token is authorized.
+    expect(await listedTools(bridge, `token-${SESSION}`)).toEqual(['read', 'bash'])
+    expect(bridge.canReuse(request)).toBe(true)
     now.value += 100
+    expect(bridge.canReuse(request)).toBe(false)
     expect((await rpc(bridge, `token-${SESSION}`, 'tools/list')).body!.error).toMatchObject({ code: -32001 })
   })
 
@@ -274,6 +487,15 @@ describe('ACP Sidekick MCP bridge — MCP endpoint', () => {
     // Revoked: even after the facts move back, the token stays dead.
     h.facts.current = factsFor()
     expect((await rpc(h.bridge, `token-${SESSION}`, 'tools/list')).body!.error).toMatchObject({ code: -32001 })
+  })
+
+  it('refuses a token issued under an older brief revision, and revokes it', async () => {
+    const h = harness()
+    h.bridge.serversFor({ sessionId: SESSION, route: 'devin', model: 'default' })
+    // The Lead's feedback moved the brief on: the old grant described the old brief.
+    h.facts.current = { ...factsFor(), briefRevision: 1 }
+    expect((await rpc(h.bridge, `token-${SESSION}`, 'tools/list')).body!.error).toMatchObject({ code: -32001 })
+    expect(h.bridge.canReuse({ sessionId: SESSION, route: 'devin', model: 'default' })).toBe(false)
   })
 
   it('narrows the token to a ceiling that shrank after issuance', async () => {
@@ -416,9 +638,9 @@ describe('ACP adapter — real session/new carries the bridge only for a Sidekic
   let counter = 0
   const logPath = (): string => join(dir, `mcp-${++counter}.jsonl`)
 
-  function adapterWith(h: ReturnType<typeof harness>, log: string): AcpAdapter {
+  function adapterWith(h: ReturnType<typeof harness>, log: string, env: Record<string, string> = {}): AcpAdapter {
     const bridge: AcpBridgeMount = h.bridge
-    return new AcpAdapter(hostFor(), () => new Map([['devin', profile(log)]]), undefined, undefined, bridge)
+    return new AcpAdapter(hostFor(), () => new Map([['devin', profile(log, env)]]), undefined, undefined, bridge)
   }
 
   it('attaches the bridge on session/new for a live Fusion Worker', async () => {
@@ -432,7 +654,9 @@ describe('ACP adapter — real session/new carries the bridge only for a Sidekic
     expect(news).toHaveLength(1)
     expect(news[0]!.mcpServers).toHaveLength(1)
     expect(news[0]!.mcpServers[0]!.type).toBe('http')
-    expect(news[0]!.mcpServers[0]!.url).toContain(`/acp-mcp/token-${SESSION}`)
+    // The fixed endpoint plus the Host origin: the token is in the header, never the URL.
+    expect(news[0]!.mcpServers[0]!.url).toBe('http://127.0.0.1:4123/api/fusion/acp-mcp')
+    expect(news[0]!.mcpServers[0]!.headers).toEqual([{ name: 'Authorization', value: `Bearer token-${SESSION}` }])
   })
 
   it('attaches nothing for a Lead ACP session', async () => {
@@ -519,11 +743,263 @@ describe('ACP adapter — real session/new carries the bridge only for a Sidekic
     const log = logPath()
     const adapter = adapterWith(h, log)
     await runAdapter(adapter, SESSION)
-    // A second turn with a different model replaces the ACP session and its grant.
-    await runAdapter(adapter, SESSION, { model: 'other-model' })
+    // A second turn under a new brief revision is still authorized, but the old ACP
+    // session's grant no longer describes it: replaced, and the new one carries a grant.
+    h.facts.current = { ...factsFor(), briefRevision: 1 }
+    await runAdapter(adapter, SESSION)
     adapter.dispose()
     const news = sessionNews(log)
     expect(news).toHaveLength(2)
     for (const entry of news) expect(entry.mcpServers).toHaveLength(1)
+  })
+
+  it('opens the next ACP session with no MCP server once the session stops qualifying', async () => {
+    const h = harness()
+    const log = logPath()
+    const adapter = adapterWith(h, log)
+    await runAdapter(adapter, SESSION)
+    expect((await rpc(h.bridge, `token-${SESSION}`, 'tools/list')).status).toBe(200)
+    // The Worker is demoted (or its order became text, or its task was gated): no facts.
+    h.role.current = 'lead'
+    await runAdapter(adapter, SESSION)
+    const news = sessionNews(log)
+    expect(news).toHaveLength(2)
+    expect(news[0]!.mcpServers).toHaveLength(1)
+    // The replacement session is opened without any Host-tool bridge.
+    expect(news[1]!.mcpServers).toEqual([])
+    // And the capability the old session carried is dead.
+    expect((await rpc(h.bridge, `token-${SESSION}`, 'tools/list')).body!.error).toMatchObject({ code: -32001 })
+    adapter.dispose()
+  })
+
+  it('revokes the bridge when session setup fails after the declaration', async () => {
+    const h = harness()
+    const log = logPath()
+    const adapter = adapterWith(h, log, { ACP_FAIL_NEW_SESSION: '1' })
+    const chunks = await runAdapter(adapter, SESSION)
+    adapter.dispose()
+    // The agent saw the declaration, then refused the session: the client must revoke it.
+    expect(chunks.at(-1)).toMatchObject({ type: 'finish', reason: { kind: 'error' } })
+    expect(sessionNews(log)).toHaveLength(1)
+    expect(sessionNews(log)[0]!.mcpServers).toHaveLength(1)
+    expect((await rpc(h.bridge, `token-${SESSION}`, 'tools/list')).body!.error).toMatchObject({ code: -32001 })
+  })
+
+  it('revokes the bridge when the turn times out', async () => {
+    const h = harness()
+    const log = logPath()
+    const adapter = new AcpAdapter(hostFor(),
+      () => new Map([['devin', profile(log, { ACP_PROMPT_DELAY_MS: '5000' }, { idleTimeoutMs: 100 })]]),
+      undefined, undefined, h.bridge)
+    const chunks = await runAdapter(adapter, SESSION)
+    expect(JSON.stringify(chunks.at(-1))).toContain('TIMEOUT')
+    expect((await rpc(h.bridge, `token-${SESSION}`, 'tools/list')).body!.error).toMatchObject({ code: -32001 })
+    adapter.dispose()
+  })
+
+  it('revokes the bridge when the consumer stops iterating early', async () => {
+    const h = harness()
+    const log = logPath()
+    const adapter = adapterWith(h, log, { ACP_PROMPT_DELAY_MS: '30' })
+    const controller = new AbortController()
+    const stream = adapter.stream({
+      provider: 'devin', model: 'default', sessionId: SESSION as GenerateOptions['sessionId'],
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'hello' }] }], signal: controller.signal,
+    } as GenerateOptions)
+    // Stop after the first chunk: the turn never finishes, so its capability must go.
+    for await (const _chunk of stream) break
+    expect((await rpc(h.bridge, `token-${SESSION}`, 'tools/list')).body!.error).toMatchObject({ code: -32001 })
+    adapter.dispose()
+  })
+
+  it('never revokes a live Worker capability from a failed auxiliary session setup', async () => {
+    const h = harness()
+    const workerLog = logPath(), compactionLog = logPath()
+    const compact = profile(compactionLog, { ACP_FAIL_NEW_SESSION: '1' })
+    const adapter = new AcpAdapter(hostFor(),
+      () => new Map([['devin', profile(workerLog)], ['compact', compact]]), undefined, undefined, h.bridge)
+    await runAdapter(adapter, SESSION)
+    expect(await listedTools(h.bridge, `token-${SESSION}`)).toEqual(['read', 'bash'])
+    // A compaction request borrows the Worker's DSH session id; its own setup fails.
+    const chunks = await runAdapter(adapter, SESSION, { provider: 'compact', purpose: 'compaction' } as Partial<GenerateOptions>)
+    expect(chunks.at(-1)).toMatchObject({ type: 'finish', reason: { kind: 'error' } })
+    // The Worker's capability is untouched: it still lists (and may call) its real tools.
+    expect(await listedTools(h.bridge, `token-${SESSION}`)).toEqual(['read', 'bash'])
+    const called = await rpc(h.bridge, `token-${SESSION}`, 'tools/call', { name: 'read', arguments: { path: 'a.ts' } })
+    expect(called.body!.result).toEqual({ content: [{ type: 'text', text: 'done' }] })
+    adapter.dispose()
+  })
+
+  it('never revokes a live Worker capability from an aborted auxiliary turn', async () => {
+    const h = harness()
+    const workerLog = logPath(), compactionLog = logPath()
+    const adapter = new AcpAdapter(hostFor(),
+      () => new Map([['devin', profile(workerLog)], ['compact', profile(compactionLog, { ACP_PROMPT_DELAY_MS: '300' })]]),
+      undefined, undefined, h.bridge)
+    await runAdapter(adapter, SESSION)
+    expect(await listedTools(h.bridge, `token-${SESSION}`)).toEqual(['read', 'bash'])
+    const controller = new AbortController()
+    const consume = (async () => {
+      for await (const _chunk of adapter.stream({
+        provider: 'compact', model: 'default', purpose: 'compaction',
+        sessionId: SESSION as GenerateOptions['sessionId'],
+        messages: [{ role: 'user', content: [{ type: 'text', text: 'summarise' }] }], signal: controller.signal,
+      } as GenerateOptions)) { /* drain */ }
+    })().catch(() => {})
+    await until(() => sessionNews(compactionLog).length === 1, 'the compaction session/new')
+    controller.abort()
+    await consume
+    expect(await listedTools(h.bridge, `token-${SESSION}`)).toEqual(['read', 'bash'])
+    adapter.dispose()
+  })
+
+  it('never revokes a live Worker capability from an auxiliary idle timeout', async () => {
+    const h = harness()
+    const workerLog = logPath(), compactionLog = logPath()
+    const adapter = new AcpAdapter(hostFor(),
+      () => new Map([['devin', profile(workerLog)],
+        ['compact', profile(compactionLog, { ACP_PROMPT_DELAY_MS: '5000' }, { idleTimeoutMs: 100 })]]),
+      undefined, undefined, h.bridge)
+    await runAdapter(adapter, SESSION)
+    expect(await listedTools(h.bridge, `token-${SESSION}`)).toEqual(['read', 'bash'])
+    const chunks = await runAdapter(adapter, SESSION, { provider: 'compact', purpose: 'compaction' } as Partial<GenerateOptions>)
+    expect(JSON.stringify(chunks.at(-1))).toContain('TIMEOUT')
+    expect(await listedTools(h.bridge, `token-${SESSION}`)).toEqual(['read', 'bash'])
+    adapter.dispose()
+  })
+
+  it('closes a half-open session exactly once when effort selection fails', async () => {
+    const h = harness()
+    const log = logPath()
+    const adapter = adapterWith(h, log)
+    const closed = vi.spyOn(AcpAgentProcess.prototype, 'closeSession')
+    // A freshly opened session never reached `bindings`, so only the failing dispatch can
+    // close it — and it must do so exactly once.
+    const effort = vi.spyOn(AcpAgentProcess.prototype, 'selectEffort').mockRejectedValue(new Error('effort switch refused'))
+    try {
+      const chunks = await runAdapter(adapter, SESSION, { reasoningEffort: 'high' } as Partial<GenerateOptions>)
+      expect(chunks.at(-1)).toMatchObject({ type: 'finish', reason: { kind: 'error' } })
+      expect(closed).toHaveBeenCalledTimes(1)
+      // The declaration was made, and the capability that came with it is gone.
+      expect(sessionNews(log)[0]!.mcpServers).toHaveLength(1)
+      expect((await rpc(h.bridge, `token-${SESSION}`, 'tools/list')).body!.error).toMatchObject({ code: -32001 })
+    }
+    finally {
+      effort.mockRestore()
+      closed.mockRestore()
+    }
+  })
+
+  it('closes a stored session once when effort selection fails on a reused binding', async () => {
+    const h = harness()
+    const log = logPath()
+    const adapter = adapterWith(h, log)
+    await runAdapter(adapter, SESSION)
+    const closed = vi.spyOn(AcpAgentProcess.prototype, 'closeSession')
+    const effort = vi.spyOn(AcpAgentProcess.prototype, 'selectEffort').mockRejectedValue(new Error('effort switch refused'))
+    try {
+      // The second turn reuses the stored binding, so #revokeBridge owns the close and the
+      // catch must not close it a second time.
+      const chunks = await runAdapter(adapter, SESSION, { reasoningEffort: 'high' } as Partial<GenerateOptions>)
+      expect(chunks.at(-1)).toMatchObject({ type: 'finish', reason: { kind: 'error' } })
+      expect(closed).toHaveBeenCalledTimes(1)
+      expect(sessionNews(log)).toHaveLength(1)
+    }
+    finally {
+      effort.mockRestore()
+      closed.mockRestore()
+    }
+  })
+
+  it('revokes the token before handing the caller a failed prompt', async () => {
+    const h = harness()
+    const log = logPath()
+    const adapter = adapterWith(h, log, { ACP_FAIL_PROMPT: '1' })
+    const controller = new AbortController()
+    let revokedBeforeFinish: number | undefined
+    let last: StreamChunk | undefined
+    for await (const chunk of adapter.stream({
+      provider: 'devin', model: 'default', sessionId: SESSION as GenerateOptions['sessionId'],
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'hello' }] }], signal: controller.signal,
+    } as GenerateOptions)) {
+      last = chunk
+      if (chunk.type === 'finish' && revokedBeforeFinish === undefined) {
+        // The caller stops right after the error finish; the grant must already be dead.
+        revokedBeforeFinish = (await rpc(h.bridge, `token-${SESSION}`, 'tools/list')).body!.error
+          ? -32001
+          : 0
+      }
+    }
+    expect(last).toMatchObject({ type: 'finish', reason: { kind: 'error' } })
+    expect(revokedBeforeFinish).toBe(-32001)
+    expect((await rpc(h.bridge, `token-${SESSION}`, 'tools/list')).body!.error).toMatchObject({ code: -32001 })
+    adapter.dispose()
+  })
+
+  it('revokes the bridge when the route profile changes or disappears', async () => {
+    const h = harness()
+    const log = logPath()
+    let profiles = new Map([['devin', profile(log)]])
+    const adapter = new AcpAdapter(hostFor(), () => profiles, undefined, undefined, h.bridge)
+    await runAdapter(adapter, SESSION)
+    expect((await rpc(h.bridge, `token-${SESSION}`, 'tools/list')).status).toBe(200)
+    profiles = new Map()
+    adapter.sync()
+    expect((await rpc(h.bridge, `token-${SESSION}`, 'tools/list')).body!.error).toMatchObject({ code: -32001 })
+    adapter.dispose()
+  })
+
+  it('revokes the bridge when the adapter is disposed', async () => {
+    const h = harness()
+    const log = logPath()
+    const adapter = adapterWith(h, log)
+    await runAdapter(adapter, SESSION)
+    expect((await rpc(h.bridge, `token-${SESSION}`, 'tools/list')).status).toBe(200)
+    adapter.dispose()
+    expect((await rpc(h.bridge, `token-${SESSION}`, 'tools/list')).body!.error).toMatchObject({ code: -32001 })
+  })
+
+  it('keeps the bridge across a successful reused turn', async () => {
+    const h = harness()
+    const log = logPath()
+    const adapter = adapterWith(h, log)
+    await runAdapter(adapter, SESSION)
+    await runAdapter(adapter, SESSION)
+    // One ACP session, one grant, and it still lists the real tools after the second
+    // ordinary turn — an unauthorized JSON-RPC error would also answer HTTP 200, so the
+    // assertion is the tool list itself.
+    expect(sessionNews(log)).toHaveLength(1)
+    expect(await listedTools(h.bridge, `token-${SESSION}`)).toEqual(['read', 'bash'])
+    adapter.dispose()
+    // Disposal is what ends it.
+    expect((await rpc(h.bridge, `token-${SESSION}`, 'tools/list')).body!.error).toMatchObject({ code: -32001 })
+  })
+
+  it('replaces the ACP session and re-issues the grant when the Worker model changes with the route', async () => {
+    const h = harness()
+    const log = logPath()
+    // This agent offers two models, so the Worker can really be moved between them.
+    const adapter = adapterWith(h, log, { ACP_MODELS: 'default,other-model' })
+    await runAdapter(adapter, SESSION)
+    // Both the requested model and the Worker's route model moved: still authorized.
+    h.facts.current = { ...factsFor(), route: { provider: 'devin', model: 'other-model' } }
+    const chunks = await runAdapter(adapter, SESSION, { model: 'other-model' })
+    expect(chunks.at(-1)).toMatchObject({ type: 'finish', reason: { kind: 'stop' } })
+    const news = sessionNews(log)
+    expect(news).toHaveLength(2)
+    for (const entry of news) expect(entry.mcpServers).toHaveLength(1)
+    expect(await listedTools(h.bridge, `token-${SESSION}`)).toEqual(['read', 'bash'])
+    adapter.dispose()
+  })
+
+  it('attaches nothing when the requested model is not the Worker’s route model', async () => {
+    const h = harness()
+    const log = logPath()
+    const adapter = adapterWith(h, log, { ACP_MODELS: 'default,other-model' })
+    await runAdapter(adapter, SESSION, { model: 'other-model' })
+    const news = sessionNews(log)
+    expect(news).toHaveLength(1)
+    expect(news[0]!.mcpServers).toEqual([])
+    adapter.dispose()
   })
 })

@@ -17,6 +17,7 @@ import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { installModelSelection } from '@deepseek-ai/dsh-agent'
+import type { Agent } from '@deepseek-ai/dsh-agent'
 import * as LlmRetry from '@deepseek-ai/dsh-llm-retry'
 import { createUserMessage, ToolCallId, resolveRetryPolicy } from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
@@ -36,6 +37,7 @@ import { mountNativeShell, shellTool, shellCommand, py, python } from './shell-f
 import CodeRuntime from '@deepseek-ai/dsh-ptc-runtime-node'
 import { JobId } from '@deepseek-ai/dsh-jobs'
 import { FusionCoordinator } from '../src/host/coordinator.js'
+import { AcpToolBridge } from '../src/host/acp/bridge.js'
 import { SqliteFusionStore } from '../src/task/sqlite-store.js'
 import { sha256Hex } from '../src/digest.js'
 import { newLedger } from '../src/usage/ledger.js'
@@ -4803,5 +4805,91 @@ describe.skipIf(process.platform === 'win32')('exploration reports when a fresh 
       : workerToolResults.join('\n')
     expect(observed).toContain(message)
     expect(state.exploration?.status).not.toBe('completed')
+  })
+})
+
+describe('ACP Sidekick bridge authority over the live coordinator', () => {
+  /**
+   * A bridge over the real coordinator: the same wiring `installAcp` uses, so these tests
+   * prove the coordinator's own gates decide whether a capability can exist at all.
+   */
+  function bridgeOver(ctx: Context, coordinator: FusionCoordinator) {
+    return new AcpToolBridge({
+      agentOf: id => ctx.agents.get(SessionId(id)),
+      workerFacts: agent => coordinator.acpWorkerFacts(agent),
+      schemasOf: agent => ctx.tools.schemas(agent),
+      execute: input => ctx.tools.execute(input),
+    }, {
+      workerTools: coordinator.options.workerTools ?? [],
+      origin: () => 'http://127.0.0.1:1',
+      tokenFactory: () => 'live-token',
+    })
+  }
+
+  it('grants Sidekick facts only while the dispatched Worker may run, and withdraws them on pause', async () => {
+    let gate = ''
+    const { ctx, parent, coordinator, taskId, workspace, adapter } = await setup([
+      delegate(false), textResponse('Working.'),
+    ], [() => backgroundEdit(gate), report('premature-report'), request => waitForJob(request)], { jobs: true, bridgeTransport: true })
+    gate = join(workspace, '..', 'never-release-acp-bridge')
+    parent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Fix addition.' }] }))
+    await parent.whenIdle()
+    await waitForNative(() => expect(adapter.requests.filter(row => row.model === 'worker')).toHaveLength(3))
+    const state = coordinator.state(taskId)
+    const childId = state.acceptedChild!
+    const child = ctx.agents.get(SessionId(childId))!
+    // The Worker is mid-order on an ACP route: exactly the dispatch the bridge exists for.
+    expect(coordinator.acpWorkerFacts(child)).toMatchObject({
+      dshSessionId: childId,
+      taskId,
+      workOrderId: state.currentWorkOrder!.id,
+      briefRevision: 0,
+      mode: 'implement',
+      route: { provider: 'antigravity', model: 'worker' },
+    })
+    const bridge = bridgeOver(ctx, coordinator)
+    expect(bridge.serversFor({ sessionId: childId, route: 'antigravity', model: 'worker' })).toHaveLength(1)
+    // Pausing the task gates the Worker's own turn, so it also ends the capability.
+    await coordinator.pause(parent)
+    expect(coordinator.acpWorkerFacts(child)).toBeUndefined()
+    expect(bridge.canReuse({ sessionId: childId, route: 'antigravity', model: 'worker' })).toBe(false)
+    // The Lead never had a claim, and neither does a plain Fusion turn on another provider.
+    expect(coordinator.acpWorkerFacts(parent)).toBeUndefined()
+    expect(bridge.serversFor({ sessionId: childId, route: 'test-native', model: 'worker' })).toEqual([])
+  })
+
+  it('reports no Sidekick facts once the Worker has submitted its report', async () => {
+    const { ctx, parent, coordinator, taskId } = await setup([
+      delegate(), review('accept'), textResponse('Verified.'),
+    ], [edit(), report()], { bridgeTransport: true })
+    // Capture the Worker while it exists: DSH disposes it after its report is accepted.
+    const workers: Agent[] = []
+    ctx.on('agent/created', ({ agent }) => { if (agent.session.header.parentSession) workers.push(agent) })
+    parent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ kind: 'text', text: 'Correct addition.' }] }))
+    await parent.whenIdle()
+    const state = coordinator.state(taskId)
+    // The order itself is still current; only the submission and the completed task gate it.
+    expect(state).toMatchObject({ phase: 'COMPLETED', currentWorkOrder: { mode: 'implement' } })
+    const worker = workers.find(agent => agent.id === state.acceptedChild)!
+    expect(worker).toBeDefined()
+    expect(coordinator.acpWorkerFacts(worker)).toBeUndefined()
+  })
+
+  it('reports no Sidekick facts for an Agent that is not this task’s dispatched Worker', async () => {
+    let gate = ''
+    const { ctx, parent, coordinator, taskId, workspace } = await setup([
+      delegate(false), textResponse('Working.'),
+    ], [() => backgroundEdit(gate), report('premature-report'), request => waitForJob(request)], { jobs: true, bridgeTransport: true })
+    gate = join(workspace, '..', 'never-release-acp-stranger')
+    parent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ kind: 'text', text: 'Fix addition.' }] }))
+    await parent.whenIdle()
+    await waitForNative(() => expect(coordinator.state(taskId).acceptedChild).toBeDefined())
+    const child = ctx.agents.get(SessionId(coordinator.state(taskId).acceptedChild!))!
+    expect(coordinator.acpWorkerFacts(child)).toBeDefined()
+    // Neither the Lead nor any other live session of this Host is a Sidekick dispatch.
+    expect(coordinator.acpWorkerFacts(parent)).toBeUndefined()
+    const stranger = (await ctx.agents.create({ sessionId: SessionId('session-stranger'),
+      meta: { cwd: workspace }, agentOptions: { provider: 'test-native', model: 'ordinary' } })).agent
+    expect(coordinator.acpWorkerFacts(stranger)).toBeUndefined()
   })
 })

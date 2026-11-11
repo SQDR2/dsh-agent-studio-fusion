@@ -8,6 +8,14 @@
  * authority accepts (a live Fusion Sidekick turn on this route), the adapter attaches the
  * Host-tool MCP bridge to that `session/new`. Every other request — Lead turns, plain ACP
  * route use, discovery, compaction, text mode, absent sessions — opens with no servers.
+ *
+ * The bridge lives exactly as long as the dispatch that earned it. The adapter revokes it
+ * (and aborts its in-flight calls) when the turn aborts, times out or is abandoned by its
+ * consumer, when the ACP session is replaced, when setup fails after the declaration, when
+ * the route's profile changes or disappears, when the adapter is disposed, and whenever
+ * the bridge itself reports that the reused session's authorization no longer holds. A
+ * plain successful turn keeps it, because that same session is reused for the next step of
+ * the same work order.
  */
 
 import type { ContentBlock as AcpContentBlock, PromptResponse, Usage } from '@agentclientprotocol/sdk'
@@ -90,17 +98,30 @@ export interface AcpBridgeMount {
   serversFor(request: AcpBridgeRequest): AcpMcpServerHttp[]
   /**
    * Whether an ACP session may keep being reused: a reused session never runs
-   * `session/new`, so its bridge token must still match the current work order.
+   * `session/new`, so its bridge token must still match the current work order. `false`
+   * means the session is replaced, and the bridge it carried has been revoked.
    */
   canReuse?(request: AcpBridgeRequest): boolean
   revokeSession(dshSessionId: string): void
   cancelInflight(dshSessionId: string): void
 }
 
+/** The provider route one binding key belongs to: the key is `${route}\u0000${sessionId}`. */
+function routeOfKey(key: string): string {
+  return key.slice(0, key.indexOf('\u0000'))
+}
+
+/** The DSH session one binding key belongs to: the key is `${route}\u0000${sessionId}`. */
+function sessionOfKey(key: string): string {
+  return key.slice(key.indexOf('\u0000') + 1)
+}
+
 export class AcpAdapter extends LlmAdapter {
   private readonly agents = new Map<string, { process: AcpAgentProcess, facts: string }>()
   private readonly bindings = new Map<string, Binding>()
   private readonly turns = new Map<string, PermissionTurn>()
+  /** DSH sessions this adapter declared a Host-tool bridge for, so teardown can revoke them. */
+  private readonly bridged = new Set<string>()
   private readonly retryPolicy: ResolvedRetryPolicy = resolveRetryPolicy(NO_RETRY, `${PLUGIN_ID}: retryPolicy`)
 
   constructor(
@@ -119,13 +140,20 @@ export class AcpAdapter extends LlmAdapter {
       const profile = profiles.get(route)
       if (profile !== undefined && spawnFacts(profile) === entry.facts)
         continue
+      // Revoke and close this route's bridged sessions while its process is still alive,
+      // then dispose the process that owns them.
+      this.dropBindings(route)
       entry.process.dispose()
       this.agents.delete(route)
-      this.dropBindings(route)
     }
   }
 
   dispose(): void {
+    // Nothing this adapter opened may outlive it: every grant it declared is revoked, every
+    // in-flight bridged call aborted, and every ACP session it bound is closed while its
+    // owning process is still alive.
+    for (const dshSessionId of [...this.bridged])
+      this.#revokeBridge(dshSessionId)
     for (const entry of this.agents.values())
       entry.process.dispose()
     this.agents.clear()
@@ -324,7 +352,21 @@ export class AcpAdapter extends LlmAdapter {
     catch (error) {
       if (finished)
         throw error
+      // A thrown dispatch error ends this dispatch's capability *before* the caller sees the
+      // error finish: a caller may stop consuming right after it, so waiting for this
+      // generator to close would leave the grant alive. An auxiliary call owns none, so its
+      // failure must leave the live Worker's grant untouched.
+      if ((options.purpose as string | undefined) === undefined)
+        this.#revokeBridge(options.sessionId as string | undefined)
       yield { type: 'finish', reason: options.signal?.aborted ? { kind: 'aborted', failure: failure('ABORTED', 'request aborted') } : { kind: 'error', failure: failureOf(error) } }
+    }
+    finally {
+      // The consumer stopped iterating before the turn settled, so it never saw a finish
+      // chunk: the dispatch is over and its Host-tool capability goes with it. An
+      // auxiliary request owns no capability, so it never revokes the live one belonging to
+      // the session it borrows the id from.
+      if (!finished && (options.purpose as string | undefined) === undefined)
+        this.#revokeBridge(options.sessionId as string | undefined)
     }
   }
 
@@ -342,6 +384,10 @@ export class AcpAdapter extends LlmAdapter {
     const purpose = options.purpose as string | undefined
     const dshSessionId = options.sessionId as string | undefined
     const ephemeral = dshSessionId === undefined || purpose !== undefined
+    // Only a non-auxiliary dispatch owns the Host-tool capability bound to this DSH session.
+    // An auxiliary call (discovery, compaction, session-title) borrows that session id, so it
+    // must never revoke, abort or close the capability a live Worker turn holds.
+    const capability = ephemeral ? undefined : dshSessionId
     const key = `${route}\u0000${dshSessionId ?? ''}`
     const cwd = this.cwdOf(dshSessionId, profile)
     const conversation = conversationOf(options)
@@ -360,24 +406,48 @@ export class AcpAdapter extends LlmAdapter {
     let prompt = reused ? incrementalPrompt(conversation, consumedBefore, route, images) : undefined
     if (prompt === undefined || binding === undefined) {
       reused = false
-      if (binding !== undefined) {
-        // Replacing the ACP session invalidates its Host-tool bridge before the new one is issued.
-        this.bridge?.revokeSession(dshSessionId ?? '')
-        agent.closeSession(binding.session)
-      }
+      // Replacing the ACP session invalidates its Host-tool bridge before the new one is
+      // issued; #revokeBridge closes that stored session on its own process.
+      if (binding !== undefined)
+        this.#revokeBridge(capability)
       const servers = this.#bridgeServers(bridgeRequest)
-      const session = await agent.newSession(cwd, signal, servers)
-      await agent.selectModel(session, options.model, signal)
-      binding = { session, cwd, model: options.model, consumed: [], usage: undefined }
+      let opened: AcpSession | undefined
+      try {
+        opened = await agent.newSession(cwd, signal, servers)
+        await agent.selectModel(opened, options.model, signal)
+      }
+      catch (error) {
+        // A failed setup ends the capability this very dispatch was authorized for: revoke
+        // the token and abort anything already dispatched under it. The half-open ACP session
+        // was never stored as a binding, so it is closed here and only here.
+        this.#revokeBridge(capability)
+        if (opened !== undefined)
+          agent.closeSession(opened)
+        throw error
+      }
+      binding = { session: opened, cwd, model: options.model, consumed: [], usage: undefined }
       images = { read: new Map(), wanted: new Map() }
       prompt = fullPrompt(conversation, system, images)
     }
     const wantedEffort = effort ?? binding.session.efforts?.initial
-    if (wantedEffort !== undefined)
-      await agent.selectEffort(binding.session, wantedEffort, signal)
-    if (images.wanted.size > 0 && agent.supportsImages) {
-      images = { read: await this.readImages(images.wanted, signal), wanted: new Map() }
-      prompt = reused ? incrementalPrompt(conversation, consumedBefore, route, images) ?? prompt : fullPrompt(conversation, system, images)
+    try {
+      if (wantedEffort !== undefined)
+        await agent.selectEffort(binding.session, wantedEffort, signal)
+      if (images.wanted.size > 0 && agent.supportsImages) {
+        images = { read: await this.readImages(images.wanted, signal), wanted: new Map() }
+        prompt = reused ? incrementalPrompt(conversation, consumedBefore, route, images) ?? prompt : fullPrompt(conversation, system, images)
+      }
+    }
+    catch (error) {
+      // The turn never started, so the authorization *this* dispatch carried must not
+      // survive it. A freshly opened session is not in `bindings` yet (and an ephemeral one
+      // never is), so #revokeBridge cannot own it — close it here, exactly once. A stored,
+      // reused binding is already closed by #revokeBridge through its owning process.
+      const stored = !ephemeral && this.bindings.get(key) === binding
+      this.#revokeBridge(capability)
+      if (!stored)
+        agent.closeSession(binding.session)
+      throw error
     }
     if (!ephemeral)
       this.bindings.set(key, binding)
@@ -407,6 +477,10 @@ export class AcpAdapter extends LlmAdapter {
       idleTimer = setTimeout(() => {
         facts.cancelRequested = true
         agent.cancel(session)
+        // A turn that timed out is over, and the capability this dispatch owned ends with
+        // it: the next turn must be authorized again rather than reuse this grant. An
+        // auxiliary call owns none, so a timed-out compaction leaves the Worker's alone.
+        this.#revokeBridge(capability)
         settle({ kind: 'timeout' })
       }, profile.idleTimeoutMs)
     }
@@ -415,13 +489,10 @@ export class AcpAdapter extends LlmAdapter {
       facts.cancelRequested = true
       agent.cancel(session)
       // A cancelled turn ends the capability it was running under: stop its in-flight
-      // bridged calls, revoke the token, and drop the ACP binding so the next turn opens a
-      // fresh session with a freshly authorized bridge.
-      if (dshSessionId !== undefined) {
-        this.bridge?.cancelInflight(dshSessionId)
-        this.bridge?.revokeSession(dshSessionId)
-        this.bindings.delete(key)
-      }
+      // bridged calls, revoke the token, and close the ACP binding so the next turn opens a
+      // fresh session with a freshly authorized bridge. An auxiliary call borrows the DSH
+      // session id only, and must leave the live Worker's capability untouched.
+      this.#revokeBridge(capability)
       cancelTimer = setTimeout(() => settle({ kind: 'aborted' }), CANCEL_GRACE_MS)
     }
 
@@ -467,8 +538,13 @@ export class AcpAdapter extends LlmAdapter {
       clearTimeout(cancelTimer)
       signal?.removeEventListener('abort', onAbort)
       this.turns.delete(session.sessionId)
-      if (outcome === undefined)
+      if (outcome === undefined) {
+        // The consumer stopped iterating before the turn settled: cancel this dispatch's own
+        // prompt (a compaction still running in the agent must not be left behind), and end
+        // the capability it owned — never one an auxiliary call only borrowed.
         agent.cancel(session)
+        this.#revokeBridge(capability)
+      }
       if (ephemeral)
         agent.closeSession(session)
     }
@@ -481,11 +557,39 @@ export class AcpAdapter extends LlmAdapter {
   #bridgeServers(request: AcpBridgeRequest): AcpMcpServerHttp[] {
     if (this.bridge === undefined) return []
     try {
-      return this.bridge.serversFor(request)
+      const servers = this.bridge.serversFor(request)
+      if (servers.length > 0 && request.sessionId !== undefined)
+        this.bridged.add(request.sessionId)
+      return servers
     }
     catch (error) {
       this.host.logger.warn(`${PLUGIN_ID}: refusing an ACP bridge declaration after a failed authorization check`, error)
       return []
+    }
+  }
+
+  /**
+   * End one DSH session's Host-tool capability: abort its in-flight calls, revoke its
+   * grant, and close the ACP session that carried it, so the next turn opens a fresh ACP
+   * session that is authorized from scratch. Another session's grant is never touched.
+   *
+   * The binding is removed *before* its session is closed: a refused or failed close must
+   * not leave a stale binding behind that a later turn would try to reuse. Removing it
+   * first also makes the close happen exactly once per session.
+   */
+  #revokeBridge(dshSessionId: string | undefined): void {
+    if (dshSessionId === undefined) return
+    this.bridged.delete(dshSessionId)
+    this.bridge?.cancelInflight(dshSessionId)
+    this.bridge?.revokeSession(dshSessionId)
+    for (const key of [...this.bindings.keys()]) {
+      if (sessionOfKey(key) !== dshSessionId) continue
+      const binding = this.bindings.get(key)
+      this.bindings.delete(key)
+      if (binding === undefined) continue
+      // The owning process closes its own session; a route that was disposed owns no agents
+      // entry any more and its sessions are already gone with the process.
+      this.agents.get(routeOfKey(key))?.process.closeSession(binding.session)
     }
   }
 
@@ -578,9 +682,11 @@ export class AcpAdapter extends LlmAdapter {
   }
 
   private dropBindings(route: string): void {
-    for (const key of this.bindings.keys()) {
+    // A route whose profile changed or disappeared loses its ACP sessions, and with them
+    // any Host-tool capability those sessions carried.
+    for (const key of [...this.bindings.keys()]) {
       if (key.startsWith(`${route}\u0000`))
-        this.bindings.delete(key)
+        this.#revokeBridge(sessionOfKey(key))
     }
   }
 }

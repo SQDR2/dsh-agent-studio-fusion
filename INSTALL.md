@@ -2,7 +2,8 @@
 
 [中文](INSTALL.zh.md) · Product pages: [README.md](README.md) (中文), [README.en.md](README.en.md)
 
-Requires **DeepSeek Harness 0.2.0-rc.2 or 0.2.1-rc.2**. Other versions are not supported.
+Requires **DeepSeek Harness `>=0.2.1-rc.5 <0.3.0-0`** on **Node 24 or newer**. Other versions are not supported;
+the 0.2.0 series is no longer supported.
 
 > This package is a fork of [`aa2246740/dsh-model-fusion`](https://github.com/aa2246740/dsh-model-fusion), published as
 > `@sqdr2/dsh-fusion`. Because the package name changed, an installed `dsh-model-fusion` is not upgraded automatically;
@@ -29,9 +30,7 @@ dsh plugin --profile web add github:SQDR2/dsh-fusion
 If `dsh` is not on PATH, pin one supported CLI:
 
 ```sh
-npx @deepseek-ai/dsh@0.2.0-rc.2 plugin --profile web add @sqdr2/dsh-fusion
-# or
-npx @deepseek-ai/dsh@0.2.1-rc.2 plugin --profile web add @sqdr2/dsh-fusion
+npx @deepseek-ai/dsh@0.2.1-rc.5 plugin --profile web add @sqdr2/dsh-fusion
 ```
 
 This writes only the `web` profile. Reopen a running Web Host once and reload the page.
@@ -77,7 +76,11 @@ Click **Plugins** in the left sidebar → **Add plugin**, and enter in "Package 
    [README.en.md](README.en.md#using-agy-as-the-sidekick-dsh-agy-worker).
 2. Open the **Fusion** entry in the left sidebar, choose the Lead and the Sidekick, and save.
 3. Select **Fusion · auto** in the model menu.
-4. On Windows, install PowerShell 7 and make sure `pwsh` is on the PATH used to launch DSH. Windows support was verified with v0.2.1 on Windows Server 2022 (later versions change only platform-independent code or packaging and were re-tested on macOS); Windows 10/11 remain unverified. On Linux, run the read-only check in [README.en.md](README.en.md#support) before real use.
+4. On Windows, install PowerShell 7 and make sure `pwsh` is on the PATH used to launch DSH. That is the only
+   Windows evidence this project has, and it is historical: plugin v0.2.1 was verified on Windows Server 2022 with
+   Node 22.23.3 and DSH 0.1.7-rc.2. That combination is far outside the current baseline (Node 24,
+   DSH `>=0.2.1-rc.5 <0.3.0-0`), so Windows is unverified for this release; Windows 10/11 were never verified. On
+   Linux, run the read-only check in [README.en.md](README.en.md#support) before real use.
 
 ## Uninstall
 
