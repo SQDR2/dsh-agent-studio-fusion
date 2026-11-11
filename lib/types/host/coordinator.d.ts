@@ -90,6 +90,8 @@ interface DelegateInput {
     block?: boolean;
     /** Verbatim quotes of the user's hard requirements; frozen as user-provenance constraints. */
     requirements?: string[];
+    /** Authority actions the Lead grants for this work order; anything else stays refused on the Worker's shell. */
+    authority?: readonly string[];
 }
 /** Whitespace-insensitive, otherwise exact: a requirement must be the user's own words. */
 export declare const normalizeQuote: (text: string) => string;

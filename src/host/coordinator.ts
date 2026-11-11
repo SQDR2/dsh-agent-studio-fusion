@@ -10,7 +10,7 @@ import { NativeWorkerNotices } from './native-worker-notices.js'
 import { SessionId as NativeSessionId } from '@deepseek-ai/dsh-session'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ToolExecution, ToolRunContext } from '@deepseek-ai/dsh-tools'
-import type { ExplorationReport, FusionEvent, Role, TaskId, WorkerReport, WorkOrder } from '../contracts.js'
+import type { AuthorityAction, ExplorationReport, FusionEvent, Role, TaskId, WorkerReport, WorkOrder } from '../contracts.js'
 import { EpochId, OperationId, SessionId, SnapshotId, TaskId as asTaskId, WorkOrderId } from '../contracts.js'
 import { digestOf } from '../digest.js'
 import { WorkspaceWriteLease } from '../execution/write-lease.js'
@@ -62,6 +62,7 @@ import { evidencePage } from './evidence-page.js'
 import { readNativeEvidence } from './native-evidence.js'
 import { isRouteTransportName, registeredRouteTransport, withRouteTransport } from './route-transport.js'
 import { isRead, READ_TOOLS } from './read-tools.js'
+import { AUTHORITY_ACTIONS, workerAuthorityProblem } from './authority.js'
 
 const textOutput = { schema: { type: 'string' as const }, render: (_args: unknown, text: string) => [{ type: 'text' as const, text }] }
 const stringList = { type: 'array' as const, items: { type: 'string' as const }, required: true as const }
@@ -216,6 +217,8 @@ interface DelegateInput {
   block?: boolean
   /** Verbatim quotes of the user's hard requirements; frozen as user-provenance constraints. */
   requirements?: string[]
+  /** Authority actions the Lead grants for this work order; anything else stays refused on the Worker's shell. */
+  authority?: readonly string[]
 }
 
 /** Whitespace-insensitive, otherwise exact: a requirement must be the user's own words. */
@@ -1204,7 +1207,13 @@ export class FusionCoordinator {
       if (state.currentWorkOrder && !pathAllowed(path, state.currentWorkOrder.allowedPaths)) return 'The edit is outside frozen allowedPaths'
     }
     if (isShellTool(exec.name)) {
-      const args = exec.arguments as { workdir?: string; run_in_background?: boolean }
+      const args = exec.arguments as { workdir?: string; run_in_background?: boolean; command?: unknown }
+      // Holding the write lease is not publication authority: commits, pushes, tags, releases, pull
+      // requests and CI runs are the Lead's, unless this work order granted that exact action.
+      if (role === 'worker' && typeof args.command === 'string') {
+        const authority = workerAuthorityProblem(args.command, state.currentWorkOrder?.authority ?? [])
+        if (authority) return authority
+      }
       if (args.run_in_background) {
         const issue = this.effects.backgroundProblem(exec)
         if (issue) return issue
@@ -1273,6 +1282,21 @@ export class FusionCoordinator {
     // Lead cache hit 69% against 94% alone). Phase rules stay enforced where they belong: in each tool and
     // the guard, whose refusals say what to do instead. Takeover appears only once the Host unlocks it.
     return this.#escalation(binding) ? [...SEPARATED_LEAD_TOOLS, 'fusion_takeover'] : SEPARATED_LEAD_TOOLS
+  }
+
+  /**
+   * The authority actions this work order grants. Absent means none: the Sidekick
+   * may change files inside allowedPaths, but commits, pushes, tags, publishes,
+   * releases, pull requests and CI runs stay with the Lead, which owns the
+   * user-facing consequences. The grant is frozen with the order, so a rework
+   * brief cannot widen it.
+   */
+  #authorityGrant(requested: readonly string[] | undefined, mode: 'explore' | 'implement' | 'text'): readonly AuthorityAction[] {
+    if (!requested?.length) return []
+    const unknown = requested.filter(action => !AUTHORITY_ACTIONS.includes(action as AuthorityAction))
+    if (unknown.length) throw new Error(`Unknown authority action(s): ${unknown.join(', ')}. Allowed: ${AUTHORITY_ACTIONS.join(', ')}.`)
+    if (mode !== 'implement') throw new Error('Authority grants belong to implementation work: exploration and text-only orders run no shell commands.')
+    return [...new Set(requested as readonly AuthorityAction[])]
   }
 
   /** undefined = allow now, string = refuse, false = not decided here (continue the ordinary guard). */
@@ -1562,13 +1586,16 @@ export class FusionCoordinator {
       && event.type === 'user/message' && (event.data.source === undefined || event.data.source.kind === 'user'))
       .flatMap(event => event.type === 'user/message' ? event.data.content.filter(block => block.type === 'text').map(block => block.text) : [])
     const requirements = this.#requirements(binding, mode, args.requirements, userTexts)
+    const authority = this.#authorityGrant(args.authority, mode)
     const order: WorkOrder = {
       schemaVersion: 1, mode, taskId: binding.taskId, id: WorkOrderId(randomUUID()), operationId: OperationId(randomUUID()), revision: this.state(binding.taskId).revision,
       goal: args.goal, constraints: [...args.constraints.map((text, i) => ({ id: `constraint-${i}`, text, mandatory: true, provenance: 'inferred' as const,
         source: { sessionId: SessionId(agent.id), eventSeq: source.seq, messageId: source.data.id } })),
       ...requirements.map((text, i) => ({ id: `requirement-${i}`, text, mandatory: true, provenance: 'user' as const,
         source: { sessionId: SessionId(agent.id), eventSeq: source.seq, messageId: source.data.id } }))], acceptance: [], allowedPaths,
-      forbiddenActions: [...(mode === 'explore' ? ['Write files or run commands during read-only exploration'] : []), 'Change unrelated paths', 'Weaken frozen acceptance checks', 'Bypass native tool permissions'], baseSnapshot: base.id,
+      forbiddenActions: [...(mode === 'explore' ? ['Write files or run commands during read-only exploration'] : []), 'Change unrelated paths', 'Weaken frozen acceptance checks', 'Bypass native tool permissions',
+        ...(mode === 'implement' && !authority.length ? ['Commit, push, tag, publish, release, open a pull request or trigger CI; report the action instead'] : [])],
+      ...(authority.length ? { authority } : {}), baseSnapshot: base.id,
       evidence: explored ? priorState.exploration!.sources.map(source => source.excerpt) : [], decisions: [], uncertainties: [], policy: {
         maxWorkerSteps: this.options.maxWorkerSteps ?? DEFAULT_POLICY.maxWorkerSteps, maxReworkRounds: this.options.maxReworkRounds ?? DEFAULT_POLICY.maxReworkRounds,
         maxCapabilityUpgrades: 0, commandMaxSeconds: this.options.commandMaxSeconds ?? DEFAULT_POLICY.commandMaxSeconds,
@@ -2335,8 +2362,10 @@ export class FusionCoordinator {
         allowedPaths: { ...stringList, description: 'Workspace-relative files or directories the Worker may change across all planned stages, including regression tests. A directory grants every file under it; a trailing /** is accepted as the same grant, other wildcards are refused. The Worker cannot expand this set; after a report you can add paths with fusion_rework addAllowedPaths.' },
         block: { type: 'boolean', description: 'Default true. False permits read-only Lead work while the Worker retains write ownership.' },
         checks: { type: 'array', required: true, items: checkItem, description: 'Acceptance commands the Host runs after the Worker reports; [] for review-only work.' },
-        requirements: { ...optionalStringList, description: 'The user\'s hard requirements as exact quotes of their messages (required behaviour, names, strings, formats, acceptance criteria), 1-20 items. The Host verifies each quote against the user\'s words, freezes them for the Sidekick, and your accept must give one verdict per item.' } }, output: textOutput,
-      execute: (args, exec) => this.delegate(agent, { ...args, constraints: args.constraints ?? [], checks: normalizeChecks(args.checks), requirements: args.requirements ?? [] }, exec) })))
+        requirements: { ...optionalStringList, description: 'The user\'s hard requirements as exact quotes of their messages (required behaviour, names, strings, formats, acceptance criteria), 1-20 items. The Host verifies each quote against the user\'s words, freezes them for the Sidekick, and your accept must give one verdict per item.' },
+        authority: { type: 'array', items: { type: 'string', enum: [...AUTHORITY_ACTIONS] },
+          description: 'Default none. Authority actions you grant for this work order: commit, push, tag, publish, release, pr, ci. The write lease covers files inside allowedPaths, not what leaves the workspace or rewrites it: without a grant the Host refuses these on the Sidekick\'s shell. Grant only what the user actually asked for, and keep the user-facing consequences (PR text, release notes, CI results) yours.' } }, output: textOutput,
+      execute: (args, exec) => this.delegate(agent, { ...args, constraints: args.constraints ?? [], checks: normalizeChecks(args.checks), requirements: args.requirements ?? [], authority: args.authority ?? [] }, exec) })))
     dispose.push(scope.tools.register(defineTool({ name: 'fusion_rework', description: 'Send specific Lead-authored feedback to the same persistent Worker, including advancing a planned implementation stage. Before a report this continues unfinished work within the Worker-step budget; after a report it consumes a rework round. Active generation and native job waits can be replaced without restarting a tracked job; an active foreground tool finishes before the new brief. Keep durable requirements unchanged. Do not suggest files outside the frozen allowed paths unless you add them with addAllowedPaths.',
       // Orchestration includes human approval waits; leaf tools retain their
       // resource deadlines, but the wait itself must not expire.

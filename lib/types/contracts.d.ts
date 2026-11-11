@@ -84,6 +84,12 @@ export interface ResourcePolicy {
     maxTotalOutputTokens?: number;
     commandMaxSeconds: number;
 }
+/**
+ * An action that leaves the workspace (or rewrites what was already published).
+ * The Lead is the authority for these; a work order names the ones it grants,
+ * and the Host refuses every other one on the Sidekick's shell.
+ */
+export type AuthorityAction = 'commit' | 'push' | 'tag' | 'publish' | 'release' | 'pr' | 'ci';
 export interface WorkOrder {
     schemaVersion: 1;
     /** Older work orders are implementation work. Exploration never grants a writer. */
@@ -97,6 +103,8 @@ export interface WorkOrder {
     acceptance: readonly AcceptanceCriterion[];
     allowedPaths: readonly string[];
     forbiddenActions: readonly string[];
+    /** Authority actions the Lead granted for this work order; absent means none. */
+    authority?: readonly AuthorityAction[];
     baseSnapshot: SnapshotId;
     evidence: readonly ArtifactRef[];
     decisions: readonly {

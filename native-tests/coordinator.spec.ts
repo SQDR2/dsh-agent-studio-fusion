@@ -4263,6 +4263,50 @@ describe('enforced-v3 role separation', () => {
   })
 })
 
+describe('Sidekick authority boundary', () => {
+  const options = { modelLike: true, enforcedWorkflow: 'enforced-v3', files: true, sandbox: true } as const
+  const publication = (id: string, command: string) => toolCallResponse(id, shellTool, { command: shellCommand(command, command), description: 'Publish the finished change' })
+  /** The same work order, with the authority actions the Lead grants frozen into it. */
+  const granting = (authority: string[]) => toolCallResponse('delegate', 'fusion_delegate', {
+    block: true, requirements: ['addition'], authority,
+    goal: 'Correct addition', brief: 'Fix calc.py add and preserve the test. Submit a report after implementing.',
+    constraints: ['Do not change test_calc.py'], allowedPaths: ['calc.py'],
+    checks: [{ id: 'addition', description: 'Existing addition test passes', command: py('python3 -B -m unittest -v test_calc'),
+      kind: 'test', parser: 'unittest', definitionPaths: ['test_calc.py'] }],
+  })
+
+  it('refuses a commit and a push the work order did not grant, and the order still completes', async () => {
+    const { parent, coordinator, ctx, taskId } = await setup([delegateV3(), acceptV3()],
+      [publication('commit', 'git commit -m x'), publication('push', 'git push'), edit(), report()], options)
+    parent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Correct addition.' }] }))
+    await parent.whenIdle()
+    const state = coordinator.state(taskId)
+    const results = await persistedToolResults(ctx, state.acceptedChild!)
+    const outcome = (id: string) => results.find(result => result.message.role === 'tool' && result.message.toolCallId === id)!.message
+    for (const id of ['commit', 'push']) {
+      const message = outcome(id)
+      expect(message.isError, id).toBe(true)
+      expect(JSON.stringify(message), id).toContain('FUSION_WORKER_AUTHORITY_DENIED')
+    }
+    // A refusal is reportable, not fatal: the Worker keeps its lease and finishes the task.
+    expect(outcome('edit').isError).toBeFalsy()
+    expect(state, JSON.stringify(toolResults(parent))).toMatchObject({ phase: 'COMPLETED', verification: 'verified' })
+  })
+
+  it('runs the action the Lead granted in the frozen work order', async () => {
+    const { parent, coordinator, ctx, taskId } = await setup([granting(['commit']), acceptV3()],
+      [publication('commit', 'git commit -m x'), edit(), report()], options)
+    parent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Correct addition.' }] }))
+    await parent.whenIdle()
+    const state = coordinator.state(taskId)
+    const results = await persistedToolResults(ctx, state.acceptedChild!)
+    const committed = results.find(result => result.message.role === 'tool' && result.message.toolCallId === 'commit')!.message
+    expect(JSON.stringify(committed)).not.toContain('FUSION_WORKER_AUTHORITY_DENIED')
+    expect(JSON.stringify(coordinator.state(taskId).currentWorkOrder)).toContain('commit')
+    expect(state, JSON.stringify(toolResults(parent))).toMatchObject({ phase: 'COMPLETED' })
+  })
+})
+
 describe('enforced-v3 delegation after Lead inspection', () => {
   const options = { modelLike: true, enforcedWorkflow: 'enforced-v3', files: true, sandbox: true } as const
   it('delegates after a foreground read-only Lead command', async () => {
