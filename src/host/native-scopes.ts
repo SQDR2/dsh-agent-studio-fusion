@@ -34,6 +34,12 @@ export interface FusionScopeCallbacks {
   modelLimits?(provider: string, model: string): Promise<{ contextWindow: number; defaultMaxTokens?: number; testedOutputCap?: number }>
   /** Read-stage tools, presented natively. Undefined restores the native composition. */
   readOnlyTools?(agent: Agent, binding: SessionBinding, role: Role): readonly string[] | undefined
+  /**
+   * Tools this role keeps in its request table even when the role's ceiling would
+   * narrow them away — the reporting contract a Worker cannot lose. Read per
+   * request, so a work-order-dependent tool appears only where it is usable.
+   */
+  alwaysTools?(binding: SessionBinding, role: Role): readonly string[]
   installTools(scope: Context, agent: Agent, binding: SessionBinding, role: Role): readonly (() => void)[]
 }
 
@@ -154,7 +160,8 @@ export class NativeFusionScopes {
         assembled: assembled.tools,
         allowlist: readOnlyTools,
         registry: scope.tools.schemas(agent),
-        always: role === 'worker' ? ['fusion_read_state', 'fusion_read_evidence', 'fusion_submit_result'] : [],
+        always: this.callbacks.alwaysTools?.(entry.binding, role)
+          ?? (role === 'worker' ? ['fusion_read_state', 'fusion_read_evidence', 'fusion_submit_result'] : []),
       })
       if (projected.missing.length) throw new Error(fusionToolDiagnostic(projected.missing))
       return { ...assembled, variables: { ...assembled.variables, provider: route.provider, model: route.model }, tools: projected.tools }

@@ -117,6 +117,29 @@ export interface ResourcePolicy {
  */
 export type AuthorityAction = 'commit' | 'push' | 'tag' | 'publish' | 'release' | 'pr' | 'ci'
 
+/**
+ * A background process the Worker asked to keep alive after its report: a dev
+ * server, a watcher, a debugger. The Host records what it started (never the raw
+ * command, which may carry a token), who owns it and when it dies on its own, so
+ * a later handoff reuses it instead of paying the startup again, and nothing
+ * adopts a process from a previous Host that merely shares a PID.
+ */
+export interface RuntimeHandle {
+  schemaVersion: 1
+  taskId: TaskId
+  workOrderId: WorkOrderId
+  jobId: string
+  /** Why this process must outlive the report; shown in the next brief. */
+  purpose: string
+  /** Digest of the command the Host started, not the command text. */
+  commandDigest: Digest
+  cwd: string
+  /** Host start time of the job; part of its identity, like the process id. */
+  startedAt: number
+  deadlineAt: number | null
+  owner: { processId: number; agentId: string; role: 'worker' }
+}
+
 export interface WorkOrder {
   schemaVersion: 1
   /** Older work orders are implementation work. Exploration never grants a writer. */
@@ -132,6 +155,11 @@ export interface WorkOrder {
   forbiddenActions: readonly string[]
   /** Authority actions the Lead granted for this work order; absent means none. */
   authority?: readonly AuthorityAction[]
+  /**
+   * The Worker may leave a declared background process running past its report.
+   * Absent means every command must settle before a report can be submitted.
+   */
+  preserveRuntime?: true
   baseSnapshot: SnapshotId
   evidence: readonly ArtifactRef[]
   decisions: readonly { text: string; source: SourceRef }[]
@@ -429,6 +457,7 @@ export type FusionEvent =
   | EventEnvelope<'recovery/reconciled', { snapshot: SnapshotId; evidenceRef: string }>
   | EventEnvelope<'effect/outcome-unknown', { operationId: OperationId; reason: string }>
   | EventEnvelope<'effects/reconciled', { snapshot: SnapshotId; evidenceRef: string; quiescent: true }>
+  | EventEnvelope<'runtime/declared', { jobId: string; purpose: string; deadlineAt: number | null }>
   | EventEnvelope<'task/stop-requested', { intent: 'pause' | 'cancel' }>
   | EventEnvelope<'task/paused', { reason: string }>
   | EventEnvelope<'task/resumed', { reason: string }>

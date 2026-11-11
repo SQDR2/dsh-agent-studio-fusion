@@ -15,7 +15,7 @@ interface EffectRecord {
     toolName: string;
     processId: number;
     startedAt: string;
-    state: 'dispatch-started' | 'returned' | 'outcome-unknown' | 'inspected';
+    state: 'dispatch-started' | 'returned' | 'outcome-unknown' | 'inspected' | 'retained';
     arguments: ArtifactRef;
     endedAt?: string;
     nativeIsError?: boolean;
@@ -28,6 +28,28 @@ interface EffectRecord {
         status: JobView['status'];
         detail?: string;
     };
+    /**
+     * Set when the Worker declared this running job as a runtime its work order
+     * preserves across the report. `state: 'retained'` is deliberately not pending:
+     * the report is allowed to land while the process runs, but the record keeps
+     * the identity (`processId`, `startedAt`) that forbids adopting it later.
+     */
+    retained?: {
+        purpose: string;
+        commandDigest: string;
+        cwd: string;
+        deadlineAt: number | null;
+    };
+}
+/** What the Host knows about one retained runtime, for the next brief and for status. */
+export interface RetainedRuntime {
+    readonly jobId: string;
+    readonly purpose: string;
+    readonly commandDigest: string;
+    readonly cwd: string;
+    readonly deadlineAt: number | null;
+    readonly startedAt: number;
+    readonly status: JobView['status'];
 }
 /** Public native dispatch journal; it never wraps a provider or invents a PID. */
 export declare class NativeEffects {
@@ -66,6 +88,29 @@ export declare class NativeEffects {
     onlyBackgroundPending(taskId: TaskId): boolean;
     stopJobs(taskId: TaskId): Promise<void>;
     pending(taskId: TaskId): readonly {
+        id: string;
+        record: EffectRecord;
+    }[];
+    /**
+     * Convert one live background job into a declared runtime that may outlive the
+     * Worker's report. The report then lands while the process runs; the journal row
+     * keeps the start-time identity that forbids any later Host from adopting a
+     * process it did not start, and the declared deadline bounds the process's life.
+     */
+    retain(taskId: TaskId, jobId: string, request: {
+        agentId: string;
+        workOrderId: string;
+        purpose: string;
+        maxMs: number;
+    }): RetainedRuntime;
+    /** The runtimes this task is keeping alive, for status and for the next brief. */
+    retained(taskId: TaskId): readonly RetainedRuntime[];
+    /**
+     * Retained rows written by a *different* Host process. A new process never owns
+     * them: the recorded PID and start time are the only identity available, so they
+     * are reported and inspected rather than adopted or forgotten.
+     */
+    strandedRetained(taskId: TaskId): readonly {
         id: string;
         record: EffectRecord;
     }[];

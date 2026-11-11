@@ -207,6 +207,11 @@ function applyPayload(state: TaskState | undefined, event: FusionEvent): TaskSta
         control: patchControl(next, { outcomeUnknown: false }),
       })
     }
+    case 'runtime/declared':
+      // A declared runtime changes no phase and holds no lease: the effect journal
+      // and the handle document own it, and the Worker's report still decides the
+      // phase. Recording the event keeps it in the task history for the panel.
+      return need(state, event)
     case 'task/stop-requested':
       return {
         ...waiting(need(state, event), 'STOPPING'),
