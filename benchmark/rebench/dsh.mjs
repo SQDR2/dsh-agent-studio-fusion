@@ -14,16 +14,50 @@
 //   catalog                                                 -> provider/model ids with efforts
 //   pair    <leadJson> <workerJson>                         -> save the Fusion pair (e.g. '{"provider":"zai","model":"glm-5.3","reasoningEffort":"max"}')
 import { randomUUID } from 'node:crypto'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 const root = process.env.DSH_ROOT
 if (!root) throw new Error('Set DSH_ROOT to the deepseek-harness checkout that runs the Host')
-const access = await import(pathToFileURL(resolve(root, 'tools/dshx/src/internal/browser-access.ts')).href)
-const { createWebProofRequest } = await import(pathToFileURL(resolve(root, 'tools/dshx/src/internal/web-proof-auth.ts')).href)
-const host = access.discoverBrowserHost(root)
-const request = createWebProofRequest(host.port, access.browserStartup(root, host).startup)
+
+/**
+ * Two ways to reach the Host.
+ *
+ * `DSH_BENCH_URL` — the URL `dsh web` prints (it carries `?token=`). The Host binds
+ * that launch token to the process that printed it and never writes it to disk, so a
+ * separate script must be handed the URL. It is exchanged at `/connect` for a signed
+ * API operator cookie; every later request carries that cookie. This is the path for
+ * hosts whose checkout has no `tools/dshx`.
+ *
+ * Otherwise the historical `tools/dshx` helpers are used, which read the launch proof
+ * from the running browser host.
+ */
+const { request, host } = await (async () => {
+  const benchUrl = process.env.DSH_BENCH_URL
+  if (!benchUrl) {
+    const helpers = resolve(root, 'tools/dshx/src/internal/browser-access.ts')
+    if (!existsSync(helpers)) {
+      throw new Error(`This checkout has no ${helpers}. Either restore those helpers, or pass the URL that`
+        + ' `dsh web` printed as DSH_BENCH_URL (it carries the launch ?token=).')
+    }
+    const access = await import(pathToFileURL(helpers).href)
+    const { createWebProofRequest } = await import(pathToFileURL(resolve(root, 'tools/dshx/src/internal/web-proof-auth.ts')).href)
+    const discovered = access.discoverBrowserHost(root)
+    return { host: discovered, request: createWebProofRequest(discovered.port, access.browserStartup(root, discovered).startup) }
+  }
+  const url = new URL(benchUrl)
+  const tokens = url.searchParams.getAll('token')
+  if (tokens.length !== 1) throw new Error('DSH_BENCH_URL must carry exactly one ?token= from the dsh web launch URL')
+  const origin = url.origin
+  const connect = await fetch(`${origin}/connect?token=${encodeURIComponent(tokens[0])}&interactions=none`, { redirect: 'manual' })
+  const cookie = (connect.headers.getSetCookie?.() ?? []).map(line => line.split(';')[0]).find(part => part?.startsWith('dsh-auth-'))
+  if (!cookie) throw new Error(`DSH_BENCH_URL could not be exchanged for an API cookie (HTTP ${connect.status})`)
+  return {
+    host: { port: Number(url.port), pid: undefined },
+    request: (path, init = {}) => fetch(origin + path, { ...init, headers: { ...(init.headers ?? {}), cookie } }),
+  }
+})()
 
 async function rpc(method, args) {
   const response = await request('/api/' + method, { method: 'POST', headers: { 'content-type': 'application/json' },

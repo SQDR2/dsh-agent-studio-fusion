@@ -4,8 +4,9 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { ToolExecution } from '@deepseek-ai/dsh-tools'
 import { JobId } from '@deepseek-ai/dsh-jobs'
 import type { JobView } from '@deepseek-ai/dsh-jobs'
-import type { ArtifactRef, Role, TaskId } from '../contracts.js'
+import type { ArtifactRef, Role, RuntimeHandle, TaskId } from '../contracts.js'
 import type { SqliteFusionStore } from '../task/sqlite-store.js'
+import { digestOf } from '../digest.js'
 import type { SessionBinding } from './bindings.js'
 import { isShellTool } from './shell.js'
 
@@ -19,13 +20,31 @@ interface EffectRecord {
   toolName: string
   processId: number
   startedAt: string
-  state: 'dispatch-started' | 'returned' | 'outcome-unknown' | 'inspected'
+  state: 'dispatch-started' | 'returned' | 'outcome-unknown' | 'inspected' | 'retained'
   arguments: ArtifactRef
   endedAt?: string
   nativeIsError?: boolean
   inspectionEvidence?: string
   quiescenceBasis?: 'explicit-user-inspection'
   nativeJob?: { id: string; startedAt: number; deadlineAt: number | null; status: JobView['status']; detail?: string }
+  /**
+   * Set when the Worker declared this running job as a runtime its work order
+   * preserves across the report. `state: 'retained'` is deliberately not pending:
+   * the report is allowed to land while the process runs, but the record keeps
+   * the identity (`processId`, `startedAt`) that forbids adopting it later.
+   */
+  retained?: { purpose: string; commandDigest: string; cwd: string; deadlineAt: number | null }
+}
+
+/** What the Host knows about one retained runtime, for the next brief and for status. */
+export interface RetainedRuntime {
+  readonly jobId: string
+  readonly purpose: string
+  readonly commandDigest: string
+  readonly cwd: string
+  readonly deadlineAt: number | null
+  readonly startedAt: number
+  readonly status: JobView['status']
 }
 
 /** Public native dispatch journal; it never wraps a provider or invents a PID. */
@@ -138,14 +157,29 @@ export class NativeEffects {
       this.#assertJob(live.row, snapshot)
       if (snapshot.status === 'running' || snapshot.status === 'stopping') return
       const row = this.store.readDocument(live.id)!
+      const retained = live.row.state === 'retained'
       this.store.writeDocument(live.id, row.revision, { ...live.row,
         nativeJob: { ...live.row.nativeJob!, status: snapshot.status, ...(snapshot.detail ? { detail: snapshot.detail } : {}) },
+        // A declared runtime that ended by itself is an observation for the next
+        // brief, not an unfinished effect: it was never going to be waited for.
+        // A `failed` one still has no proof of quiescence, so it stays unknown.
         state: snapshot.status === 'failed' ? 'outcome-unknown' : 'returned', endedAt: new Date().toISOString() })
       // Failed registry records can result from a throwing producer cancel;
       // unlike completed/killed bash, that does not prove process quiescence.
       if (snapshot.status === 'failed') this.callbacks.failed(live.agent, new Error('Native job failed without proven process quiescence'))
+      else if (retained) this.#recordRetained(live.row, snapshot.status)
     } catch (error) { this.callbacks.failed(live.agent, error) }
     finally { clearTimeout(live.timer); this.#jobs.delete(snapshot.id) }
+  }
+
+  /** Keep the handle document in step with the process it describes. */
+  #recordRetained(row: EffectRecord, status: JobView['status']): void {
+    if (!row.retained) return
+    const id = `runtime-handle:${row.taskId}:${row.nativeJob!.id}`
+    const prior = this.store.readDocument(id)
+    if (!prior) return
+    const value = prior.value as { state?: string }
+    this.store.writeDocument(id, prior.revision, { ...value, state: status === 'completed' || status === 'killed' ? 'ended' : 'unknown' })
   }
 
   #assertJob(row: EffectRecord, snapshot: JobView): void {
@@ -218,31 +252,114 @@ export class NativeEffects {
   }
 
   pending(taskId: TaskId): readonly { id: string; record: EffectRecord }[] {
-    return this.store.listDocumentIds(`native-effect:${taskId}:`).flatMap(id => {
+    return this.#records(taskId).flatMap(({ id, record }) => {
+      return record.state === 'dispatch-started' || record.state === 'outcome-unknown' ? [{ id, record }] : []
+    })
+  }
+
+  /** Every journal row of this task, validated before any caller may trust it. */
+  #records(taskId: TaskId): readonly { id: string; record: EffectRecord }[] {
+    return this.store.listDocumentIds(`native-effect:${taskId}:`).map(id => {
       const record = this.store.readDocument(id)!.value as EffectRecord
       if (record.schemaVersion !== 1 || record.taskId !== taskId || !record.agentId || !record.toolName
         || !Number.isSafeInteger(record.processId) || record.processId <= 0
-        || !['dispatch-started', 'returned', 'outcome-unknown', 'inspected'].includes(record.state)) {
+        || !['dispatch-started', 'returned', 'outcome-unknown', 'inspected', 'retained'].includes(record.state)) {
         throw new Error('Native effect journal requires migration or inspection')
       }
       if (record.nativeJob && (typeof record.nativeJob.id !== 'string'
         || !Number.isSafeInteger(record.nativeJob.startedAt) || record.nativeJob.deadlineAt !== null && !Number.isSafeInteger(record.nativeJob.deadlineAt))) {
         throw new Error('Native job journal requires migration or inspection')
       }
-      return record.state === 'dispatch-started' || record.state === 'outcome-unknown' ? [{ id, record }] : []
+      return { id, record }
     })
+  }
+
+  /**
+   * Convert one live background job into a declared runtime that may outlive the
+   * Worker's report. The report then lands while the process runs; the journal row
+   * keeps the start-time identity that forbids any later Host from adopting a
+   * process it did not start, and the declared deadline bounds the process's life.
+   */
+  retain(taskId: TaskId, jobId: string, request: { agentId: string; workOrderId: string; purpose: string; maxMs: number }): RetainedRuntime {
+    if (!this.#registry) throw new Error('Retaining a runtime requires the native jobs registry')
+    if (!Number.isSafeInteger(request.maxMs) || request.maxMs <= 0) throw new Error('A retained runtime needs a positive lifetime')
+    const live = [...this.#jobs.values()].find(job => job.row.taskId === taskId && job.row.nativeJob?.id === jobId)
+    if (!live) throw new Error('Only a background job this Host started for the current task can be retained; undeclared jobs must be collected or stopped')
+    if (live.row.agentId !== request.agentId) throw new Error('A retained runtime must be a job of the Agent that declares it')
+    if (live.row.state === 'retained') throw new Error('That job is already declared as a retained runtime')
+    const snapshot = this.#registry.get(JobId(jobId), live.agent.id)
+    this.#assertJob(live.row, snapshot)
+    if (snapshot.status !== 'running' && snapshot.status !== 'stopping') throw new Error('That job has already ended; only a running background job can be retained')
+    // The handle records what the Host started, never the command text: it can
+    // carry a token, and the next brief only needs to know it is the same process.
+    let detail: { command?: unknown; workdir?: unknown } = {}
+    try { detail = (JSON.parse(Buffer.from(this.store.readArtifact(taskId, live.row.arguments.id)).toString('utf8')) as { arguments?: typeof detail }).arguments ?? {} } catch { detail = {} }
+    const commandDigest = digestOf(typeof detail.command === 'string' ? { command: detail.command } : {})
+    const cwd = typeof detail.workdir === 'string' ? detail.workdir : '.'
+    const deadlineAt = Date.now() + Math.ceil(request.maxMs)
+    const nativeJob = { ...live.row.nativeJob!, deadlineAt }
+    const retained = { purpose: request.purpose, commandDigest, cwd, deadlineAt }
+    const updated: EffectRecord = { ...live.row, state: 'retained', nativeJob, retained }
+    this.store.writeDocument(live.id, this.store.readDocument(live.id)!.revision, updated)
+    const handleId = `runtime-handle:${taskId}:${jobId}`
+    const prior = this.store.readDocument(handleId)
+    const handle: RuntimeHandle = { schemaVersion: 1, taskId, workOrderId: request.workOrderId as RuntimeHandle['workOrderId'], jobId,
+      purpose: request.purpose, commandDigest, cwd, startedAt: nativeJob.startedAt, deadlineAt,
+      owner: { processId: process.pid, agentId: live.row.agentId, role: 'worker' } }
+    this.store.writeDocument(handleId, prior?.revision ?? 0, { ...handle, state: 'running' })
+    live.row = updated
+    clearTimeout(live.timer)
+    const timer = setTimeout(() => {
+      try {
+        this.#assertJob(updated, this.#registry!.get(JobId(jobId), live.agent.id))
+        this.#registry!.kill(JobId(jobId), live.agent.id, 'Fusion retained runtime deadline elapsed')
+      } catch (error) {
+        const current = this.#jobs.get(jobId)
+        if (current) this.#uncertain(current, error)
+        else this.callbacks.failed(live.agent, error)
+      }
+    }, request.maxMs)
+    timer.unref()
+    live.timer = timer
+    return { jobId, purpose: request.purpose, commandDigest, cwd, deadlineAt, startedAt: nativeJob.startedAt, status: snapshot.status }
+  }
+
+  /** The runtimes this task is keeping alive, for status and for the next brief. */
+  retained(taskId: TaskId): readonly RetainedRuntime[] {
+    return [...this.#jobs.values()].flatMap(job => {
+      if (job.row.taskId !== taskId || !job.row.retained) return []
+      const jobId = job.row.nativeJob!.id
+      const status = (() => {
+        try { return this.#registry!.get(JobId(jobId), job.agent.id).status } catch { return job.row.nativeJob!.status }
+      })()
+      return [{ jobId, purpose: job.row.retained.purpose, commandDigest: job.row.retained.commandDigest,
+        cwd: job.row.retained.cwd, deadlineAt: job.row.retained.deadlineAt, startedAt: job.row.nativeJob!.startedAt, status }]
+    })
+  }
+
+  /**
+   * Retained rows written by a *different* Host process. A new process never owns
+   * them: the recorded PID and start time are the only identity available, so they
+   * are reported and inspected rather than adopted or forgotten.
+   */
+  strandedRetained(taskId: TaskId): readonly { id: string; record: EffectRecord }[] {
+    return this.#records(taskId).flatMap(entry => entry.record.state === 'retained' && entry.record.processId !== process.pid ? [entry] : [])
   }
 
   assertInspection(taskId: TaskId, effectsStopped: boolean): void {
     const pending = this.pending(taskId)
-    if (!pending.length) return
+    // A retained runtime left by a previous Host is a live process this process
+    // does not own. It is never adopted, and forgetting it would leak a server:
+    // recovery must see it by name and the user must have stopped it.
+    const stranded = this.strandedRetained(taskId)
+    if (!pending.length && !stranded.length) return
     if ([...this.#live.values()].includes(taskId) || [...this.#jobs.values()].some(job => job.row.taskId === taskId)) {
       throw new Error('Native tool execution is still live; stop and settle it before recovery')
     }
     if (!effectsStopped) {
-      throw new Error(`有 ${pending.length} 项原生操作在中断时未收尾。Host 退出不代表命令及子进程已停止。请先检查并停止这些操作，再使用 /fusion recover --effects-stopped <检查记录>。`)
+      throw new Error(`有 ${pending.length + stranded.length} 项原生操作在中断时未收尾。Host 退出不代表命令及子进程已停止。请先检查并停止这些操作，再使用 /fusion recover --effects-stopped <检查记录>。`)
     }
-    for (const { record } of pending) {
+    for (const record of [...pending.map(entry => entry.record), ...stranded.map(entry => entry.record)]) {
       if (record.processId === process.pid) continue
       try { process.kill(record.processId, 0); throw new Error('The recorded effect owner is still live; settle it before recovery') }
       catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error }
@@ -252,7 +369,9 @@ export class NativeEffects {
   inspected(taskId: TaskId, evidence: string, effectsStopped: boolean): void {
     this.assertInspection(taskId, effectsStopped)
     if (!evidence) throw new Error('Effect inspection evidence is required')
-    for (const { id, record } of this.pending(taskId)) {
+    // The user's inspection covers a previous Host's retained runtimes too; the
+    // handle record stays, but stops being a recovery blocker.
+    for (const { id, record } of [...this.pending(taskId), ...this.strandedRetained(taskId)]) {
       this.store.writeDocument(id, this.store.readDocument(id)!.revision, { ...record,
         state: 'inspected', inspectionEvidence: evidence, quiescenceBasis: 'explicit-user-inspection' })
     }

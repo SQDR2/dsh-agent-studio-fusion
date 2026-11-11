@@ -81,6 +81,13 @@ export declare const DEFAULT_POLICY: {
     readonly maxReworkRounds: 3;
     readonly commandMaxSeconds: 600;
 };
+/**
+ * A declared runtime outlives the Worker's report, so the Host bounds its life: a
+ * forgotten dev server must not survive the task. Long builds stay under the
+ * ordinary command deadline instead of this one.
+ */
+export declare const DEFAULT_RETAINED_MINUTES = 30;
+export declare const MAX_RETAINED_MINUTES = 240;
 interface DelegateInput {
     goal: string;
     brief: string;
@@ -90,6 +97,10 @@ interface DelegateInput {
     block?: boolean;
     /** Verbatim quotes of the user's hard requirements; frozen as user-provenance constraints. */
     requirements?: string[];
+    /** Authority actions the Lead grants for this work order; anything else stays refused on the Worker's shell. */
+    authority?: readonly string[];
+    /** Let the Worker declare a background process that outlives its report (dev server, watcher). */
+    preserveRuntime?: boolean;
 }
 /** Whitespace-insensitive, otherwise exact: a requirement must be the user's own words. */
 export declare const normalizeQuote: (text: string) => string;
@@ -164,7 +175,7 @@ export declare class FusionCoordinator {
         index: number;
         met: boolean;
         evidence: string;
-    }[]): string;
+    }[]): Promise<string>;
     pause(agent: Agent): Promise<void>;
     resume(agent: Agent, authorizationId: string): Promise<void>;
     /** Human command only. Never exposed as an LLM tool or triggered by a dead PID alone. */

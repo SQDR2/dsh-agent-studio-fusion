@@ -15,7 +15,92 @@ own tags and releases.
 Entry format: what changed, then what was actually validated. "Not claimed" lines mark what a release did *not* test —
 read them before assuming a platform is covered.
 
-## Unreleased
+## 0.3.9 — 2026-11-11
+
+### Runtime
+- **A Worker can report while a background process it declared is still running**, instead of stopping it first, and
+  the next handoff of the same work order is told what was running. `WorkOrder.preserveRuntime` (opt-in per delegation)
+  plus the Worker-only `fusion_declare_runtime` tool record the job's purpose, working directory, a digest of its
+  command (never the command text, which can carry a token) and a deadline; `NativeEffects.retain` moves the effect
+  row from `dispatch-started` to `retained`, so it no longer blocks `fusion_submit_result` while keeping the
+  `processId`/`startedAt` identity that forbids adoption. An undeclared running job still blocks the report, and the
+  refusal now names the tool.
+- **This does not keep a server alive across handoffs, and the Host cannot make it so from here.** A Worker's jobs are
+  owned by its Agent scope (`tool-bash` registers `owner: exec.agent.id`), and `jobs-local` cancels every job of an
+  owner when that scope is disposed (`disposeOwned`), which is what a settled handoff does. Measured on the real Host:
+  the declared job settled `killed`, `detail: "signal: SIGTERM"`, within the same handoff; the Worker Agent was already
+  gone (`ctx.agents.get(acceptedChild) === undefined`) when the Lead reworked; and `ctx.jobs.get` later threw
+  `unknown job`. Real retention needs either job-ownership transfer in `@deepseek-ai/dsh-jobs` or a Host-owned
+  launcher, and a launcher would open a second process path that bypasses `tool-bash` approval and the per-session
+  sandbox mode — the plugin never widens a sandbox mode, so that half is deliberately not built. Evidence:
+  `docs/DEVIN-LOCAL-FUSION.md` §9.
+- **Recovery never adopts a process it did not start.** A `retained` row written by a previous Host process is
+  reported by `NativeEffects.strandedRetained` (process id and start time are the only identity), appears as
+  `recovery/needed` at install, and `assertInspection` refuses to continue until that process is gone. Completion
+  (`accept`), pause, takeover, the deadline and Host shutdown all stop declared runtimes through the existing
+  `#stopJobs`.
+- The Lead's fixed tool catalog is unchanged: `fusion_declare_runtime` is offered only inside the Worker's
+  implementation order, so the Lead's cached prompt prefix does not move.
+- Tests: `native-tests/coordinator.spec.ts` "retained runtime across handoffs" — a declared job lets the report land
+  (journal `retained.purpose`/`deadlineAt`, a `runtime-handle` with a 64-hex `commandDigest` and final state `ended`,
+  the next Worker request carrying "Processes the previous handoff declared"), and an undeclared job is refused with a
+  message naming the declaration.
+
+### Safety
+- **The Sidekick can no longer commit, push, tag, publish, release, open a pull request or trigger CI unless the work
+  order grants that exact action.** The write lease bounds *files* (`allowedPaths`); it never bounded what leaves the
+  workspace, so a delegated task could `git commit` / `git push` and the Lead's review happened afterwards. Devin draws
+  the same line for its sidekick ("does not own commits, pushes, pull requests or CI"); this is the Host-side half.
+  `src/host/authority.ts` reads a shell command's text — through `sudo`/`env`/`xargs`/`time`/…, `VAR=value` prefixes,
+  `git -C <dir>`-style value-taking globals, `bash -c "…"` and `$(…)` — and names the action; quoted literal data
+  (`grep -r 'git push' docs`) is not a command and is left alone. `src/host/coordinator.ts` refuses an ungranted one
+  with `FUSION_WORKER_AUTHORITY_DENIED` and tells the Worker to report it as pending, so the task still finishes.
+  A new optional `authority: AuthorityAction[]` on the frozen `WorkOrder` (`contracts/fusion.ts`, `src/contracts.ts`)
+  is how the Lead grants one — only for what the user actually asked for — and `fusion_rework` cannot widen it.
+  Deliberately a command-text guard, not a sandbox: a command assembled at runtime (`python -c`) or run through
+  `run_code` stays outside it, which is why the Worker prompt states the rule too.
+- Tests: `tests/authority.spec.ts` (7 cases) covers read-only commands staying allowed, the seven action families,
+  launchers/assignments/segments/nested shells/command substitution, quoted data not being mistaken for a command, and
+  a grant allowing exactly the granted action. `native-tests/coordinator.spec.ts` "Sidekick authority boundary" (2
+  cases) drives a real Worker: an ungranted `git commit` and `git push` are refused while the work order still
+  completes and verifies, and an action granted in the work order runs.
+
+### Prompts
+- **Measured, and the brief-shape rule was narrowed because of the measurement.** A pilot
+  (`benchmark/rebench/results-p5/REPORT.md`) ran the same committed code and the same Fusion pair over four tasks, varying
+  only `prompts/`: arm A the pre-change prompts, arm B the rules below. Arm B was clearly faster — wall time 1559 s → 869 s
+  median (−44%), worker tool calls 84 → 54.5 (−35%) — and resolved **less**: 3/4 → 2/4, losing
+  `ucfopen__canvasapi-716` on one FAIL_TO_PASS test with all 60 PASS_TO_PASS still passing (an incomplete fix, not a
+  regression). Cost did not move (−1%) and rework rounds rose (1 → 2), so under the plan's own admission thresholds
+  (`docs/DEVIN-LOCAL-FUSION.md` §7.4) the change cannot merge unchanged. The rule the data implicates is now narrower in
+  both Lead variants: a fenced snippet is advice about one settled spot, explicitly *not* the boundary of the change, and
+  the Worker still reads the surrounding code and covers the cases next to it. `tests/prompts.spec.ts` pins that scope.
+  Check damping, consolidated rework and mid-handoff steering stay: nothing in the pilot points at them, and the next
+  round (arm C) tests them without the wide snippet rule.
+- **Delegation economy, aligned with the Devin rules that explain its 3.4× wall-time advantage** (measured on the same
+  model pair in `benchmark/rebench/results-devin-r1`: 4/4 resolved at $2.73 in 20.1 min vs 3/4 at $4.81 in 6.0 min).
+  `prompts/lead.md` / `prompts/model-lead.md` say to hand over the *shape* once an edit is settled — exact file,
+  location and a fenced snippet — instead of only stating "what must be true", with the explicit reason Devin gives:
+  never leave alternatives for a model to pick, because it guesses and a wrong guess costs a rework round. Open design
+  questions are settled before an implementation brief. Review is batched: finish the whole review, then send every
+  defect, gap and edge case as one consolidated rework brief. A user message that arrives mid-handoff is acted on
+  immediately with `fusion_rework` rather than waited out.
+- `prompts/lead.md` / `prompts/model-lead.md` also gain the non-delegable authoring rule: the exact text of a query
+  against a shared or production data system (read-only included — the risk is a wrong number delivered as fact),
+  prompt/rubric/grader/eval-harness text, and scoring/threshold/sampling/pipeline configuration are the Lead's to
+  write. Tests do not catch a plausible wrong number.
+- `prompts/worker.md` / `prompts/model-worker.md` gain check damping: while planned edits remain, do not stop between
+  them to run `git status`, `git diff`, lint, typecheck or tests; after the last edit run one consolidated pass with the
+  narrowest command, never re-run a command whose inputs did not change, and after a fix re-run only what it could
+  affect. They also state the publish boundary and the "report it as pending" resolution.
+- Tests: `tests/prompts.spec.ts` (7 cases) pins these rules — authority boundary, non-delegable authoring, fenced
+  snippet with no alternatives, consolidated rework, mid-handoff user message, check damping — in both the Chinese and
+  the English variant, so an edit to one variant cannot silently drop a rule from the other.
+
+### Documentation
+- `docs/DEVIN-LOCAL-FUSION.md` records the Devin Fusion evidence (binary offsets, static prompt text, `sessions.db`
+  records), the dsh-fusion comparison, the efficiency evidence that motivates the prompt changes, and the fixed A/B
+  protocol (metrics, repetitions, admission thresholds) that a later round must use before any speed claim is made.
 
 ### Fixes
 - **A skill the user invokes can now actually reach the Lead.** The Host publishes the session skill catalog and
@@ -41,12 +126,28 @@ read them before assuming a platform is covered.
 ### Not claimed
 - `session-2a7a61bd-fb83-4697-ae44-86934c0e4556` was not replayed end to end. The evidence is the unit test plus the
   host integration suite, which exercises the Host's real request assembly, tool registration and ceiling projection.
+- The authority guard was not measured on a real delegation, and it is a command-text guard, not a sandbox: a command
+  assembled at runtime (`python -c`, a script piped on stdin) or run through `run_code` is outside it. It also does not
+  ask the user whether they wanted the action; the grant is the Lead's judgement, recorded in the work order.
+- The prompt changes **were** A/B measured once (see the measurement entry above), and that measurement is n=1 per cell over
+  four public tasks: it cannot rank the two arms statistically and is reported as an observation. The narrowed snippet
+  rule has **not** been re-measured; the next round (arm C) is what would show whether the loss is gone.
+  `deepseek-v4.1-flash` has no list price in `plan-phase5.json`, so every cost figure is a lead-only lower bound.
+- Preserving a Worker's background processes **across handoffs** is not achievable from the plugin: the Host cancels a
+  job when its owner Agent's scope is disposed, which is exactly what a settled handoff does. The shipped
+  `preserveRuntime` covers one handoff (report lands while the job runs, the next brief is told what it was) and never
+  claims more. See `docs/DEVIN-LOCAL-FUSION.md` §9 for the measurement and the two Host-side options.
+- The declared runtime's `strandedRetained` recovery path is covered by unit-level reasoning and the existing
+  inspection gate, not by a host test that restarts the Host process with a live retained job.
 
 ### Validation
-- `pnpm test`: 489 tests in 64 files pass. `pnpm typecheck` is clean, and `pnpm build` regenerates `lib/` with only
-  the expected `lib/dsh-fusion.js` change plus the new `lib/types/host/read-tools.d.ts`.
-- `pnpm test:host` against the pinned Harness via `DSHX_HARNESS`: 278 of 279 pass. The one skip is the Windows ACL
-  confinement suite, which only runs on Windows; the platform-neutral coordinator suite is 235 of 235.
+- `pnpm test`: 504 tests in 66 files pass (15 of them new: 7 in `tests/authority.spec.ts`, 8 in
+  `tests/prompts.spec.ts`). `pnpm typecheck` is clean, and `pnpm build` regenerates `lib/` with the expected
+  `lib/dsh-fusion.js` change plus the new `lib/types/host/authority.d.ts` and the `lib/types/host/read-tools.d.ts`
+  from the previous entry.
+- `pnpm test:host` against the pinned Harness via `DSHX_HARNESS`: 282 of 283 pass. The one skip is the Windows ACL
+  confinement suite, which only runs on Windows; the platform-neutral coordinator suite is 239 of 239 — the two new
+  "Sidekick authority boundary" cases and the two new "retained runtime across handoffs" cases.
 
 ## 0.3.8 — 2026-11-09
 

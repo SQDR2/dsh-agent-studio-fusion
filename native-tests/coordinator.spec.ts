@@ -1801,6 +1801,72 @@ function waitForJob(request: GenerateOptions, callId = 'wait-job') {
   return toolCallResponse(callId, 'job_output', { job_id: id, wait: true, timeout_ms: 10_000 })
 }
 
+describe('retained runtime across handoffs', () => {
+  const options = { modelLike: true, enforcedWorkflow: 'enforced-v3', files: true, sandbox: true, jobs: true } as const
+  /** A server that outlives the report; it never exits on its own inside the test. */
+  const startServer = () => toolCallResponse('start-server', shellTool, {
+    command: py('python3 -c ') + shellQuote('import time\ntime.sleep(300)\n'),
+    description: 'Start the fixture server the next handoff should reuse', run_in_background: true,
+  })
+  /** Read back the job id the Host reported, then declare that exact process as a runtime. */
+  const declareRuntime = (request: GenerateOptions) => {
+    const id = JSON.stringify(request.messages).match(new RegExp(`started background job (${shellTool}-[0-9A-Za-z]+)`))?.[1]
+    if (!id) throw new Error('The native job identity is absent from Worker history')
+    return toolCallResponse('declare-runtime', 'fusion_declare_runtime', { job_id: id, purpose: 'Keep the fixture server warm for the next handoff', max_minutes: 5 })
+  }
+  const delegateWithRuntime = () => toolCallResponse('delegate', 'fusion_delegate', {
+    block: true, requirements: ['addition'], preserveRuntime: true,
+    goal: 'Correct addition', brief: 'Fix calc.py add, preserve the test, and keep the fixture server running for the next stage.',
+    constraints: ['Do not change test_calc.py'], allowedPaths: ['calc.py'],
+    checks: [{ id: 'addition', description: 'Existing addition test passes', command: py('python3 -B -m unittest -v test_calc'),
+      kind: 'test', parser: 'unittest', definitionPaths: ['test_calc.py'] }],
+  })
+
+  it('lands the report while the declared job runs, and records it for the next handoff', async () => {
+    const { parent, coordinator, ctx, taskId, store, adapter } = await setup(
+      [delegateWithRuntime(), toolCallResponse('rework', 'fusion_rework', { feedback: 'Check the rendered page again.', block: true }), acceptV3()],
+      [startServer, declareRuntime, edit(), report(), report('report-after-rework')], options)
+    parent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Correct addition.' }] }))
+    await parent.whenIdle()
+    const childId = coordinator.state(taskId).acceptedChild!
+    // The report landed while the process was still running: a declared runtime is
+    // not a pending effect, so submission is not blocked by it.
+    expect(coordinator.state(taskId).phase, JSON.stringify(toolResults(parent))).toBe('COMPLETED')
+    const journal = store.listDocumentIds(`native-effect:${taskId}:`)
+      .map(id => store.readDocument(id)!.value as { retained?: { purpose?: string; deadlineAt?: number | null } })
+      .filter(record => record.retained)
+    expect(journal).toHaveLength(1)
+    expect(journal[0]!.retained!.purpose).toContain('fixture server')
+    expect(journal[0]!.retained!.deadlineAt).toBeGreaterThan(Date.now())
+    // The handle records what the Host started, and the next handoff is told about
+    // it — including that the handoff's end stopped it, which is the real lifetime.
+    const handleIds = store.listDocumentIds(`runtime-handle:${taskId}:`)
+    const handles = handleIds.map(id => store.readDocument(id)!.value as { state?: string; purpose?: string; commandDigest?: string })
+    expect(handles).toHaveLength(1)
+    expect(handles[0]!.purpose).toContain('fixture server')
+    expect(handles[0]!.commandDigest).toMatch(/^[0-9a-f]{64}$/)
+    const later = JSON.stringify(adapter.requests.filter(request => request.model === 'worker').at(-1)!.messages)
+    expect(later).toContain('Processes the previous handoff declared')
+    expect(later).toContain('Keep the fixture server warm for the next handoff')
+    // What the Host can promise: the job does not outlive the handoff, and the
+    // registry no longer serves it (a Worker's jobs are torn down with its scope).
+    expect(handles[0]!.state).toBe('ended')
+    const jobId = handleIds[0]!.split(':').at(-1)!
+    const alive = (() => { try { return ctx.jobs.get(JobId(jobId), childId).status } catch { return 'gone' } })()
+    expect(alive).not.toBe('running')
+  })
+
+  it('refuses a report that leaves an undeclared job running, naming the declaration', async () => {
+    const { parent, coordinator, ctx, taskId } = await setup([delegateV3(), review('rework'), review('accept')],
+      [startServer, edit(), report(), report('report-without-declaration')], options)
+    parent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Correct addition.' }] }))
+    await parent.whenIdle()
+    const childId = coordinator.state(taskId).acceptedChild!
+    const results = await persistedToolResults(ctx, childId)
+    expect(JSON.stringify(results)).toContain('Collect or stop every native job')
+  })
+})
+
 describe('owned native background commands', () => {
   it('native cancellation of a Lead wait retains its job for an explicit follow-up', async () => {
     let gate = ''
@@ -4260,6 +4326,50 @@ describe('enforced-v3 role separation', () => {
     expect(modes(parent.session).at(-1)).toBe('read-only')
     await coordinator.clear(parent)
     expect(modes(parent.session).at(-1)).toBe('danger-full-access')
+  })
+})
+
+describe('Sidekick authority boundary', () => {
+  const options = { modelLike: true, enforcedWorkflow: 'enforced-v3', files: true, sandbox: true } as const
+  const publication = (id: string, command: string) => toolCallResponse(id, shellTool, { command: shellCommand(command, command), description: 'Publish the finished change' })
+  /** The same work order, with the authority actions the Lead grants frozen into it. */
+  const granting = (authority: string[]) => toolCallResponse('delegate', 'fusion_delegate', {
+    block: true, requirements: ['addition'], authority,
+    goal: 'Correct addition', brief: 'Fix calc.py add and preserve the test. Submit a report after implementing.',
+    constraints: ['Do not change test_calc.py'], allowedPaths: ['calc.py'],
+    checks: [{ id: 'addition', description: 'Existing addition test passes', command: py('python3 -B -m unittest -v test_calc'),
+      kind: 'test', parser: 'unittest', definitionPaths: ['test_calc.py'] }],
+  })
+
+  it('refuses a commit and a push the work order did not grant, and the order still completes', async () => {
+    const { parent, coordinator, ctx, taskId } = await setup([delegateV3(), acceptV3()],
+      [publication('commit', 'git commit -m x'), publication('push', 'git push'), edit(), report()], options)
+    parent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Correct addition.' }] }))
+    await parent.whenIdle()
+    const state = coordinator.state(taskId)
+    const results = await persistedToolResults(ctx, state.acceptedChild!)
+    const outcome = (id: string) => results.find(result => result.message.role === 'tool' && result.message.toolCallId === id)!.message
+    for (const id of ['commit', 'push']) {
+      const message = outcome(id)
+      expect(message.isError, id).toBe(true)
+      expect(JSON.stringify(message), id).toContain('FUSION_WORKER_AUTHORITY_DENIED')
+    }
+    // A refusal is reportable, not fatal: the Worker keeps its lease and finishes the task.
+    expect(outcome('edit').isError).toBeFalsy()
+    expect(state, JSON.stringify(toolResults(parent))).toMatchObject({ phase: 'COMPLETED', verification: 'verified' })
+  })
+
+  it('runs the action the Lead granted in the frozen work order', async () => {
+    const { parent, coordinator, ctx, taskId } = await setup([granting(['commit']), acceptV3()],
+      [publication('commit', 'git commit -m x'), edit(), report()], options)
+    parent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Correct addition.' }] }))
+    await parent.whenIdle()
+    const state = coordinator.state(taskId)
+    const results = await persistedToolResults(ctx, state.acceptedChild!)
+    const committed = results.find(result => result.message.role === 'tool' && result.message.toolCallId === 'commit')!.message
+    expect(JSON.stringify(committed)).not.toContain('FUSION_WORKER_AUTHORITY_DENIED')
+    expect(JSON.stringify(coordinator.state(taskId).currentWorkOrder)).toContain('commit')
+    expect(state, JSON.stringify(toolResults(parent))).toMatchObject({ phase: 'COMPLETED' })
   })
 })
 

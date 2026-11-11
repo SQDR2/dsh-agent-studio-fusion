@@ -10,7 +10,7 @@ import { NativeWorkerNotices } from './native-worker-notices.js'
 import { SessionId as NativeSessionId } from '@deepseek-ai/dsh-session'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ToolExecution, ToolRunContext } from '@deepseek-ai/dsh-tools'
-import type { ExplorationReport, FusionEvent, Role, TaskId, WorkerReport, WorkOrder } from '../contracts.js'
+import type { AuthorityAction, ExplorationReport, FusionEvent, Role, RuntimeHandle, TaskId, WorkerReport, WorkOrder } from '../contracts.js'
 import { EpochId, OperationId, SessionId, SnapshotId, TaskId as asTaskId, WorkOrderId } from '../contracts.js'
 import { digestOf } from '../digest.js'
 import { WorkspaceWriteLease } from '../execution/write-lease.js'
@@ -62,12 +62,13 @@ import { evidencePage } from './evidence-page.js'
 import { readNativeEvidence } from './native-evidence.js'
 import { isRouteTransportName, registeredRouteTransport, withRouteTransport } from './route-transport.js'
 import { isRead, READ_TOOLS } from './read-tools.js'
+import { AUTHORITY_ACTIONS, workerAuthorityProblem } from './authority.js'
 
 const textOutput = { schema: { type: 'string' as const }, render: (_args: unknown, text: string) => [{ type: 'text' as const, text }] }
 const stringList = { type: 'array' as const, items: { type: 'string' as const }, required: true as const }
 const optionalStringList = { type: 'array' as const, items: { type: 'string' as const } }
-const FUSION_TOOLS = new Set(['fusion_read_state', 'fusion_delegate_text', 'fusion_explore', 'fusion_delegate', 'fusion_rework', 'fusion_wait', 'fusion_review_result', 'fusion_submit_result', 'fusion_takeover', 'fusion_finish_direct', 'fusion_read_evidence'])
-const WORKER_FUSION_TOOLS = new Set(['fusion_submit_result', 'fusion_read_state', 'fusion_read_evidence'])
+const FUSION_TOOLS = new Set(['fusion_read_state', 'fusion_delegate_text', 'fusion_explore', 'fusion_delegate', 'fusion_rework', 'fusion_wait', 'fusion_review_result', 'fusion_submit_result', 'fusion_takeover', 'fusion_finish_direct', 'fusion_read_evidence', 'fusion_declare_runtime'])
+const WORKER_FUSION_TOOLS = new Set(['fusion_submit_result', 'fusion_read_state', 'fusion_read_evidence', 'fusion_declare_runtime'])
 export interface CoordinatorOptions {
   profile: ResolvedProfile
   workerTools: readonly string[]
@@ -211,11 +212,23 @@ export function directWriteLines(exec: Readonly<ToolExecution>): number {
  */
 export const DEFAULT_POLICY = { maxWorkerSteps: 150, maxReworkRounds: 3, commandMaxSeconds: 600 } as const
 
+/**
+ * A declared runtime outlives the Worker's report, so the Host bounds its life: a
+ * forgotten dev server must not survive the task. Long builds stay under the
+ * ordinary command deadline instead of this one.
+ */
+export const DEFAULT_RETAINED_MINUTES = 30
+export const MAX_RETAINED_MINUTES = 240
+
 interface DelegateInput {
   goal: string; brief: string; constraints: string[]; allowedPaths: string[]; checks: CheckDefinition[]
   block?: boolean
   /** Verbatim quotes of the user's hard requirements; frozen as user-provenance constraints. */
   requirements?: string[]
+  /** Authority actions the Lead grants for this work order; anything else stays refused on the Worker's shell. */
+  authority?: readonly string[]
+  /** Let the Worker declare a background process that outlives its report (dev server, watcher). */
+  preserveRuntime?: boolean
 }
 
 /** Whitespace-insensitive, otherwise exact: a requirement must be the user's own words. */
@@ -226,7 +239,7 @@ export const literalSpans = (text: string) => [...new Set([...text.matchAll(/`([
 
 /** The enforced-v3 Lead's fixed catalog (order is part of the cached prompt prefix). */
 const SEPARATED_LEAD_TOOLS: readonly string[] = [...new Set([...READ_TOOLS, nativeShellTool, ...[...FUSION_TOOLS].filter(name =>
-  !['fusion_takeover', 'fusion_submit_result', 'fusion_finish_direct'].includes(name))])]
+  !['fusion_takeover', 'fusion_submit_result', 'fusion_finish_direct', 'fusion_declare_runtime'].includes(name))])]
 
 /** Test files by common conventions (Python, JS/TS, Go, Rust and generic test directories). */
 const TEST_FILE = /(^|\/)(tests?|__tests__|specs?)\/|(^|\/)test_[^/]+\.py$|_test\.(py|go)$|\.(test|spec)\.[cm]?[jt]sx?$|(^|\/)conftest\.py$/i
@@ -349,6 +362,17 @@ export class FusionCoordinator {
         }
       },
       installTools: (scope, agent, _binding, role) => this.#tools(scope, agent, role),
+      // The Worker's reporting contract survives its ceiling. Declaring a retained
+      // runtime is part of submitting an implementation report, so it appears only
+      // while an implementation order is current — an explore or text order must
+      // not gain a tool its mode forbids.
+      alwaysTools: (binding, role) => {
+        if (role !== 'worker') return []
+        const mode = this.state(binding.taskId).currentWorkOrder?.mode ?? 'implement'
+        return mode === 'implement'
+          ? ['fusion_read_state', 'fusion_read_evidence', 'fusion_submit_result', 'fusion_declare_runtime']
+          : ['fusion_read_state', 'fusion_read_evidence', 'fusion_submit_result']
+      },
       readOnlyTools: (agent, binding, role) => {
         const ceiling = this.#roleCeiling(agent, binding, role)
         // A bridge route (Antigravity's agy) can only answer under its own
@@ -545,12 +569,16 @@ export class FusionCoordinator {
         (this.store.readDocument(id)?.value as { state?: string } | undefined)?.state === 'started')
       const interruptedApproval = this.store.listDocumentIds(`native-approval:${binding.taskId}:`).some(id =>
         (this.store.readDocument(id)?.value as { state?: string } | undefined)?.state === 'pending')
+      // A retained runtime left by an earlier Host is a live process this process
+      // did not start. It is never adopted: recovery must see it, and the user must
+      // have stopped it before the task continues.
       const interruptedEffect = this.effects.pending(binding.taskId).length > 0
+        || this.effects.strandedRetained(binding.taskId).length > 0
       const uncertainBrief = this.store.listDocumentIds(`worker-delivery:${binding.taskId}:`).some(id =>
         (this.store.readDocument(id)?.value as { state?: string } | undefined)?.state === 'prepared')
       const detachedWorker = (this.store.readDocument(`runtime:${binding.taskId}`)?.value as RuntimeRecord | undefined)?.background
       if ((state.lease || pendingDispatch || uncertainCheck || interruptedCompaction || interruptedApproval || interruptedEffect || uncertainBrief || detachedWorker || state.pendingApprovalIds.length) && state.control.mode !== 'completed' && !state.control.recovering) {
-        this.append(binding.taskId, 'recovery/needed', { reason: 'Host runtime was replaced with a recorded writer, pending dispatch/approval, uncertain check or unfinished compaction' })
+        this.append(binding.taskId, 'recovery/needed', { reason: 'Host runtime was replaced with a recorded writer, pending dispatch/approval, uncertain check, unfinished compaction or a runtime it did not start' })
       }
     }
     for (const agent of ctx.agents.list()) this.#attachKnown(agent)
@@ -1106,7 +1134,7 @@ export class FusionCoordinator {
           if (name === 'fusion_review_result') return state.phase === 'REVIEWING'
           if (name === 'fusion_wait') return state.phase === 'WORKER_RUNNING'
         }
-        return name !== 'fusion_submit_result'
+        return name !== 'fusion_submit_result' && name !== 'fusion_declare_runtime'
         && (name !== 'fusion_takeover' || state.currentWorkOrder?.mode !== 'text'
           && state.currentWorkOrder?.mode !== 'explore' && state.reviewResult?.decision === 'rework')
       })
@@ -1204,7 +1232,13 @@ export class FusionCoordinator {
       if (state.currentWorkOrder && !pathAllowed(path, state.currentWorkOrder.allowedPaths)) return 'The edit is outside frozen allowedPaths'
     }
     if (isShellTool(exec.name)) {
-      const args = exec.arguments as { workdir?: string; run_in_background?: boolean }
+      const args = exec.arguments as { workdir?: string; run_in_background?: boolean; command?: unknown }
+      // Holding the write lease is not publication authority: commits, pushes, tags, releases, pull
+      // requests and CI runs are the Lead's, unless this work order granted that exact action.
+      if (role === 'worker' && typeof args.command === 'string') {
+        const authority = workerAuthorityProblem(args.command, state.currentWorkOrder?.authority ?? [])
+        if (authority) return authority
+      }
       if (args.run_in_background) {
         const issue = this.effects.backgroundProblem(exec)
         if (issue) return issue
@@ -1273,6 +1307,21 @@ export class FusionCoordinator {
     // Lead cache hit 69% against 94% alone). Phase rules stay enforced where they belong: in each tool and
     // the guard, whose refusals say what to do instead. Takeover appears only once the Host unlocks it.
     return this.#escalation(binding) ? [...SEPARATED_LEAD_TOOLS, 'fusion_takeover'] : SEPARATED_LEAD_TOOLS
+  }
+
+  /**
+   * The authority actions this work order grants. Absent means none: the Sidekick
+   * may change files inside allowedPaths, but commits, pushes, tags, publishes,
+   * releases, pull requests and CI runs stay with the Lead, which owns the
+   * user-facing consequences. The grant is frozen with the order, so a rework
+   * brief cannot widen it.
+   */
+  #authorityGrant(requested: readonly string[] | undefined, mode: 'explore' | 'implement' | 'text'): readonly AuthorityAction[] {
+    if (!requested?.length) return []
+    const unknown = requested.filter(action => !AUTHORITY_ACTIONS.includes(action as AuthorityAction))
+    if (unknown.length) throw new Error(`Unknown authority action(s): ${unknown.join(', ')}. Allowed: ${AUTHORITY_ACTIONS.join(', ')}.`)
+    if (mode !== 'implement') throw new Error('Authority grants belong to implementation work: exploration and text-only orders run no shell commands.')
+    return [...new Set(requested as readonly AuthorityAction[])]
   }
 
   /** undefined = allow now, string = refuse, false = not decided here (continue the ordinary guard). */
@@ -1400,6 +1449,54 @@ export class FusionCoordinator {
     })().finally(() => { this.#backgroundStops.delete(binding.taskId) })
     this.#backgroundStops.set(binding.taskId, pending)
     return pending
+  }
+
+  /**
+   * Declare one running background job as a runtime this work order keeps alive.
+   * The Worker names the job, the Host keeps the identity it recorded at start and
+   * bounds its life; nothing here lets a model adopt a process it did not start.
+   */
+  #declareRuntime(agent: Agent, args: { job_id?: unknown; purpose?: unknown; max_minutes?: unknown }): string {
+    const binding = this.#binding(agent, 'worker'), state = this.state(binding.taskId), order = state.currentWorkOrder
+    if (!order || order.mode !== 'implement') throw new Error('A declared runtime belongs to a running implementation work order')
+    if (!order.preserveRuntime) {
+      throw new Error('This work order does not preserve runtimes. Stop the job with job_kill before submitting, or ask the Lead to delegate again with preserveRuntime.')
+    }
+    const jobId = typeof args.job_id === 'string' ? args.job_id.trim() : ''
+    if (!jobId) throw new Error('A declared runtime needs the job id the native shell returned for run_in_background')
+    const purpose = typeof args.purpose === 'string' ? args.purpose.trim() : ''
+    if (purpose.length < 8) throw new Error('Record what the process is for (at least 8 characters); the next brief decides from it whether to reuse the process')
+    const minutes = args.max_minutes === undefined ? DEFAULT_RETAINED_MINUTES : args.max_minutes
+    if (typeof minutes !== 'number' || !Number.isSafeInteger(minutes) || minutes < 1 || minutes > MAX_RETAINED_MINUTES) {
+      throw new Error(`A declared runtime lives 1–${MAX_RETAINED_MINUTES} minutes (got ${String(minutes)})`)
+    }
+    const handle = this.effects.retain(binding.taskId, jobId, { agentId: agent.id, workOrderId: order.id, purpose, maxMs: minutes * 60_000 })
+    this.append(binding.taskId, 'runtime/declared', { jobId: handle.jobId, purpose, deadlineAt: handle.deadlineAt })
+    return JSON.stringify({ status: 'runtime-declared', jobId: handle.jobId, purpose,
+      deadlineAt: handle.deadlineAt === null ? null : new Date(handle.deadlineAt).toISOString(),
+      next: 'Submit your report when the remaining work is done. The Host keeps this process until the task completes, the task pauses or is taken over, its deadline elapses or the Host shuts down; a later handoff of this work order is told it is still running.' })
+  }
+
+  /**
+   * The runtime-state lines a next brief needs. The Host tears down a Worker's
+   * processes when its handoff ends — a background job is owned by the Worker's
+   * Agent scope, and that scope is disposed with the turn — so a declared runtime
+   * is reported with its recorded state instead of being silently restarted: the
+   * brief says what the previous handoff left behind and whether it is still there.
+   */
+  #retainedNote(taskId: TaskId): string | undefined {
+    const ids = this.store.listDocumentIds(`runtime-handle:${taskId}:`)
+    if (!ids.length) return undefined
+    const rows = ids.map(id => this.store.readDocument(id)!.value as RuntimeHandle & { state?: string })
+      .filter(row => row.schemaVersion === 1 && row.taskId === taskId)
+    if (!rows.length) return undefined
+    const live = this.effects.retained(taskId)
+    return 'Processes the previous handoff declared (a Worker\'s background jobs are stopped when its handoff ends; '
+      + 'start one again only if you still need it, and declare it again so the Host can report it later):\n'
+      + rows.map(row => {
+        const now = live.find(item => item.jobId === row.jobId)
+        return `- ${row.purpose} (cwd ${row.cwd}) [${now ? `running as job ${row.jobId}` : row.state ?? 'ended'}]`
+      }).join('\n')
   }
 
   #runningReply(binding: SessionBinding, delivery: string): string {
@@ -1562,13 +1659,17 @@ export class FusionCoordinator {
       && event.type === 'user/message' && (event.data.source === undefined || event.data.source.kind === 'user'))
       .flatMap(event => event.type === 'user/message' ? event.data.content.filter(block => block.type === 'text').map(block => block.text) : [])
     const requirements = this.#requirements(binding, mode, args.requirements, userTexts)
+    const authority = this.#authorityGrant(args.authority, mode)
+    if (args.preserveRuntime && mode !== 'implement') throw new Error('preserveRuntime belongs to implementation work: exploration and text-only orders run no commands')
     const order: WorkOrder = {
       schemaVersion: 1, mode, taskId: binding.taskId, id: WorkOrderId(randomUUID()), operationId: OperationId(randomUUID()), revision: this.state(binding.taskId).revision,
       goal: args.goal, constraints: [...args.constraints.map((text, i) => ({ id: `constraint-${i}`, text, mandatory: true, provenance: 'inferred' as const,
         source: { sessionId: SessionId(agent.id), eventSeq: source.seq, messageId: source.data.id } })),
       ...requirements.map((text, i) => ({ id: `requirement-${i}`, text, mandatory: true, provenance: 'user' as const,
         source: { sessionId: SessionId(agent.id), eventSeq: source.seq, messageId: source.data.id } }))], acceptance: [], allowedPaths,
-      forbiddenActions: [...(mode === 'explore' ? ['Write files or run commands during read-only exploration'] : []), 'Change unrelated paths', 'Weaken frozen acceptance checks', 'Bypass native tool permissions'], baseSnapshot: base.id,
+      forbiddenActions: [...(mode === 'explore' ? ['Write files or run commands during read-only exploration'] : []), 'Change unrelated paths', 'Weaken frozen acceptance checks', 'Bypass native tool permissions',
+        ...(mode === 'implement' && !authority.length ? ['Commit, push, tag, publish, release, open a pull request or trigger CI; report the action instead'] : [])],
+      ...(authority.length ? { authority } : {}), ...(args.preserveRuntime ? { preserveRuntime: true as const } : {}), baseSnapshot: base.id,
       evidence: explored ? priorState.exploration!.sources.map(source => source.excerpt) : [], decisions: [], uncertainties: [], policy: {
         maxWorkerSteps: this.options.maxWorkerSteps ?? DEFAULT_POLICY.maxWorkerSteps, maxReworkRounds: this.options.maxReworkRounds ?? DEFAULT_POLICY.maxReworkRounds,
         maxCapabilityUpgrades: 0, commandMaxSeconds: this.options.commandMaxSeconds ?? DEFAULT_POLICY.commandMaxSeconds,
@@ -1625,7 +1726,8 @@ export class FusionCoordinator {
     const known = checks.filter(check => check.plan.allowedFailures?.length)
       .map(check => `${check.definition.id}: ${JSON.stringify(check.plan.allowedFailures)}`)
     const knownText = known.length ? `\n\nPre-existing failures the Host observed on the untouched workspace before you started (not part of this task; these checks pass while only these fail, so do not change unrelated code to fix them):\n${known.join('\n')}` : ''
-    const brief = `${request}${hard}Current stage brief (Lead-authored; later feedback may advance or replace this stage without changing the frozen work order):\n${args.brief}\n\nFrozen work order (goal and constraints apply throughout this work order, across all implementation stages):\n${JSON.stringify(shownOrder)}\n\n${mode === 'explore'
+    const retainedNote = this.#retainedNote(binding.taskId)
+    const brief = `${request}${hard}Current stage brief (Lead-authored; later feedback may advance or replace this stage without changing the frozen work order):\n${args.brief}\n\n${retainedNote ? `${retainedNote}\n\n` : ''}Frozen work order (goal and constraints apply throughout this work order, across all implementation stages):\n${JSON.stringify(shownOrder)}\n\n${mode === 'explore'
       ? 'Read-only exploration: return findings and source ranges through fusion_submit_result. Do not implement, run commands, or claim task completion.'
       : mode === 'text'
         ? `Text-only assignment: no workspace and no acceptance command. Submit the answer through fusion_submit_result. ${textReportInstruction({ ...order, briefRevision: this.#runtime(binding.taskId).briefRevision ?? 0 })}`
@@ -1831,9 +1933,10 @@ export class FusionCoordinator {
       // identity: rework keeps the frozen order revision, and a report bound to the
       // previous brief is refused. Re-stating the protocol here keeps it discoverable
       // without inflating the frozen brief.
+      const retainedNote = this.#retainedNote(binding.taskId)
       const message = state.currentWorkOrder.mode === 'text'
         ? `${feedback}\n\n${textReportInstruction({ ...state.currentWorkOrder, briefRevision })}`
-        : feedback
+        : retainedNote ? `${feedback}\n\n${retainedNote}` : feedback
       const payload = this.store.putArtifact(binding.taskId, Buffer.from(message), 'text/plain')
       this.store.writeDocument(deliveryId, 0, { schemaVersion: 1, taskId: binding.taskId, childId: state.acceptedChild,
         workOrderId: state.currentWorkOrder.id, state: 'prepared', briefRevision, delivery, feedbackKind, payloadRef: payload.id, causeId: exec.callId })
@@ -2030,8 +2133,8 @@ export class FusionCoordinator {
       .filter(span => !texts.some(text => text.includes(span))).map(span => ({ requirement: index + 1, span })))
   }
 
-  review(agent: Agent, decision: 'accept' | 'rework' | 'needs-decision', reason: string, exec: ToolRunContext,
-    verdicts: readonly { index: number; met: boolean; evidence: string }[] = []): string {
+  async review(agent: Agent, decision: 'accept' | 'rework' | 'needs-decision', reason: string, exec: ToolRunContext,
+    verdicts: readonly { index: number; met: boolean; evidence: string }[] = []): Promise<string> {
     const binding = this.#binding(agent, 'lead'), runtime = this.#runtime(binding.taskId)
     if (this.state(binding.taskId).phase !== 'REVIEWING') throw new Error('Wait for the current Worker report and checks before recording a review')
     // A review is the Lead's product; a stub reason means no review happened (seen live: "placeholder").
@@ -2051,7 +2154,12 @@ export class FusionCoordinator {
     appendCapturedReviewResult(this.store, binding.taskId, proof.ticket, { requestId: proof.ticket.requestId, terminalEvidenceRef: proof.terminalEvidenceRef, classification })
     const reviewRow = this.store.outbox(binding.taskId).find(row => row.requestId === proof.ticket.requestId)!
     this.store.advanceOutbox(binding.taskId, reviewRow.operationId, reviewRow.state, 'acknowledged')
-    if (decision === 'accept') this.append(binding.taskId, 'task/completed', { snapshot: snapshot.id, verification: 'verified' })
+    if (decision === 'accept') {
+      // A retained runtime belongs to the work order, so completing the task ends
+      // it: an accepted change must not leave a process running underneath it.
+      await this.#stopJobs(binding.taskId)
+      this.append(binding.taskId, 'task/completed', { snapshot: snapshot.id, verification: 'verified' })
+    }
     return JSON.stringify({ decision, taskId: binding.taskId, phase: this.state(binding.taskId).phase, verification: this.state(binding.taskId).verification })
   }
 
@@ -2211,7 +2319,12 @@ export class FusionCoordinator {
         execute: async (args, exec) => {
           const binding = this.#binding(agent, role), runtime = this.#runtime(binding.taskId)
           if (role === 'lead' && (!runtime.takeover || !this.state(binding.taskId).currentWorkOrder)) throw new Error('Lead submission requires takeover of an existing work order')
-          if (this.effects.pending(binding.taskId).length) throw new Error('Collect or stop every native job and settle effects before submitting a report')
+          if (this.effects.pending(binding.taskId).length) {
+            const order = this.state(binding.taskId).currentWorkOrder
+            throw new Error(order?.preserveRuntime
+              ? 'Collect or stop every native job before submitting, or declare the running background job you need to keep with fusion_declare_runtime'
+              : 'Collect or stop every native job and settle effects before submitting a report')
+          }
           if (args.summary.length > 16_000 || args.unresolved.length > 30) throw new Error('Worker report is too large')
           const submitted = { summary: args.summary, unresolved: args.unresolved, status: args.status }
           const order = this.state(binding.taskId).currentWorkOrder!
@@ -2236,7 +2349,17 @@ export class FusionCoordinator {
       parameters: { offset: { type: 'integer' }, limit: { type: 'integer' } }, output: textOutput,
       execute: async (args) => JSON.stringify(this.onDemand.read(agent, this.#binding(agent, role), role, args.offset, args.limit)),
     })))
-    if (role === 'worker') return dispose
+    if (role === 'worker') {
+      dispose.push(scope.tools.register(defineTool({ name: 'fusion_declare_runtime',
+        description: 'Declare one running background job as the runtime this stage leaves behind: a dev server, a watcher, a debugger. Only for a work order whose Lead set preserveRuntime. Two effects: an undeclared running job would block your report, and the declaration records what the process is for, its cwd and a deadline, so the next handoff is told exactly what was running instead of guessing. The Host owns the lifetime: it stops the job at its deadline, and the native jobs runtime stops every job a Worker owns when that handoff ends, so plan on restarting it in a later handoff rather than on finding it still up.',
+        parameters: {
+          job_id: { type: 'string', description: 'The job id the native shell returned when the command was started with run_in_background.', required: true },
+          purpose: { type: 'string', description: 'What this process is for, in one line, so the next brief knows whether to reuse it. At least 8 characters.', required: true },
+          max_minutes: { type: 'integer', description: `Upper bound on its life, 1–${MAX_RETAINED_MINUTES} minutes (default ${DEFAULT_RETAINED_MINUTES}); the Host kills it when this elapses.` },
+        }, output: textOutput,
+        execute: async (args) => this.#declareRuntime(agent, args) })))
+      return dispose
+    }
     dispose.push(scope.tools.register(defineTool({ name: 'fusion_takeover', description: this.owner(agent) && enforcedWorkflow(this.owner(agent)!.binding)
       ? 'Acquire exclusive write ownership for a Lead correction only after the current implementation report and a recorded rework review. Preserve the frozen checks; submit the correction and review it again.'
       : 'Acquire exclusive write ownership for a small direct task, or for a Lead correction after the current Worker report. A delegated task keeps its frozen acceptance checks and review. Takeover is recorded separately from Worker implementation.',
@@ -2335,8 +2458,11 @@ export class FusionCoordinator {
         allowedPaths: { ...stringList, description: 'Workspace-relative files or directories the Worker may change across all planned stages, including regression tests. A directory grants every file under it; a trailing /** is accepted as the same grant, other wildcards are refused. The Worker cannot expand this set; after a report you can add paths with fusion_rework addAllowedPaths.' },
         block: { type: 'boolean', description: 'Default true. False permits read-only Lead work while the Worker retains write ownership.' },
         checks: { type: 'array', required: true, items: checkItem, description: 'Acceptance commands the Host runs after the Worker reports; [] for review-only work.' },
-        requirements: { ...optionalStringList, description: 'The user\'s hard requirements as exact quotes of their messages (required behaviour, names, strings, formats, acceptance criteria), 1-20 items. The Host verifies each quote against the user\'s words, freezes them for the Sidekick, and your accept must give one verdict per item.' } }, output: textOutput,
-      execute: (args, exec) => this.delegate(agent, { ...args, constraints: args.constraints ?? [], checks: normalizeChecks(args.checks), requirements: args.requirements ?? [] }, exec) })))
+        requirements: { ...optionalStringList, description: 'The user\'s hard requirements as exact quotes of their messages (required behaviour, names, strings, formats, acceptance criteria), 1-20 items. The Host verifies each quote against the user\'s words, freezes them for the Sidekick, and your accept must give one verdict per item.' },
+        authority: { type: 'array', items: { type: 'string', enum: [...AUTHORITY_ACTIONS] },
+          description: 'Default none. Authority actions you grant for this work order: commit, push, tag, publish, release, pr, ci. The write lease covers files inside allowedPaths, not what leaves the workspace or rewrites it: without a grant the Host refuses these on the Sidekick\'s shell. Grant only what the user actually asked for, and keep the user-facing consequences (PR text, release notes, CI results) yours.' },
+        preserveRuntime: { type: 'boolean', description: 'Default false: the Worker must settle every command before it can submit. True lets it declare one running background process with fusion_declare_runtime instead of killing it first, and records it for the next handoff. The process still ends with the handoff: the native jobs runtime stops a Worker\'s jobs when its Agent scope is disposed, so this removes a needless stop-and-restart inside one handoff and makes the next brief explicit about what was running; it does not keep a server up across handoffs.' } }, output: textOutput,
+      execute: (args, exec) => this.delegate(agent, { ...args, constraints: args.constraints ?? [], checks: normalizeChecks(args.checks), requirements: args.requirements ?? [], authority: args.authority ?? [], preserveRuntime: args.preserveRuntime === true }, exec) })))
     dispose.push(scope.tools.register(defineTool({ name: 'fusion_rework', description: 'Send specific Lead-authored feedback to the same persistent Worker, including advancing a planned implementation stage. Before a report this continues unfinished work within the Worker-step budget; after a report it consumes a rework round. Active generation and native job waits can be replaced without restarting a tracked job; an active foreground tool finishes before the new brief. Keep durable requirements unchanged. Do not suggest files outside the frozen allowed paths unless you add them with addAllowedPaths.',
       // Orchestration includes human approval waits; leaf tools retain their
       // resource deadlines, but the wait itself must not expire.

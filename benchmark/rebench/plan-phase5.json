@@ -1,0 +1,29 @@
+{
+  "_note": "Phase 5 A/B. Same committed plugin code and the same Fusion pair in both arms; the ONLY variable is the role prompts, which are read from the plugin's prompts/ directory at session selection. Arm A runs with the pre-change prompts (git 96c5e3b), arm B with the optimized ones (facbd4b). Run each arm into its own --out file, then compare medians. reps are 1 here: this is a directional pilot like docs/REBENCH_DEVIN.md, not a leaderboard score.",
+  "conditions": {
+    "F_fusion": {
+      "provider": "dsh-fusion",
+      "model": "auto",
+      "pair": {
+        "lead": {
+          "provider": "gz",
+          "model": "gpt-6-astra",
+          "reasoningEffort": "high"
+        },
+        "worker": {
+          "provider": "gz",
+          "model": "deepseek-v4.1-flash",
+          "reasoningEffort": "high"
+        }
+      }
+    }
+  },
+  "reps": 1,
+  "prices": {
+    "gpt-6-astra": [
+      10,
+      1,
+      50
+    ]
+  }
+}

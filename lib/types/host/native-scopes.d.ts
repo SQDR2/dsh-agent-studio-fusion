@@ -32,6 +32,12 @@ export interface FusionScopeCallbacks {
     }>;
     /** Read-stage tools, presented natively. Undefined restores the native composition. */
     readOnlyTools?(agent: Agent, binding: SessionBinding, role: Role): readonly string[] | undefined;
+    /**
+     * Tools this role keeps in its request table even when the role's ceiling would
+     * narrow them away — the reporting contract a Worker cannot lose. Read per
+     * request, so a work-order-dependent tool appears only where it is usable.
+     */
+    alwaysTools?(binding: SessionBinding, role: Role): readonly string[];
     installTools(scope: Context, agent: Agent, binding: SessionBinding, role: Role): readonly (() => void)[];
 }
 /** Physical routing, prompt and tools live in the exact native Agent scope. */
