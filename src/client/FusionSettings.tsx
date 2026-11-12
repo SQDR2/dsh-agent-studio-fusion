@@ -1,6 +1,8 @@
 import { FusionHistory } from './FusionHistory.js'
 import { FusionCache } from './FusionCache.js'
 import { AgyConsole } from './agy/AgyConsole.js'
+import { AcpSettingsGuide } from './AcpSettingsGuide.js'
+import { STUDIO_TITLE } from './studio-brand.js'
 import { useEffect, useState } from 'react'
 import type { PhysicalRoute } from '../contracts.js'
 import type { PairChoice, SettingsCatalog } from '../host/settings.js'
@@ -127,6 +129,13 @@ const styles = `
 .fusion-agy-title h3{margin:0;font-size:15px;font-weight:600}
 .fusion-agy-summary small{color:var(--dsw-alias-label-secondary);font-size:12px;font-weight:400}
 .fusion-agy-content{display:flex;flex-direction:column;gap:12px;padding-top:12px;border-top:1px solid var(--dsw-alias-border-l2);margin-top:4px;min-width:0}
+.fusion-nav{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin:0;padding:0}
+.fusion-nav button{padding:6px 14px;border-radius:14px;background:none;color:var(--dsw-alias-label-secondary);font-size:13px;border:1px solid var(--dsw-alias-border-l2)}
+.fusion-nav button[aria-pressed=true]{background:var(--dsw-alias-interactive-bg-hover-accent);border-color:var(--dsw-alias-brand-primary);color:var(--dsw-alias-label-primary);font-weight:600}
+.fusion-nav button:hover:not([aria-pressed=true]){background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
+.fusion-section{display:flex;flex-direction:column;gap:18px;min-width:0}
+/* An author rule beats the UA [hidden] style, so hiding a section needs its own rule. */
+.fusion-section[hidden]{display:none}
 `
 
 const key = (route: PhysicalRoute | undefined) => route ? JSON.stringify([route.provider, route.model]) : ''
@@ -170,8 +179,14 @@ export function ModelChoice({ role, route, catalog, onChange }: {
 let draftKeys = 0
 const toDraft = (pairs: readonly SavedPairView[]): DraftCombo[] => pairs.map(({ id, name, pair }) => ({ key: id, id, name, pair }))
 
+/** The three regions of this one page. Fusion is the default and the plugin's core. */
+type StudioSection = 'fusion' | 'antigravity' | 'acp'
+const STUDIO_SECTIONS: readonly StudioSection[] = ['fusion', 'antigravity', 'acp']
+const SECTION_ID = (section: StudioSection) => `fusion-section-${section}`
+
 export function FusionSettings() {
   const lang = useLang()
+  const [section, setSection] = useState<StudioSection>('fusion')
   const [state, setState] = useState<SettingsState>()
   const [draft, setDraft] = useState<DraftCombo[]>([])
   const [active, setActive] = useState(0)
@@ -242,14 +257,34 @@ export function FusionSettings() {
   return <div className="fusion-page">
     <style>{styles}</style>
     <div className="fusion-settings">
-      <header data-window-drag><h2>Fusion</h2>
+      <header data-window-drag><h2>{STUDIO_TITLE}</h2>
+        <p>{tr(lang, '一个插件整合三种能力：Fusion 组合（在这里配置，Lead 与 Sidekick 分摊工作与成本）、Antigravity（agy CLI 模型线路，账号与额度管理）与 ACP 代理线路（接入说明）。左侧边栏只有 Fusion 一个入口，三个区域在本页内切换。',
+          'One plugin for three capabilities: Fusion combos (configured here — a Lead and a Sidekick sharing the work and the cost), Antigravity (the agy CLI model route, with account and quota management) and ACP agent routes (setup guidance). The sidebar has one entry — Fusion — and the three are sections of this page.')}</p>
+      </header>
+      {/* A button group, not a tablist: no roving tabindex, no arrow-key focus
+          management, so it must not claim role="tab". The sections stay plain
+          accessible regions the buttons point at. */}
+      <nav className="fusion-nav" aria-label={tr(lang, '本页区域', 'Page sections')}>
+        {STUDIO_SECTIONS.map(name => <button key={name} type="button"
+          aria-pressed={section === name}
+          aria-controls={SECTION_ID(name)}
+          onClick={() => setSection(name)}>{name === 'fusion' ? tr(lang, 'Fusion 组合', 'Fusion combos')
+            : name === 'antigravity' ? tr(lang, 'Antigravity', 'Antigravity') : tr(lang, 'ACP 线路', 'ACP routes')}</button>)}
+      </nav>
+      {error && <p role="alert">{error}</p>}
+      {notice && <p role="status">{notice}</p>}
+      {/* The Fusion region stays mounted while another section is shown: unsaved
+          combo edits and the selected row live in this component's state, and a
+          hidden section keeps them. `hidden` (not unmounting) is what preserves them. */}
+      <div className="fusion-section" id={SECTION_ID('fusion')} hidden={section !== 'fusion'}
+        role="region" aria-label={tr(lang, 'Fusion 组合', 'Fusion combos')}>
+        <h3>{tr(lang, 'Fusion 组合', 'Fusion combos')}</h3>
         <p>{tr(lang, '每个组合是一对 Lead 和 Sidekick，会作为单独的一项出现在模型菜单里。开启多个会话时，可以为每个会话选择不同的组合。', 'Each combo is a Lead and a Sidekick pair, listed as its own entry in the model menu. With several conversations open, each one can use a different combo.')}</p>
         <p>{tr(lang, 'Lead 处理日常请求、安排工作并审查结果；Sidekick 执行委派的任务。', 'The Lead handles requests, plans and reviews; the Sidekick does the delegated work.')}</p>
         <p><b>{tr(lang, '搭配建议', 'Pairing tip')}</b>: {tr(lang, 'Fusion 省钱靠的是 Sidekick 比 Lead 便宜得多。选一个强的前沿模型当 Lead，再选一个价格低很多（最好 5 倍以上）的模型当 Sidekick；两者价格越接近，越省不了钱。',
-          'Fusion saves money because the Sidekick is much cheaper than the Lead. Pick a strong frontier Lead and a Sidekick that costs far less (ideally 5× or more); the closer their prices, the smaller the saving.')}</p></header>
-      {error && <p role="alert">{error}</p>}
-      {!state && !error && <p role="status">{tr(lang, '正在读取模型…', 'Loading models…')}</p>}
-      {state && <>
+          'Fusion saves money because the Sidekick is much cheaper than the Lead. Pick a strong frontier Lead and a Sidekick that costs far less (ideally 5× or more); the closer their prices, the smaller the saving.')}</p>
+        {!state && !error && <p role="status">{tr(lang, '正在读取模型…', 'Loading models…')}</p>}
+        {state && <>
         <section className="fusion-card" aria-label={tr(lang, '组合列表', 'Combo list')}>
           <div className="fusion-combos">
             {draft.map((combo, index) => {
@@ -299,27 +334,29 @@ export function FusionSettings() {
         <div className="fusion-actions"><p>{tr(lang, '已选中的会话保留原组合；新选择使用新组合。额度耗尽后要换当前任务的 Sidekick，用该会话的 Fusion 恢复面板，而不是只改这里。', 'Conversations already using Fusion keep their pair; new selections use the new one. After a quota stop, switch this conversation\'s Sidekick from its Fusion recovery panel, not only here.')}</p>
           <button disabled={saving || !dirty || !draft.length} onClick={() => { void save() }}>{saving ? tr(lang, '正在保存…', 'Saving…') : tr(lang, '保存组合', 'Save combos')}</button>
         </div>
-        {notice && <p role="status">{notice}</p>}
         <p>{tr(lang, '输出参数跟随原生模型设置，Fusion 不额外限制请求次数或任务轮数。', 'Output settings follow the native model settings; Fusion adds no request or round limits.')}</p>
         <p>{tr(lang, '保存即表示允许 Fusion 使用所选模型的现有账号；费用由这些账号计入，当前未提供可靠的实际账单金额。', 'Saving lets Fusion use the chosen models\' existing accounts; they are billed there, and no reliable billed amount is available here.')}</p>
         {blocked.map(pair => <p key={pair.id} role="status">{`${pair.name}: ${tr(lang, '尚未就绪，需要重新保存这个组合', 'not ready yet; save this combo again')}${pair.reason ? `: ${pair.reason}` : ''}`}</p>)}
         {state.managedAuthorization && <p>{tr(lang, '运行额度由外部授权配置管理。', 'Run limits are managed by an external authorization file.')}</p>}
       </>}
-      <section className="fusion-agy" aria-label={tr(lang, 'Antigravity（agy CLI）', 'Antigravity (agy CLI)')}>
-        <details>
-          <summary className="fusion-agy-summary">
-            <span className="fusion-agy-title"><h3>Antigravity</h3></span>
-            <small>{tr(lang, '账号、额度、模型与权限模式', 'Accounts, quota, models and permission mode')}</small>
-          </summary>
-          <div className="fusion-agy-content">
-            <p>{tr(lang, '把 Google Antigravity（agy CLI）作为模型路线与 Sidekick 使用。这里管理它的账号、额度、模型可见性与权限模式；路线名为 antigravity，命令为 /agy。',
-              'Use Google Antigravity (agy CLI) as a model route and as a Sidekick. This section manages its accounts, quota, model visibility and permission mode; the route is antigravity and the command is /agy.')}</p>
-            <AgyConsole isModal={false} />
-          </div>
-        </details>
-      </section>
-      <FusionCache refresh={state?.revision ?? 0} />
-      <FusionHistory />
+        <FusionCache refresh={state?.revision ?? 0} />
+        <FusionHistory />
+      </div>
+      {/* Both regions stay in the document so every `aria-controls` resolves, and
+          both are `hidden` while unselected. Only their CONTENTS mount on demand:
+          the console starts a 3s status poll and reads the account pool on mount,
+          so an unvisited section must not pay for it. */}
+      <div className="fusion-section" id={SECTION_ID('antigravity')} hidden={section !== 'antigravity'}
+        role="region" aria-label={tr(lang, 'Antigravity（agy CLI）', 'Antigravity (agy CLI)')}>
+        <h3>{tr(lang, 'Antigravity', 'Antigravity')}</h3>
+        <p>{tr(lang, '把 Google Antigravity（agy CLI）作为模型路线与 Sidekick 使用。这里管理它的账号、额度、模型可见性与权限模式；路线名为 antigravity，命令为 /agy。',
+          'Use Google Antigravity (agy CLI) as a model route and as a Sidekick. This section manages its accounts, quota, model visibility and permission mode; the route is antigravity and the command is /agy.')}</p>
+        {section === 'antigravity' && <AgyConsole isModal={false} />}
+      </div>
+      <div className="fusion-section" id={SECTION_ID('acp')} hidden={section !== 'acp'}
+        role="region" aria-label={tr(lang, 'ACP 线路', 'ACP routes')}>
+        {section === 'acp' && <AcpSettingsGuide />}
+      </div>
     </div>
   </div>
 }

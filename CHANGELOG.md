@@ -15,6 +15,62 @@ own tags and releases.
 Entry format: what changed, then what was actually validated. "Not claimed" lines mark what a release did *not* test —
 read them before assuming a platform is covered.
 
+## Unreleased
+
+### Client
+- **The Fusion panel becomes the combined studio page**, titled `DSH Agent Studio With Fusion` (one constant,
+  `src/client/studio-brand.ts`). The sidebar row keeps its short label `Fusion` and the panel id stays `fusion`; the
+  package name, plugin id, state directory and provider routes are unchanged, and no Harness-wide branding slot is
+  claimed — `sidebar.brand.mark` / `sidebar.brand.name` are deliberately left to the official brand plugin.
+- The page has three labelled section buttons — **Fusion combos** (default), **Antigravity**, **ACP routes** — as a
+  `<nav>` of plain buttons with `aria-pressed` and `aria-controls`, not `role="tab"`: no roving tabindex or arrow-key
+  focus management is implemented, so the page does not claim tab semantics. All three regions are always in the
+  document (so every `aria-controls` resolves) and are toggled with `hidden`; only their contents mount on demand.
+- **Section state preservation is deliberate and asymmetric.** The Fusion region is hidden, never unmounted, so unsaved
+  combo edits and the selected row survive a round trip through another section. The Antigravity console *is* mounted
+  only while selected, because it starts a 3s status poll and reads the account pool on mount. Regression coverage:
+  `tests/fusion-brand.spec.ts`.
+- The pairing explanation moved out of the page header into the Fusion section, and the header now describes the
+  combined workspace in one bilingual sentence.
+- **New ACP section** (`src/client/AcpSettingsGuide.tsx`): an honest setup guide. It shows a minimal valid plugin entry
+  (`id`/`name` plus `acp.agents`), and states the real field rules: `command` is required and an absolute path is only
+  *more reliable* (a PATH command works — the route is spawned directly), `args` may be empty, and `models` may be
+  omitted entirely, in which case `discoverModels` asks the agent and the `default` model is the fallback. It also notes
+  the restart requirement, that configured routes then appear in the native and Fusion model selectors, and that an
+  existing `dsh-tauri-acp` must be disabled first. It offers **no** route list, model discovery, live status or save
+  control — the upstream configuration editor is still not ported, and
+  [`docs/ATTRIBUTION-ACP.md`](docs/ATTRIBUTION-ACP.md) now says so explicitly.
+- `assets/icon.svg` is shipped (relative, in-package, under the 256 KiB cap) and declared as `icon` plus a `./icon`
+  export, so the Plugins page shows the Fusion convergence mark instead of default artwork.
+- The package description now leads with the product name: `DSH Agent Studio With Fusion: one plugin for DeepSeek
+  Assistant, …`. No version bump.
+
+### Docs
+- [`docs/MIGRATION-ACP.md`](docs/MIGRATION-ACP.md) (Chinese + English): manual disable/remove of `dsh-tauri-acp`, the
+  move into `acp.agents`, the restart requirement, and what is and is not preserved. It claims no release history (this
+  ACP integration is still unreleased) and states exactly one **verified** conflict — one provider route name registered
+  twice is refused with `DUPLICATE_ADAPTER`. Fusion's own `/api/fusion/acp-mcp` bridge is described as Fusion-specific
+  hardening, not as something inherited from upstream.
+- [`docs/MIGRATION-AGY.md`](docs/MIGRATION-AGY.md): console location updated to the new **Antigravity** section, and the
+  account-pool row now says the copy is needed when the two resolved roots differ — whichever of `DSH_HOME` /
+  `DSH_STATE_DIR` was relocated.
+- `README.md`, `README.en.md`, `INSTALL.md`, `INSTALL.zh.md`: new titles and openings describing one integrated plugin,
+  and no remaining claim that `dsh-agy-worker` or `dsh-tauri-acp` has to be installed separately.
+
+### Validation
+- `pnpm typecheck` clean.
+- `pnpm test` passes, including `tests/fusion-brand.spec.ts` (page structure, draft preservation, lazy mounting, plus a
+  package-icon/metadata check and a client-`apply` check that exactly one `main`/`sidebar.panellist` entry is registered,
+  labelled `Fusion`, with no `sidebar.brand.*` claim) and the adapted `tests/fusion-settings-agy.spec.ts`.
+- `DSHX_HARNESS=… pnpm test:host` passes, including the new `native-tests/agy-process.spec.ts`.
+- `pnpm build` regenerates `lib/`.
+- **Offline only.** `native-tests/agy-process.spec.ts` drives the real adapter against the fixture child at
+  `native-tests/fixtures/fake-agy.mjs` and replays the recorded step through the production `agy_tool` mirror — with
+  every home, state dir and conversations dir redirected into a temp tree, no network, no Google login and no paid
+  model call. It is **not** a Fusion-worker end-to-end test: no Lead, no work order, no coordinator. No live install,
+  Host restart, profile edit or real `agy` run happened in this stage either, and the GUI on this machine still serves
+  the previously published artifacts, so nothing here claims a live deployment or a screenshot.
+
 ## 0.4.0 — 2026-11-12
 
 ### Runtime

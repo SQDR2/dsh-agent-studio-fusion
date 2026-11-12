@@ -1,11 +1,13 @@
-# Fusion · DSH 插件
+# DSH Agent Studio With Fusion
 
 [English](README.en.md) · [安装](INSTALL.zh.md) · [Install (English)](INSTALL.md) · [更新日志](CHANGELOG.md)
 
 > **本仓库是 [`aa2246740/dsh-model-fusion`](https://github.com/aa2246740/dsh-model-fusion) 的 fork，包名 `@sqdr2/dsh-fusion`。**
-> 上游的能力、算法和实测数据全部保留；本 fork 专注于三件事：把入口从「设置」搬到左侧边栏、
-> 让 agy 线路（[`dsh-agy-worker`](https://github.com/SQDR2/dsh-agy-worker)）真的能当 Sidekick、
-> 以及修掉冻结范围与任务记录上几个会卡住流程的问题。改动清单见 [本 fork 做了什么](#本-fork-做了什么)。
+> 上游的能力、算法和实测数据全部保留。这个 fork 现在把三件事装进 **一个插件**：Fusion 的 Lead/Sidekick
+> 组合、Antigravity（`agy` CLI，从 [`dsh-agy-worker`](https://github.com/SQDR2/dsh-agy-worker) 以 MIT 许可并入）
+> 与 ACP 代理线路（从 [`deepseek-harness-acp`](https://github.com/Fleey/deepseek-harness-acp) 以 MIT 许可并入）。
+> 左侧边栏仍然只有 **Fusion** 一个入口，三个区域在同一个页面里切换；不再需要另装 `dsh-agy-worker` 或
+> `dsh-tauri-acp`。改动清单见 [本 fork 做了什么](#本-fork-做了什么)。
 
 Fusion 在 DeepSeek Harness（DSH）的模型菜单里就是一个普通模型：**你保存几个组合，菜单里就有几项**（**Fusion · 组合名称**）。每个组合背后是两个你自己选的模型：
 
@@ -48,7 +50,9 @@ Fusion 在 DeepSeek Harness（DSH）的模型菜单里就是一个普通模型�
 ## 怎么用
 
 1. 按 [安装说明](INSTALL.zh.md) 装好插件。
-2. 打开左侧边栏的 **Fusion** 入口（默认位于记忆系统下方），给组合起个名字，选择 Lead 和 Sidekick。可以选 DSH 里任何已登录的模型。
+2. 打开左侧边栏的 **Fusion** 入口（默认位于记忆系统下方）。页面标题是 **DSH Agent Studio With Fusion**，
+   顶部有三个区域按钮：**Fusion 组合**（默认）、**Antigravity**、**ACP 线路**。在「Fusion 组合」里给组合起个名字，
+   选择 Lead 和 Sidekick。可以选 DSH 里任何已登录的模型，包括已配置的 Antigravity 与 ACP 线路。
 3. 在模型菜单里选择这个组合（显示为 **Fusion · 组合名称**），像平时一样对话。
 
 **多个组合可以同时存在**（最多 6 个）：例如「快」用便宜模型、「稳」用强模型，分别作为模型菜单里的两项。同时开多个会话时，每个会话可以选不同的组合——选中的会话会冻结当时的组合，之后改设置或换别的会话都不影响它。旧版只有一个组合时保存的配置会自动迁移成名为「自动」的组合，模型 ID 仍是 `auto`，已有会话照常继续。
@@ -81,7 +85,7 @@ Fusion 在 DeepSeek Harness（DSH）的模型菜单里就是一个普通模型�
 Google Antigravity（`agy` CLI）自 0.4.0 起 **内建在本插件里**：从
 [`dsh-agy-worker`](https://github.com/SQDR2/dsh-agy-worker)（`dsh-agy-link` 的 fork）以 MIT 许可移植，见
 [`docs/ATTRIBUTION-AGY.md`](docs/ATTRIBUTION-AGY.md)。它带来 `antigravity` 模型线路、`/agy` 命令、`agy_ask` /
-`agy_tool`、`/plugins/agy-worker/*` 路由、带额度跟踪的账号池，以及 Fusion 面板里的 Antigravity 管理控制台。
+`agy_tool`、`/plugins/agy-worker/*` 路由、带额度跟踪的账号池，以及 Fusion 页面的 **Antigravity** 区域里的管理控制台。
 不需要再装第二个包，左侧边栏仍然只有 Fusion 一个入口。
 
 > **从 `dsh-agy-worker` 迁移：** 启用本插件前 **先** 停用或移除旧包。两者用同一套路由前缀、同一个
@@ -125,21 +129,28 @@ Google Antigravity（`agy` CLI）自 0.4.0 起 **内建在本插件里**：从
 
 ### ACP 线路（内置 `deepseek-harness-acp`）
 
-本插件现在自带 ACP 线路，不必再单独安装 `dsh-tauri-acp`（其 Host 实现以 MIT 许可并入，见
-[`docs/ATTRIBUTION-ACP.md`](docs/ATTRIBUTION-ACP.md)）。在 `cordis.patch.yml` 里给本插件加一段 `acp.agents` 即可，
+本插件自带 ACP 线路，**不必再单独安装 `dsh-tauri-acp`**（其 Host 实现以 MIT 许可并入，见
+[`docs/ATTRIBUTION-ACP.md`](docs/ATTRIBUTION-ACP.md)）。左侧边栏 **Fusion** → **ACP 线路** 里有完整说明
+（最小示例、重启要求、迁移步骤）。在 `cordis.patch.yml` 里给本插件加一段 `acp.agents` 即可，
 键是模型选择器里的 provider 路由名：
 
 ```yaml
 - id: dsh-fusion
+  name: '@sqdr2/dsh-fusion'
   config:
     acp:
       agents:
         codex:
           displayName: Codex (ACP)
-          command: /absolute/path/to/codex-acp
+          command: /absolute/path/to/codex-acp   # 必填；绝对路径更稳，PATH 上的命令也可用
           args: []
+          models:                                 # 可整段省略：省略时按 discoverModels 询问
+            - id: default
           permission: ask
 ```
+
+配置在 Host 启动时读取一次，改完需要重启。如果你以前装着独立的 `dsh-tauri-acp`，**先手动停用它**再把同名 provider
+搬到这里，否则会因重复注册而加载失败：步骤见 [`docs/MIGRATION-ACP.md`](docs/MIGRATION-ACP.md)。
 
 ACP 线路作为 Sidekick 时，本插件会在该会话的 ACP `session/new` 里挂一个**只有 Sidekick 拿得到**的 MCP 工具桥：
 地址是本机 Web 服务自己的公开 origin（`ctx.webServer.getOrigin()`）加固定路径 `/api/fusion/acp-mcp`，令牌是 32 字节

@@ -73,7 +73,8 @@ dsh plugin --profile web add ~/github/dsh-fusion
    [dsh-agy-worker](https://github.com/SQDR2/dsh-agy-worker)，**先**停用或移除它 —— 两个同时启用会在加载时失败
    （路由、provider、命令、工具卡全部重复）。配置要求与手动的状态复制见
    [docs/MIGRATION-AGY.md](docs/MIGRATION-AGY.md) 与 [README.md](README.md#用-agy-当-sidekick已内建)。
-2. 打开左侧边栏的 **Fusion** 入口，选择 Lead 和 Sidekick，保存。
+2. 打开左侧边栏的 **Fusion** 入口。页面标题是 **DSH Agent Studio With Fusion**，顶部三个区域按钮分别是
+   **Fusion 组合**、**Antigravity**、**ACP 线路**。在「Fusion 组合」里选好 Lead 和 Sidekick，保存。
 3. 在模型菜单里选择 **Fusion · 自动**。
 4. Windows 用户需安装 PowerShell 7，并确保启动 DSH 的进程 PATH 中有 `pwsh`。本项目关于 Windows 的证据只有一条，而且是历史记录：插件 v0.2.1 曾在 Windows Server 2022、Node 22.23.3、DSH 0.1.7-rc.2 上验证过。这一组合远低于当前基线（Node 24、DSH `>=0.2.1-rc.5 <0.3.0-0`），因此对本版本而言 Windows 仍属未验证；Windows 10/11 从未验证过。Linux 用户正式使用前，先按 [README.md](README.md#支持范围) 里的步骤检查只读限制是否生效。
 

@@ -5,7 +5,7 @@
     "access": "public",
     "registry": "https://registry.npmjs.org/"
   },
-  "description": "Fusion for DeepSeek Harness: one model entry backed by a frontier Lead that reads, briefs and reviews, and a much cheaper Sidekick that writes the code.",
+  "description": "DSH Agent Studio With Fusion: one plugin for DeepSeek Harness, pairing a frontier Lead with a much cheaper Sidekick and hosting the Antigravity (agy CLI) and ACP model routes under one sidebar entry.",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
@@ -15,7 +15,11 @@
     "dsh",
     "deepseek-harness",
     "dsh-plugin",
-    "fusion"
+    "fusion",
+    "antigravity",
+    "agy",
+    "acp",
+    "agent-cli"
   ],
   "type": "module",
   "files": [
@@ -39,7 +43,8 @@
     "docs/ATTRIBUTION-ACP.md",
     "assets",
     "docs/ATTRIBUTION-AGY.md",
-    "docs/MIGRATION-AGY.md"
+    "docs/MIGRATION-AGY.md",
+    "docs/MIGRATION-ACP.md"
   ],
   "exports": {
     ".": {
@@ -52,7 +57,8 @@
       "default": "./lib/client.js"
     },
     "./contracts": "./contracts/fusion.ts",
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./icon": "./assets/icon.svg"
   },
   "dsh": {
     "client": {
@@ -188,5 +194,6 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "link:host": "node scripts/link-host.mjs",
     "test:host": "vitest run --config vitest.host.config.mts"
-  }
+  },
+  "icon": "./assets/icon.svg"
 }

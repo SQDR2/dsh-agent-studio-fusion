@@ -11,6 +11,7 @@ import { FusionTool, fusionControlTools } from './FusionTool.js'
 import { AGY_TOOL_VIEWS, installAgyToolViewStyles } from './agy/toolview.js'
 import { NS as AGY_LOCALE_NS } from './agy/locales.js'
 import { bindAgyLocale, type AgyLocaleSource } from './agy/locale.js'
+import { FUSION_SIDEBAR_LABEL } from './studio-brand.js'
 import { bindLocale } from './i18n.js'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
@@ -60,8 +61,11 @@ export function apply(ctx: Context): void {
   ctx.slots.inject('main', () => ctx.slots.register({
     name: 'main', key: FUSION_PANEL_ID,
   }, FusionSettings))
+  // The one sidebar entry. Its label is the short product name (the page header
+  // carries the full `DSH Agent Studio With Fusion` title); the panel id stays
+  // `fusion`, which is what the main-panel key and the route names use.
   ctx.slots.inject('sidebar.panellist', () => ctx.slots.register({
-    name: 'sidebar.panellist', id: FUSION_PANEL_ID, order: 40, label: () => 'Fusion',
+    name: 'sidebar.panellist', id: FUSION_PANEL_ID, order: 40, label: () => FUSION_SIDEBAR_LABEL,
   }, FusionPanelIcon))
   ctx.inject(['modelDirectories'], scope => {
     const sessionProps = (sessionId: Parameters<typeof scope.modelDirectories.directoryFor>[0]) => {

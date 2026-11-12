@@ -77,7 +77,9 @@ Click **Plugins** in the left sidebar → **Add plugin**, and enter in "Package 
    once fails at load (duplicate route, duplicate provider, duplicate command, duplicate tool card). Requirements and the
    manual state copy are in [docs/MIGRATION-AGY.md](docs/MIGRATION-AGY.md) and
    [README.en.md](README.en.md#using-agy-as-the-sidekick-built-in).
-2. Open the **Fusion** entry in the left sidebar, choose the Lead and the Sidekick, and save.
+2. Open the **Fusion** entry in the left sidebar. The page is titled **DSH Agent Studio With Fusion**; its three
+   section buttons are **Fusion combos**, **Antigravity** and **ACP routes**. In Fusion combos, choose the Lead and the
+   Sidekick, and save.
 3. Select **Fusion · auto** in the model menu.
 4. On Windows, install PowerShell 7 and make sure `pwsh` is on the PATH used to launch DSH. That is the only
    Windows evidence this project has, and it is historical: plugin v0.2.1 was verified on Windows Server 2022 with

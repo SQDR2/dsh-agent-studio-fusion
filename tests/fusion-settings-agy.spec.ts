@@ -27,30 +27,50 @@ async function renderPage(): Promise<ReactTestRenderer> {
 
 const textOf = (root: ReactTestRenderer): string => JSON.stringify(root.toJSON())
 
-describe('FusionSettings is the only entry the Antigravity console has', () => {
-  it('renders the AGY console inside the Fusion page, not as its own panel', async () => {
+/** Open the Antigravity region through the page's own section buttons. */
+async function openAntigravity(root: ReactTestRenderer): Promise<void> {
+  const button = root.root.findByType('nav').findAllByType('button')
+    .find(node => String(node.children.join('')) === 'Antigravity')!
+  await act(async () => { button.props.onClick() })
+}
+
+describe('the Antigravity region of the combined page', () => {
+  it('lives inside the Fusion page as one of its three sections, not as its own panel', async () => {
     const root = await renderPage()
 
-    // One page, one column: the console is a child of `.fusion-settings`.
+    // One page, one column: the region is a child of `.fusion-settings`.
     const page = root.root.findByProps({ className: 'fusion-page' })
     const settings = page.findByProps({ className: 'fusion-settings' })
-    const section = settings.findByProps({ className: 'fusion-agy' })
-    expect(section).toBeDefined()
+    expect(settings).toBeDefined()
 
-    // It is a collapsible section of this page, titled with the product name.
-    const summary = section.findByProps({ className: 'fusion-agy-summary' })
-    expect(summary.findAllByType('h3').map(node => String(node.children.join('')))).toEqual(['Antigravity'])
+    await openAntigravity(root)
+    const region = settings.findByProps({ id: 'fusion-section-antigravity' })
+    expect(region.props.role).toBe('region')
+    expect(region.findAllByType('h3').map(node => String(node.children.join('')))).toEqual(['Antigravity'])
 
-    // The console mounts inline (`isModal: false`) below that summary.
+    // The console mounts inline (`isModal: false`) below that heading.
     expect(textOf(root)).toContain('agy-console')
-    // And this page still owns the one sidebar label and panel title the plugin
-    // registers: no second "Fusion" page, no Antigravity panel of its own.
+    // And this page still owns exactly one product title: no second panel, no
+    // Antigravity entry of its own in the sidebar.
     const headings = root.root.findAllByType('h2').map(node => String(node.children.join('')))
-    expect(headings).toEqual(['Fusion'])
+    expect(headings).toEqual(['DSH Agent Studio With Fusion'])
+  })
+
+  it('is not mounted until it is selected, so its status poll stays idle', async () => {
+    const root = await renderPage()
+    // Default section is Fusion: the region is present (aria-controls resolves) but
+    // its console is not mounted, so no status request is made.
+    expect(root.root.findByProps({ id: 'fusion-section-antigravity' }).props.hidden).toBe(true)
+    expect(textOf(root)).not.toContain('agy-console')
+    expect(vi.mocked(globalThis.fetch).mock.calls.some(call => String(call[0]).includes('/plugins/agy-worker/status'))).toBe(false)
+
+    await openAntigravity(root)
+    expect(textOf(root)).toContain('agy-console')
   })
 
   it('describes the route and the command so the section is self-explanatory', async () => {
     const root = await renderPage()
+    await openAntigravity(root)
     const json = textOf(root)
     // The route name and the slash command are part of the copy, verbatim.
     expect(json).toContain('antigravity')
@@ -59,14 +79,29 @@ describe('FusionSettings is the only entry the Antigravity console has', () => {
 
   it('keeps the AGY stylesheet scoped to the console instead of the document root', async () => {
     const root = await renderPage()
+    await openAntigravity(root)
     const css = root.root.findAllByType('style').map(node => String(node.children.join(''))).join('\n')
     // The theme variables are declared on the console root, not on :root/body, so
     // porting the Antigravity palette cannot repaint Fusion's own pages.
     expect(css).toMatch(/\.agy-console\s*\{/)
     expect(css).not.toMatch(/(^|\n)\s*:root\s*\{/)
     expect(css).not.toMatch(/(^|\n)\s*body\s*\{/)
-    // The section itself is a bordered card in the page's own vocabulary.
-    expect(css).toMatch(/\.fusion-agy\{[^}]*border:\s*1px solid var\(--dsw-alias-border-l2\)/)
-    expect(css).toMatch(/\.fusion-agy\{[^}]*border-radius:\s*8px/)
+    // The nav and section vocabulary this page adds stays its own.
+    expect(css).toMatch(/\.fusion-nav button\[aria-pressed=true\]/)
+    expect(css).toMatch(/\.fusion-section\[hidden\]\{display:none\}/)
+  })
+
+  it('hides the Fusion region rather than unmounting it, so drafts survive', async () => {
+    const root = await renderPage()
+    const fusion = root.root.findByProps({ id: 'fusion-section-fusion' })
+    expect(fusion.props.hidden).toBe(false)
+
+    await openAntigravity(root)
+    // Still mounted (its draft state lives in the parent component), just hidden.
+    expect(root.root.findByProps({ id: 'fusion-section-fusion' }).props.hidden).toBe(true)
+    // Every section the nav names exists at all times, hidden or not.
+    for (const name of ['fusion', 'antigravity', 'acp']) {
+      expect(root.root.findAllByProps({ id: `fusion-section-${name}` })).toHaveLength(1)
+    }
   })
 })

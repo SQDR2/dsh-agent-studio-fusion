@@ -85,13 +85,14 @@ dsh plugin --profile web list
 | 每个账号的独立 HOME | `<账号池根>/<id>/` | `<账号池根>/<id>/` | 跟随账号池 |
 
 两个环境变量都未设置时，`DSH_STATE_DIR` 与 `DSH_HOME` 都回退到 `~/.dsh`，因此两边是同一个目录，**什么都
-不用做**。只有你把 `DSH_STATE_DIR` 指到了别处（且它与 `DSH_HOME` 不同）时才需要复制一次账号池：
+不用做**。只有两个根目录真的不同时才需要复制一次账号池 —— 也就是 **`DSH_STATE_DIR` 被指到别处**，或者
+**`DSH_HOME` 被指到别处**，只要两边展开后不是同一个目录：
 
 ```sh
 # 1) 先退出 DSH（桌面版退出，Web 版停掉 Host），否则 pool.json 可能正被写。
 # 2) 把 <STATE> 换成你原来的 DSH_STATE_DIR；目标目录写成展开后的绝对路径：
 cp -a "<STATE>/agy-accounts/." "$HOME/.dsh/agy-accounts/"
-#    DSH_HOME 有设置时，目标换成 "$DSH_HOME/agy-accounts/"：
+#    目标永远是本插件读取的那个根（默认 ~/.dsh）；DSH_HOME 有设置时换成：
 #    cp -a "<STATE>/agy-accounts/." "$DSH_HOME/agy-accounts/"
 ```
 
@@ -126,9 +127,12 @@ cp -a "<STATE>/agy-accounts/." "$HOME/.dsh/agy-accounts/"
 /agy doctor      # 写一份诊断报告并给出路径
 ```
 
-左侧边栏 **Fusion** → 页面底部的 **Antigravity** 折叠区就是原来的管理控制台（账号、额度、模型可见性、
-权限模式、预热）。它不再是独立的侧栏入口，也不再是"插件"页面里的一张卡片 —— 这与"Fusion 是唯一入口"
-的设计一致。
+左侧边栏 **Fusion** → 页面标题 **DSH Agent Studio With Fusion** → 顶部区域按钮里的 **Antigravity**，就是原来的
+管理控制台（账号、额度、模型可见性、权限模式、预热）。它不再是独立的侧栏入口，也不再是"插件"页面里的一张卡片 ——
+这与"Fusion 是唯一入口"的设计一致。未选中该区域时控制台不会挂载，所以它也不会在后台轮询。
+
+> 同一个页面里的 **ACP 线路** 区域只是接入说明；如果你还装着独立的 `dsh-tauri-acp`，迁移步骤见
+> [`docs/MIGRATION-ACP.md`](MIGRATION-ACP.md)。
 
 常见现象：
 
@@ -224,8 +228,9 @@ automatically:
 | per-account isolated HOME | `<pool root>/<id>/` | `<pool root>/<id>/` | follows the pool |
 
 With neither variable set, both `DSH_STATE_DIR` and `DSH_HOME` fall back to `~/.dsh`, so the two
-paths are the same directory and there is **nothing to do**. Only when you pointed `DSH_STATE_DIR`
-somewhere else (and it differs from `DSH_HOME`) does the pool need one copy:
+paths are the same directory and there is **nothing to do**. The pool needs one copy only when the two
+resolved roots differ — either because you pointed `DSH_STATE_DIR` elsewhere, **or** because you pointed
+`DSH_HOME` elsewhere:
 
 ```sh
 # 1) Quit DSH first (desktop: quit; Web: stop the Host) — pool.json may be mid-write.
@@ -259,9 +264,13 @@ you do not write it by hand.
 
 ## 6. Where the console lives now
 
-Left sidebar → **Fusion** → the **Antigravity** section at the bottom of that page (accounts, quota,
-model visibility, permission mode, warmup). It is no longer its own sidebar panel and no longer a
-card on the Plugins page: Fusion is the single entry point, by design.
+Left sidebar → **Fusion** → the page titled **DSH Agent Studio With Fusion** → the **Antigravity** button in
+its section row. That is the old console (accounts, quota, model visibility, permission mode, warmup). It is no
+longer its own sidebar panel and no longer a card on the Plugins page: Fusion is the single entry point, by design.
+The console mounts only while that section is selected, so it never polls in the background.
+
+> The **ACP routes** section of the same page is setup guidance only; if you still have the standalone
+> `dsh-tauri-acp` installed, its migration steps are in [`docs/MIGRATION-ACP.md`](MIGRATION-ACP.md).
 
 Troubleshooting:
 

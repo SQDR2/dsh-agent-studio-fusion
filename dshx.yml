@@ -48,3 +48,11 @@ hotReload:
     - src/host/agy/mirror-tool.ts
     - src/host/agy/pool.ts
     - src/host/agy/quota.ts
+    - src/client/index.ts
+    - src/client/FusionSettings.tsx
+    - src/client/studio-brand.ts
+    - src/client/AcpSettingsGuide.tsx
+    - src/client/FusionPanelIcon.tsx
+    - src/client/agy/AgyConsole.tsx
+    - src/client/agy/toolview.ts
+    - src/client/agy/locale.ts

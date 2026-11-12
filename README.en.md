@@ -1,12 +1,14 @@
-# Fusion · a DSH plugin
+# DSH Agent Studio With Fusion
 
 [中文](README.md) · [Install](INSTALL.md) · [安装](INSTALL.zh.md) · [Changelog](CHANGELOG.md)
 
 > **This repository is a fork of [`aa2246740/dsh-model-fusion`](https://github.com/aa2246740/dsh-model-fusion), published as `@sqdr2/dsh-fusion`.**
-> Every upstream capability, algorithm and measurement is kept. This fork does three things: it moves the entry from
-> Settings to the left sidebar, it makes the agy route
-> ([`dsh-agy-worker`](https://github.com/SQDR2/dsh-agy-worker)) work as a Sidekick, and it removes a few ways a frozen
-> scope or a stale task record could dead-end a run. See [What this fork changes](#what-this-fork-changes).
+> Every upstream capability, algorithm and measurement is kept. The fork now puts three things in **one plugin**:
+> Fusion's Lead/Sidekick combos, Antigravity (the `agy` CLI, merged under MIT from
+> [`dsh-agy-worker`](https://github.com/SQDR2/dsh-agy-worker)) and ACP agent routes (merged under MIT from
+> [`deepseek-harness-acp`](https://github.com/Fleey/deepseek-harness-acp)). The left sidebar still has one entry —
+> **Fusion** — and the three live as sections of one page; neither `dsh-agy-worker` nor `dsh-tauri-acp` has to be
+> installed any more. See [What this fork changes](#what-this-fork-changes).
 
 In DeepSeek Harness (DSH), Fusion is an ordinary model in the menu: **save N combos and the menu shows N entries** (**Fusion · combo name**). Behind each one are two models you choose:
 
@@ -51,7 +53,10 @@ After contaminated attempts were excluded, four tasks were clean in every condit
 ## Use
 
 1. Install the plugin ([INSTALL.md](INSTALL.md)).
-2. Open the **Fusion** entry in the left sidebar (default below Memory System), name the combo, and choose a Lead and a Sidekick. Any model you are signed in to in DSH works.
+2. Open the **Fusion** entry in the left sidebar (default below Memory System). The page is titled
+   **DSH Agent Studio With Fusion** and offers three section buttons — **Fusion combos** (default), **Antigravity** and
+   **ACP routes**. In Fusion combos, name the combo and choose a Lead and a Sidekick. Any model you are signed in to in
+   DSH works, including a configured Antigravity or ACP route.
 3. Select that combo (**Fusion · name**) in the model menu and work as usual.
 
 **Several combos can coexist** (up to 6): for example a cheap "fast" one and a strong "thorough" one, each its own model-menu entry. With several conversations open, each one can pick a different combo — a conversation freezes the combo it selected, so later edits or other conversations never change it. A pre-combo installation is migrated into one combo named "自动" whose model id stays `auto`, so existing conversations keep working.
@@ -85,7 +90,8 @@ Google Antigravity (the `agy` CLI) is **built into this plugin** since 0.4.0, po
 [`dsh-agy-worker`](https://github.com/SQDR2/dsh-agy-worker) (a fork of `dsh-agy-link`) under its MIT license — see
 [`docs/ATTRIBUTION-AGY.md`](docs/ATTRIBUTION-AGY.md). It brings the `antigravity` model route, the `/agy` command
 family, `agy_ask` / `agy_tool`, the `/plugins/agy-worker/*` surface, the account pool with quota tracking, and the
-Antigravity console inside the Fusion panel. No second package is installed, and Fusion stays the only sidebar entry.
+Antigravity console in the **Antigravity** section of the Fusion page. No second package is installed, and Fusion stays
+the only sidebar entry.
 
 > **Migrating from `dsh-agy-worker`:** disable or remove the old package **before** enabling this one. Both use the same
 > route prefix, the same `antigravity` provider, the same `/agy` command and the same tool-card keys, so running both
@@ -124,7 +130,7 @@ Every other upstream key (`enabled`, `agyBin`, `workspaceRoot`, `defaultModel`, 
 `enabled: false` is an install-time opt-out: it removes the `antigravity` provider route and every background capability
 (quota polling, warmup, MCP bridge, media sweep) while leaving `/agy` and the management routes mounted for inspection —
 re-enabling means changing the block and restarting DSH, not a live switch. The console (accounts, quota, model
-visibility, permission mode, warmup) lives at the bottom of the **Fusion** panel in the left sidebar;
+visibility, permission mode, warmup) is the **Antigravity** section of the **Fusion** page in the left sidebar;
 `/agy status | pool | models | doctor` answers the same questions from the composer.
 
 > On Windows use `pwsh` instead of `bash`, and follow any change you made to `workerTools`. Work state stays where the
@@ -136,21 +142,30 @@ visibility, permission mode, warmup) lives at the bottom of the **Fusion** panel
 
 ### ACP routes (the built-in `deepseek-harness-acp` port)
 
-This plugin now hosts ACP routes itself; a separate `dsh-tauri-acp` install is no longer needed (its Host implementation
-is merged here under the MIT license, see [`docs/ATTRIBUTION-ACP.md`](docs/ATTRIBUTION-ACP.md)). Add an `acp.agents`
-block to this plugin's entry in `cordis.patch.yml`; each key is the provider route shown in the model picker:
+This plugin hosts ACP routes itself, so a separate `dsh-tauri-acp` install is **no longer needed** (its Host
+implementation is merged here under the MIT license, see [`docs/ATTRIBUTION-ACP.md`](docs/ATTRIBUTION-ACP.md)). Left
+sidebar **Fusion** → **ACP routes** carries the full guide (minimal example, restart requirement, migration). Add an
+`acp.agents` block to this plugin's entry in `cordis.patch.yml`; each key is the provider route shown in the model
+picker:
 
 ```yaml
 - id: dsh-fusion
+  name: '@sqdr2/dsh-fusion'
   config:
     acp:
       agents:
         codex:
           displayName: Codex (ACP)
-          command: /absolute/path/to/codex-acp
+          command: /absolute/path/to/codex-acp   # required; absolute is more reliable, PATH works too
           args: []
+          models:                                 # may be omitted; then discoverModels asks the agent
+            - id: default
           permission: ask
 ```
+
+The routes are read once when the Host starts, so a change needs a restart. If you still have the standalone
+`dsh-tauri-acp` installed, **disable it manually first** and then move the same provider here — registering it twice
+fails at load. Steps: [`docs/MIGRATION-ACP.md`](docs/MIGRATION-ACP.md).
 
 When an ACP route is the Sidekick, this plugin declares a Host-tool MCP bridge in that session's ACP `session/new` — and
 only there. The endpoint is this Host's own public origin (`ctx.webServer.getOrigin()`) plus the fixed

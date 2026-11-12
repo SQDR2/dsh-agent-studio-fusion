@@ -53,11 +53,12 @@ single `dsh-fusion` plugin and leaves the ported files' upstream behavior intact
 one Fusion-only surface: a Sidekick-only Host-tool MCP bridge (`bridge.ts`, `bridge-route.ts`,
 and the declaration handoff in `index.ts`).
 
-**What the bridge is.** An ACP `session/new` carries a Host-tool MCP server only when the
-exact DSH session is a live Fusion Worker on that ACP route, in a work-order mode that
-permits tools. Every other ACP session — Lead turns, ordinary route use, discovery,
-compaction, text orders — opens with no MCP servers, exactly as upstream did for every
-session. The declaration is:
+**What the bridge is, and whose it is.** The bridge is **Fusion-specific hardening**, not an
+upstream feature: upstream opens every ACP session with no MCP servers at all. Here an ACP
+`session/new` carries a Host-tool MCP server only when the exact DSH session is a live Fusion
+Worker on that ACP route, in a work-order mode that permits tools; every other ACP session —
+Lead turns, ordinary route use, discovery, compaction, text orders — is left without MCP
+servers, i.e. in the upstream state. The bounded facts that hold today are:
 
 - **The Host's own origin.** The URL is `WebServer.getOrigin()` plus the fixed
   `/api/fusion/acp-mcp` path, so an HTTPS bind or a non-default concrete local interface is
@@ -97,5 +98,18 @@ session. The declaration is:
   successful turn keeps it, because the same ACP session is reused for the next step of the
   same work order.
 
-The settings UI from upstream is not ported in this milestone; the routes are configured
-through this plugin's own `acp.agents` config block.
+### What is still not ported: the upstream configuration editor
+
+The editor upstream shipped is **not** ported, and this document does not claim otherwise. With the unified
+studio page, `src/client/AcpSettingsGuide.tsx` renders the **ACP routes** section of the Fusion page, and it is a
+*setup guide only*:
+
+- no route list read from a live registry, no model discovery, no connection status, no save button;
+- it shows the minimal `acp.agents` example (`command: /absolute/path/to/acp-agent`, `args: []`,
+  `models: [{ id: default }]`), states that the routes are read once at Host start and need a restart, and points at
+  `docs/MIGRATION-ACP.md`;
+- the configuration itself remains this plugin's own `acp.agents` block, exactly as before.
+
+A real editor is a separate capability: it would need a Host-side read/write surface for the profile, a conflict
+protocol with external edits, and validation that matches `src/host/acp/config.ts`. None of that exists here, and the
+guide deliberately offers nothing that looks like it.

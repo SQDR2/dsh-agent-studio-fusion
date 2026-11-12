@@ -61,6 +61,33 @@ Running the standalone `@sqdr2/dsh-agy-worker` alongside this plugin is not supp
 `/plugins/agy-worker/*` routes, `antigravity` provider, `/agy` command and `agy_tool`/`run_code` tool
 views are all refused at load. See [`docs/MIGRATION-AGY.md`](MIGRATION-AGY.md).
 
+## The built-in ACP routes
+
+The ACP host implementation is the same public API surface as the rest of the plugin — `llm`
+(`registerAdapter`, `registerModelDiscovery`), `tools` (`execute`), `webServer` (`register`,
+`getOrigin`), `approval`, `sandboxPolicy`, `attachments`, `agents` and `sessions` — and it registers
+nothing under a second plugin id.
+
+- `acp.agents` is read through `src/host/acp/config.ts`. `command` is **required** but not required to be
+  absolute: the route is spawned directly (no shell), so a command on `PATH` works; an absolute path is
+  only *more reliable* because a GUI-launched Host often has a shorter `PATH`. `args` defaults to `[]`.
+  `models` defaults to `[]`, and an empty list is meaningful rather than a mistake: it makes the route ask
+  the agent through `discoverModels` (default `true`) and fall back to the `default` model id when nothing
+  is advertised. An explicit `models` entry needs an `id`.
+- The block is read **once when the Host starts**, so a change needs a restart. An absent `acp` block
+  registers no routes and the plugin still loads; a malformed one is reported by the schema rather than
+  guessed at.
+- Learned facts are cached in `$DSH_HOME/cache/dsh-fusion/` (`prompt-capabilities.json`,
+  `context-windows.json`), separate from any other package's cache.
+- The **ACP routes** section of the Fusion page is a setup guide, not an editor: it explains the supported
+  settings but offers no live status, model discovery or save control. See
+  [`docs/ATTRIBUTION-ACP.md`](ATTRIBUTION-ACP.md).
+
+Running the standalone `dsh-tauri-acp` alongside this plugin is not supported, and the verified reason is
+narrow: when both configure the **same provider route name**, the second `llm.registerAdapter` is refused
+with `DUPLICATE_ADAPTER` and the Host fails at load. No other conflict with that package is claimed here.
+See [`docs/MIGRATION-ACP.md`](MIGRATION-ACP.md).
+
 ## Historical: changes from 0.2.0-rc.2 to 0.2.1-rc.2
 
 The subagent seam was renamed and widened; the delegation composition knobs moved. Everything else Fusion imports
