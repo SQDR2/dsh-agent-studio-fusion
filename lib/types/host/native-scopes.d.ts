@@ -6,6 +6,12 @@ import type { PhysicalRoute, Role } from '../contracts.js';
 import type { SessionBinding } from './bindings.js';
 export interface FusionScopeCallbacks {
     route?(binding: SessionBinding, role: Role): PhysicalRoute;
+    /**
+     * Whether this Host still runs that exact Agent object. A session id outlives
+     * the Agent that owned it, and a retired Agent keeps its last phase, so this is
+     * the only way to tell "replacement in flight" from "the live Agent moved on".
+     */
+    live?(agent: Agent): boolean;
     beforeTurn?(agent: Agent, binding: SessionBinding, role: Role, turn: number): SessionBinding;
     taskContext?(agent: Agent, binding: SessionBinding, role: Role): UserMessage | undefined;
     beforeStep?(agent: Agent, binding: SessionBinding, role: Role): void;
@@ -59,4 +65,6 @@ export declare class NativeFusionScopes {
      * a request header or fabricate a replacement global default.
      */
     detach(agent: Agent): void;
+    /** Release a scope whose Agent this Host no longer runs. Never for a live Agent. */
+    private releaseRetired;
 }

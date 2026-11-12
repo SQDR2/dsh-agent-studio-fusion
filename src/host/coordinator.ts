@@ -329,6 +329,11 @@ export class FusionCoordinator {
     const notices = new NativeWorkerNotices(store)
     this.scopes = new NativeFusionScopes({
       route: (binding, role) => this.modelControl?.route(binding, role) ?? binding.profile[role],
+      // A session id can outlive the Agent object that owned it: resume hands the
+      // id to a fresh Agent while the previous one keeps its last phase. Only the
+      // registry can say which object is live, and a retired holder must be
+      // replaceable instead of blocking every later install (session-a5409fb4).
+      live: agent => this.ctx.agents.get(NativeSessionId(agent.id)) === agent,
       beforeTurn: (agent, binding, role) => {
         const previous = this.state(binding.taskId)
         if (role !== 'lead' || previous.control.mode !== 'completed') return binding
@@ -378,14 +383,23 @@ export class FusionCoordinator {
         const ceiling = this.#roleCeiling(agent, binding, role)
         // A bridge route (Antigravity's agy) can only answer under its own
         // transport, so any role that must call tools needs it in the table —
-        // the Lead to delegate and review, the Worker to report. A text
-        // delegation answers in prose and a finished task may call nothing, so
-        // those ceilings keep their exact shape.
+        // the Lead to delegate and review, the Worker to report. A finished task
+        // may call nothing, so its ceiling keeps the exact shape.
+        //
+        // A text order used to keep its shape for the Worker too, on the reading
+        // that "a text delegation answers in prose". A bridge route makes that
+        // reading false: agy runs its own loop with its own file and shell tools
+        // whatever this Host advertises, so withholding the transport does not
+        // keep the order quiet — it only removes the step boundary the adapter
+        // cuts on. The whole order then collapses into ONE opaque span: no tool
+        // cards, no usage samples (so no token, context or cache readout in the
+        // session), and nothing surfaces until the route's own print timeout
+        // while the workspace changes underneath. The executable ceiling stays
+        // empty in text mode; only the replay transport is added, and
+        // `canExecute` still refuses every other tool there.
         if (ceiling === undefined) return ceiling
-        const reportsBack = role === 'worker'
-          ? this.state(binding.taskId).currentWorkOrder?.mode !== 'text'
-          : ceiling.length > 0
-        return reportsBack ? withRouteTransport(ceiling, this.#routeTransport(binding, role)) : ceiling
+        const needsTransport = role === 'worker' || ceiling.length > 0
+        return needsTransport ? withRouteTransport(ceiling, this.#routeTransport(binding, role)) : ceiling
       },
     })
     this.approvals = new NativeApprovals(ctx, store, { owner: agent => this.owner(agent),

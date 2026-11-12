@@ -1365,6 +1365,34 @@ describe('text delegation on a route without Host tools', () => {
     expect(JSON.stringify(toolResults(parent))).toContain('worker-tools-unreachable')
     expect(readFileSync(join(workspace, 'calc.py'), 'utf8')).toContain('return a - b')
   })
+
+  /**
+   * A text order says "no workspace", but that is a statement about THIS Host's
+   * tool table, not about a bridge route. agy runs its own loop and writes its
+   * own files whatever the ceiling says; withholding `agy_tool` therefore bought
+   * no containment, only silence. The adapter cuts the run at a step boundary
+   * reported under the transport, so without it the entire order becomes one
+   * span that reports neither steps nor usage — the session shows a spinner with
+   * no token, context or cache readout until the route's print timeout expires
+   * (observed live: 38 minutes, ~180 agy steps, nothing in the journal). The
+   * transport must ride a text ceiling too, while the executable tools stay empty.
+   */
+  it('keeps the route transport on a text order so its steps and usage reach this Host', async () => {
+    const { parent, coordinator, adapter, taskId } = await setup([
+      delegateText(), review('accept'), textResponse('The Sidekick reported its model.'),
+    ], [textReport()], { ...options, bridgeTransport: true })
+    parent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Which model is the Sidekick running?' }] }))
+    await parent.whenIdle()
+    const workerRequests = adapter.requests.filter(request => request.model === 'worker')
+    const names = workerRequests[0]!.tools!.map(tool => tool.name).sort()
+    expect(names, JSON.stringify(workerRequests[0]!.tools)).toEqual(
+      ['agy_tool', 'fusion_read_evidence', 'fusion_read_state', 'fusion_submit_result'])
+    // Still no workspace capability: text mode withholds every real tool.
+    expect(names).not.toContain(shellTool)
+    expect(JSON.stringify(toolResults(parent))).not.toContain('outside the Sidekick')
+    expect(coordinator.state(taskId), JSON.stringify(toolResults(parent)))
+      .toMatchObject({ phase: 'COMPLETED', verification: 'verified' })
+  })
 })
 
 describe('bridge-route Worker', () => {

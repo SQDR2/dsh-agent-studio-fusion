@@ -12,6 +12,12 @@ import { fusionToolDiagnostic, projectRoleTools } from './tool-table.js'
 
 export interface FusionScopeCallbacks {
   route?(binding: SessionBinding, role: Role): PhysicalRoute
+  /**
+   * Whether this Host still runs that exact Agent object. A session id outlives
+   * the Agent that owned it, and a retired Agent keeps its last phase, so this is
+   * the only way to tell "replacement in flight" from "the live Agent moved on".
+   */
+  live?(agent: Agent): boolean
   beforeTurn?(agent: Agent, binding: SessionBinding, role: Role, turn: number): SessionBinding
   taskContext?(agent: Agent, binding: SessionBinding, role: Role): UserMessage | undefined
   beforeStep?(agent: Agent, binding: SessionBinding, role: Role): void
@@ -75,7 +81,8 @@ export class NativeFusionScopes {
       if (old.agent === agent && old.binding.taskId === binding.taskId && old.role === role && old.ready) return
       // A native continuable activation may be released between turns. Its
       // resumed Agent has the same durable id but a fresh exact scope.
-      if (old.agent !== agent && old.agent.status === 'idle') this.detach(old.agent)
+      if (old.agent !== agent && this.#retired(old.agent)) this.releaseRetired(old.agent)
+      else if (old.agent !== agent && old.agent.status === 'idle') this.detach(old.agent)
       else throw new Error('An existing Fusion scope must settle and detach before replacement')
     }
     const entry: ScopeEntry = { agent, binding: structuredClone(binding), role, dispose: [], ready: false, refreshTools: () => {} }
@@ -217,6 +224,30 @@ export class NativeFusionScopes {
     const entry = this.#entries.get(agent.id)
     if (!entry || entry.agent !== agent) return
     if (agent.status !== 'idle') throw new Error('Cannot detach Fusion while the native Agent is running')
+    entry.ready = false
+    for (const dispose of entry.dispose.reverse()) dispose()
+    this.#entries.delete(agent.id)
+  }
+
+  /**
+   * Whether this Host no longer runs the Agent that owns the recorded scope.
+   *
+   * Both refusals below are right for a LIVE Agent and permanent for a retired
+   * one: a resumed session hands the same id to a fresh Agent object while the
+   * previous object keeps whatever phase it was in, so a scope held by the old
+   * object could never settle and every later install threw. The live Agent then
+   * ran with no Fusion scope at all — the Host's own tool table, no role prompt,
+   * `fusion_delegate` merely "unknown tool" (session-a5409fb4, after aborting a
+   * turn and switching model). Only the registry can tell the two apart.
+   */
+  #retired(agent: Agent): boolean {
+    return this.callbacks.live?.(agent) === false
+  }
+
+  /** Release a scope whose Agent this Host no longer runs. Never for a live Agent. */
+  private releaseRetired(agent: Agent): void {
+    const entry = this.#entries.get(agent.id)
+    if (!entry || entry.agent !== agent) return
     entry.ready = false
     for (const dispose of entry.dispose.reverse()) dispose()
     this.#entries.delete(agent.id)
