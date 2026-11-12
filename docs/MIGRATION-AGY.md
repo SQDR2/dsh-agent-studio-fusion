@@ -45,8 +45,8 @@ dsh plugin --profile web list
 `defaultModel` / `defaultEffort` ……）现在写在 **本插件** 的 `agy` 子配置下。逐字搬过去即可：
 
 ```yaml
-- id: dsh-fusion
-  name: '@sqdr2/dsh-fusion'
+- id: dsh-agent-studio-fusion
+  name: '@sqdr2/dsh-agent-studio-fusion'
   config:
     agy:
       enabled: true
@@ -183,8 +183,8 @@ The old entry config (`enabled` / `agyBin` / `permissionMode` / `workspaceRoot` 
 `defaultEffort` …) now lives under this plugin's `agy` block:
 
 ```yaml
-- id: dsh-fusion
-  name: '@sqdr2/dsh-fusion'
+- id: dsh-agent-studio-fusion
+  name: '@sqdr2/dsh-agent-studio-fusion'
   config:
     agy:
       enabled: true

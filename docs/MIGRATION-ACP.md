@@ -41,8 +41,8 @@ dsh plugin --profile web list
 `discoverModels`、`contextWindow` 等），键就是模型选择器里的 provider 路由名。原样搬过去即可：
 
 ```yaml
-- id: dsh-fusion
-  name: '@sqdr2/dsh-fusion'
+- id: dsh-agent-studio-fusion
+  name: '@sqdr2/dsh-agent-studio-fusion'
   config:
     acp:
       agents:
@@ -132,8 +132,8 @@ The old package's `agents` and this plugin's `acp.agents` use the same fields (`
 menu. Move it across verbatim:
 
 ```yaml
-- id: dsh-fusion
-  name: '@sqdr2/dsh-fusion'
+- id: dsh-agent-studio-fusion
+  name: '@sqdr2/dsh-agent-studio-fusion'
   config:
     acp:
       agents:
