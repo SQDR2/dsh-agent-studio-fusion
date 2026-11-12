@@ -44,7 +44,7 @@ export const AcpAgentProfileSchema: z<AcpAgentProfile> = z.object({
 
 /** The `acp` block: `acp.agents` maps a provider route id to its profile. */
 export const AcpConfigSchema: z<AcpConfig> = z.object({
-  agents: z.dict(AcpAgentProfileSchema).default({}),
+  agents: z.dict(AcpAgentProfileSchema).default({}).volatile() as unknown as z<Record<string, AcpAgentProfile>>,
 })
 
 /** Read the configured profiles; an absent block is an empty map, never an error. */

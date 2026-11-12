@@ -13,6 +13,7 @@ import {
   type SettingsPathOpView,
 } from '../src/client/acp-import.js'
 import { AcpSettingsGuide, configuredRoutesOf } from '../src/client/AcpSettingsGuide.js'
+import { AcpConfigSchema } from '../src/host/acp/config.js'
 import { pinLanguage } from './client-locale.js'
 
 const PATH = '/opt/homebrew/bin:/usr/bin:/bin'
@@ -465,6 +466,12 @@ describe('configuredRoutesOf', () => {
       command: '/usr/local/bin/devin',
       args: ['acp', '--verbose'],
     })
+  })
+})
+
+describe('AcpConfigSchema', () => {
+  it('marks agents as volatile so the Host exposes it to web settings form', () => {
+    expect((AcpConfigSchema as any).dict.agents.meta.volatile).toBe(true)
   })
 })
 
