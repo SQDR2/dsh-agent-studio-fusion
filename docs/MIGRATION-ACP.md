@@ -60,8 +60,9 @@ dsh plugin --profile web list
 - `models` **可整段省略**：省略或留空时，按 `discoverModels`（默认 `true`）向 agent 询问模型，问不到就用回退的
   `default` 模型；显式写了 `models` 时每一项都必须有 `id`。
 - 其余字段与默认值见 `src/host/acp/config.ts` 与 [COMPATIBILITY.md](COMPATIBILITY.md)。
-- 配置在 **Host 启动时读取一次**，所以改完要重启；浏览器里没有编辑入口（左侧栏 **Fusion** →
-  **ACP 线路** 只是配置说明，不是配置后台）。
+- 配置在 **Host 启动时读取一次**，改完或导入后都需要重启 Host 才会生效。浏览器在左侧栏 **Fusion** →
+  **ACP 线路** 中提供了配置导入能力，支持粘贴配置 JSON 解析预览并批量导入到 `dsh-fusion → acp.agents`，
+  但范围仅限导入流程，不提供完整 Agent 编辑后台、在线路由管理或实时模型发现与状态。
 
 ## 4. 数据与前缀
 
@@ -85,8 +86,9 @@ dsh plugin --profile web list
 ## 6. 界面去哪了
 
 左侧边栏 **Fusion** → 顶部三个区域按钮 **Fusion 组合 / Antigravity / ACP 线路** 中的 **ACP 线路**。
-那里是**配置说明**：给出 `acp.agents` 的最小示例、重启要求，以及"配置后这些线路会出现在模型选择器里"。
-它**不是**旧包那种配置编辑器，也没有在线模型发现或即时的连接状态 —— 上游的编辑器在本插件里没有移植。
+那里包含**配置说明与导入能力**：不仅给出 `acp.agents` 的最小示例、重启要求，还支持直接粘贴旧版配置 JSON、灰色示例占位、
+解析预览、选择路线并批量导入到 `dsh-fusion → acp.agents`。
+导入后会明确提示需要重启 Host 生效；范围仅限导入流程，不实现完整 Agent 编辑后台、在线路由管理或实时模型发现与连接状态。
 
 ---
 
@@ -152,8 +154,10 @@ menu. Move it across verbatim:
   explicit `models` list needs an `id` on every entry.
 - The remaining fields and their defaults are in `src/host/acp/config.ts` and
   [COMPATIBILITY.md](COMPATIBILITY.md).
-- The routes are read **once when the Host starts**, so a restart is required. There is no in-browser
-  editor: left sidebar **Fusion** → **ACP routes** is a setup guide, not a configuration backend.
+- The routes are read **once when the Host starts**, so a Host restart is required after changes or imports.
+  An in-browser import interface is provided at left sidebar **Fusion** → **ACP routes** to paste configuration
+  JSON, preview parsed routes, and import them directly into `dsh-fusion → acp.agents`. The scope is strictly
+  limited to the import flow; no full agent editing backend, online route management, or live model discovery/status is offered.
 
 ## 4. Data and caches
 
@@ -183,7 +187,9 @@ Sidekick tool bridge.
 ## 6. Where the UI went
 
 Left sidebar **Fusion** → the three section buttons **Fusion combos / Antigravity / ACP routes** →
-**ACP routes**. That panel is a **setup guide**: the minimal `acp.agents` example, the restart
-requirement, and the note that configured routes appear in the model selectors. It is **not** the old
-package's configuration editor, and there is no live model discovery or connection status here — the
-upstream editor was not ported.
+**ACP routes**. That panel provides both **setup guidance and configuration import**: alongside the minimal
+`acp.agents` example and restart instructions, it restores the legacy configuration import flow, allowing
+pasting configuration JSON, previewing parsed routes, selecting routes, and saving them directly into
+`dsh-fusion → acp.agents`. An explicit notice indicates that a Host restart is required after importing.
+The scope is limited strictly to the import flow; no full agent editing backend, online route management,
+or live model discovery and connection status is provided.

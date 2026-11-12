@@ -3,6 +3,8 @@ import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type {} from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type {} from '@deepseek-ai/dsh-client-ui-model-selection/client'
+import type { ConfigForms } from '@deepseek-ai/dsh-client-ui-settings/client'
+import { bindAcpConfigForm } from './acp-import.js'
 import { FusionSettings } from './FusionSettings.js'
 import { FusionPanelIcon } from './FusionPanelIcon.js'
 import { FusionHint } from './FusionHint.js'
@@ -40,6 +42,9 @@ export function apply(ctx: Context): void {
     // same language setting; one service, two readers.
     scope.effect(() => bindAgyLocale(locale as unknown as AgyLocaleSource))
   })
+  ctx.inject(['configForms'], scope =>
+    scope.effect(() => bindAcpConfigForm((scope as unknown as { configForms: ConfigForms }).configForms.get('dsh-fusion'))),
+  )
   for (const tool of fusionControlTools) ctx.slots.inject('tool.call.toolview', () => ctx.slots.register({
     name: 'tool.call.toolview', key: tool,
   }, FusionTool))

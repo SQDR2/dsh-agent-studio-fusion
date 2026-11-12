@@ -98,18 +98,20 @@ servers, i.e. in the upstream state. The bounded facts that hold today are:
   successful turn keeps it, because the same ACP session is reused for the next step of the
   same work order.
 
-### What is still not ported: the upstream configuration editor
+### What is still not ported: the full upstream configuration editor
 
-The editor upstream shipped is **not** ported, and this document does not claim otherwise. With the unified
-studio page, `src/client/AcpSettingsGuide.tsx` renders the **ACP routes** section of the Fusion page, and it is a
-*setup guide only*:
+The full editor upstream shipped is **not** ported, and this document does not claim otherwise.
+A narrow, import-only UI has been restored locally in `src/client/AcpSettingsGuide.tsx` (allowing users
+to paste configuration JSON and write selected routes directly to `dsh-fusion → acp.agents` via DSH
+ConfigForms, with an explicit Host restart requirement), but full route management, live model discovery
+and connection status, and a full-field agent editor remain outside scope:
 
-- no route list read from a live registry, no model discovery, no connection status, no save button;
-- it shows the minimal `acp.agents` example (`command: /absolute/path/to/acp-agent`, `args: []`,
-  `models: [{ id: default }]`), states that the routes are read once at Host start and need a restart, and points at
-  `docs/MIGRATION-ACP.md`;
-- the configuration itself remains this plugin's own `acp.agents` block, exactly as before.
+- no route list read from a live registry, no model discovery, no connection status or health monitoring;
+- no dedicated multi-field editing forms for individual agent parameters;
+- the import workflow solely parses JSON server definitions, previews selected entries, overlays imported launch
+  fields over existing profiles, and commits them to the `acp.agents` config block;
+- all ACP routes continue to require a Host restart to become active.
 
-A real editor is a separate capability: it would need a Host-side read/write surface for the profile, a conflict
+A full editor is a separate capability: it would need a Host-side read/write surface for the profile, a conflict
 protocol with external edits, and validation that matches `src/host/acp/config.ts`. None of that exists here, and the
-guide deliberately offers nothing that looks like it.
+page deliberately keeps its scope limited to setup guidance and configuration import.
