@@ -1,5 +1,6 @@
 import { FusionHistory } from './FusionHistory.js'
 import { FusionCache } from './FusionCache.js'
+import { AgyConsole } from './agy/AgyConsole.js'
 import { useEffect, useState } from 'react'
 import type { PhysicalRoute } from '../contracts.js'
 import type { PairChoice, SettingsCatalog } from '../host/settings.js'
@@ -119,6 +120,13 @@ const styles = `
 .fusion-history-actions button.fusion-btn-subtle{background:transparent;color:var(--dsw-alias-label-primary)}
 .fusion-history-confirm-text{font-size:12px;color:var(--dsw-alias-label-secondary)}
 @media(max-width:480px){.fusion-page{padding:0 16px 32px}.fusion-settings label{grid-template-columns:1fr;gap:6px}.fusion-settings .fusion-card{padding:16px}}
+.fusion-agy{box-sizing:border-box;width:100%;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;background:var(--dsw-alias-bg-module-platform);padding:16px;display:flex;flex-direction:column;gap:12px}
+.fusion-agy-summary{cursor:pointer;font-weight:600;font-size:14px;display:flex;align-items:center;justify-content:space-between;gap:12px;list-style:none;user-select:none;padding:2px 0}
+.fusion-agy-summary::-webkit-details-marker{display:none}
+.fusion-agy-summary:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px;border-radius:4px}
+.fusion-agy-title h3{margin:0;font-size:15px;font-weight:600}
+.fusion-agy-summary small{color:var(--dsw-alias-label-secondary);font-size:12px;font-weight:400}
+.fusion-agy-content{display:flex;flex-direction:column;gap:12px;padding-top:12px;border-top:1px solid var(--dsw-alias-border-l2);margin-top:4px;min-width:0}
 `
 
 const key = (route: PhysicalRoute | undefined) => route ? JSON.stringify([route.provider, route.model]) : ''
@@ -297,6 +305,19 @@ export function FusionSettings() {
         {blocked.map(pair => <p key={pair.id} role="status">{`${pair.name}: ${tr(lang, '尚未就绪，需要重新保存这个组合', 'not ready yet; save this combo again')}${pair.reason ? `: ${pair.reason}` : ''}`}</p>)}
         {state.managedAuthorization && <p>{tr(lang, '运行额度由外部授权配置管理。', 'Run limits are managed by an external authorization file.')}</p>}
       </>}
+      <section className="fusion-agy" aria-label={tr(lang, 'Antigravity（agy CLI）', 'Antigravity (agy CLI)')}>
+        <details>
+          <summary className="fusion-agy-summary">
+            <span className="fusion-agy-title"><h3>Antigravity</h3></span>
+            <small>{tr(lang, '账号、额度、模型与权限模式', 'Accounts, quota, models and permission mode')}</small>
+          </summary>
+          <div className="fusion-agy-content">
+            <p>{tr(lang, '把 Google Antigravity（agy CLI）作为模型路线与 Sidekick 使用。这里管理它的账号、额度、模型可见性与权限模式；路线名为 antigravity，命令为 /agy。',
+              'Use Google Antigravity (agy CLI) as a model route and as a Sidekick. This section manages its accounts, quota, model visibility and permission mode; the route is antigravity and the command is /agy.')}</p>
+            <AgyConsole isModal={false} />
+          </div>
+        </details>
+      </section>
       <FusionCache refresh={state?.revision ?? 0} />
       <FusionHistory />
     </div>

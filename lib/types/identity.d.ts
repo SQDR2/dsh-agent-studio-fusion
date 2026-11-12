@@ -64,3 +64,18 @@ export declare const isCurrentFusionSelection: (route: {
     provider?: string;
     model?: string;
 } | undefined) => boolean;
+/**
+ * The provider route of the built-in Antigravity (agy CLI) side.
+ *
+ * Ported from dsh-agy-worker, MIT License, Copyright (c) 2026 dsh-agy-worker
+ * contributors; see docs/ATTRIBUTION-AGY.md. The spelling is load-bearing:
+ * durable `model/selection` events, `workerTools` ceilings and the route
+ * transport table all name `antigravity` / `agy_tool`, so the port keeps it.
+ */
+export declare const AGY_PROVIDER = "antigravity";
+/**
+ * The HTTP prefix the Antigravity console polls. Unchanged from the standalone
+ * plugin, so no route rename is involved and a tab still running the previous
+ * bundle keeps answering until it reloads.
+ */
+export declare const AGY_API_PATH = "/plugins/agy-worker";

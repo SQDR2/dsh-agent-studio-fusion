@@ -71,9 +71,12 @@ Click **Plugins** in the left sidebar → **Add plugin**, and enter in "Package 
 
 1. Sign in to at least two models in DSH: a strong Lead and a much cheaper Sidekick. Built-in providers work, and so do the
    subscription routes of [dsh-oauth-login](https://github.com/aa2246740/dsh-oauth-login).
-   To use agy (Google Antigravity) as the Sidekick, also install
-   [dsh-agy-worker](https://github.com/SQDR2/dsh-agy-worker); its requirements are in
-   [README.en.md](README.en.md#using-agy-as-the-sidekick-dsh-agy-worker).
+   Google Antigravity (agy CLI) is **built in** since 0.4.0: the `antigravity` route, `/agy`, `agy_ask` / `agy_tool` and the
+   console inside the Fusion panel need no second package. If you still have the standalone
+   [dsh-agy-worker](https://github.com/SQDR2/dsh-agy-worker) installed, disable or remove it **first** — enabling both at
+   once fails at load (duplicate route, duplicate provider, duplicate command, duplicate tool card). Requirements and the
+   manual state copy are in [docs/MIGRATION-AGY.md](docs/MIGRATION-AGY.md) and
+   [README.en.md](README.en.md#using-agy-as-the-sidekick-built-in).
 2. Open the **Fusion** entry in the left sidebar, choose the Lead and the Sidekick, and save.
 3. Select **Fusion · auto** in the model menu.
 4. On Windows, install PowerShell 7 and make sure `pwsh` is on the PATH used to launch DSH. That is the only
@@ -89,4 +92,8 @@ dsh plugin --profile web remove @sqdr2/dsh-fusion
 ```
 
 In the desktop app, uninstall from the **Plugins** page in the left sidebar. Fusion's own records stay in
-`$DSH_HOME/plugins/dsh-fusion/state.sqlite`; delete that file to remove them.
+`$DSH_HOME/plugins/dsh-fusion/state.sqlite`; delete that file to remove them. The built-in Antigravity side keeps its work state where the standalone plugin kept it
+(`$DSH_HOME/agy-worker/` — overrides, session bindings, media cache, warmup history) and its account pool at
+`$DSH_HOME/agy-accounts/`; upstream read that pool from `DSH_STATE_DIR`, so an installation that set it needs the one-time
+copy in [docs/MIGRATION-AGY.md](docs/MIGRATION-AGY.md). Uninstalling this package never deletes either directory, and a
+reinstall picks both up again.

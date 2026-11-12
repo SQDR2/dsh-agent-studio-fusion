@@ -1,0 +1,450 @@
+// MCP reverse bridge (v0.3): lets the spawned agy process call DSH-side
+// tools. Design: the plugin runs a loopback-only HTTP endpoint
+// (127.0.0.1, ephemeral port, bearer token) exposing tool schemas and
+// execution; a tiny standalone stdio MCP server (dist/bridge.mjs, plain
+// node, zero deps) is registered in the agy MCP registry and forwards MCP
+// tool calls to that endpoint. Loopback + token keeps the surface private
+// to this machine and this plugin.
+//
+// Two things matter for the bridge to be usable at all (issue #55):
+//  1. `agy` 1.4+ reads MCP servers only from `~/.gemini/config/mcp_config.json`
+//     (or a plugin's own `mcp_config.json`) — a workspace `.mcp.json` is
+//     silently ignored, so that is where the entry has to go.
+//  2. A bridged call must carry the identity of the session that spawned agy,
+//     otherwise every tool that needs a caller (e.g. AgentTeams' coordination
+//     tools) throws `exec.agent was undefined`. The session id travels from the
+//     agy child env (DSH_MCP_SESSION) through bridge.mjs as a header, and the
+//     host resolves it back to an agent.
+// Ported from dsh-agy-worker (MIT License, Copyright (c) 2026 dsh-agy-worker
+// contributors), itself a fork of dsh-agy-link. See docs/ATTRIBUTION-AGY.md.
+
+import { createServer, type Server, type ServerResponse } from 'node:http'
+import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
+import { basename, dirname, join } from 'node:path'
+import { randomBytes, timingSafeEqual } from 'node:crypto'
+import { readJsonBody } from './read-json-body.js'
+import { homedir } from 'node:os'
+
+const MCP_SERVER_KEY = 'dsh-tools'
+
+/**
+ * Tools that must NEVER be exposed to an external MCP client. These are
+ * internal transports / loopback-only helpers of the plugin itself:
+ *  - `run_code`  — the deployment's model-only wrapper around code execution.
+ *  - `agy_ask`   — the plugin's own ask tool (would recurse into agy).
+ *  - `agy_tool`  — replays recorded agy tool activity back into DSH; calling it
+ *                   over the bridge would let the agy child re-enter the bridge.
+ * Kept in one place so the /tools listing and the /call guard can never drift.
+ */
+const INTERNAL_TOOL_NAMES = new Set(['run_code', 'agy_ask', 'agy_tool'])
+
+/** Minimal structural view of the DSH tool registry we need. */
+export interface ToolsServiceLike {
+  /**
+   * Visible tool schemas for one scope. `scope` is the viewing agent (its
+   * `ctx` is the registration scope): omitting it yields the GLOBAL view only,
+   * which excludes every tool a plugin registered on an agent's own scope
+   * (e.g. Fusion's `fusion_*`, registered via `agent.ctx.tools.register`).
+   * Passing the resolved calling agent is therefore what makes agent-scoped
+   * tools bridgeable at all.
+   */
+  schemas(scope?: unknown): Array<{ name: string; description: string; parameters: Record<string, unknown> }>
+  execute(input: {
+    callId: string
+    name: string
+    arguments: unknown
+    agent?: unknown
+    /**
+     * Caller-owned cancellation, required by DSH's `ToolExecutionInput`. Tools
+     * read `exec.signal` before/while they settle, so a call without one throws
+     * `Cannot read properties of undefined (reading 'aborted')`.
+     */
+    signal: AbortSignal
+  }): Promise<unknown>
+}
+
+/** MCP tool names are [a-zA-Z0-9_-]; DSH names may contain dots. */
+export function toMcpName(name: string): string {
+  return name.replace(/[^a-zA-Z0-9_-]/g, '_')
+}
+
+export interface McpBridge {
+  /** Absolute path of the bridge script (dist/bridge.mjs). */
+  bridgeScript: string
+  /** Bearer token the bridge script must present. */
+  token: string
+  /** Base URL of the loopback endpoint. */
+  url: string
+  port: number
+  close(): Promise<void>
+}
+
+/** Loopback request-body cap for /call. Tool arguments are tiny; this only
+ * exists so a token-holding (possibly prompt-injected) agy child cannot OOM the
+ * host by streaming an unbounded body. The bounded reader itself is shared with
+ * the plugin's web routes (see ./read-json-body.ts). */
+const MCP_MAX_BODY_BYTES = 8 * 1024 * 1024
+
+/** Constant-time bearer comparison (the token is a shared secret). */
+function bearerMatches(provided: string, expected: string): boolean {
+  const a = Buffer.from(provided, 'utf8')
+  const b = Buffer.from(expected, 'utf8')
+  if (a.length !== b.length) return false
+  return timingSafeEqual(a, b)
+}
+
+function sendJson(res: ServerResponse, status: number, body: unknown): void {
+  const text = JSON.stringify(body)
+  res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Length': Buffer.byteLength(text) })
+  res.end(text)
+}
+
+/** Best-effort extraction of readable text from an execution result. */
+function resultText(result: unknown): string {
+  if (result === null || result === undefined) return ''
+  const r = result as { content?: unknown; output?: unknown; text?: unknown }
+  if (Array.isArray(r.content)) {
+    const parts: string[] = []
+    for (const b of r.content) {
+      const blk = b as { type?: string; text?: unknown }
+      if (blk && blk.type === 'text' && typeof blk.text === 'string') parts.push(blk.text)
+    }
+    if (parts.length > 0) return parts.join('\n')
+  }
+  if (typeof r.text === 'string') return r.text
+  if (typeof r.output === 'string') return r.output
+  try {
+    return JSON.stringify(result, null, 2)
+  } catch {
+    return String(result)
+  }
+}
+
+/**
+ * Start the loopback endpoint. Resolves once listening. The tools service
+ * may arrive later (optional service): pass a thunk.
+ */
+export function startMcpBridge(opts: {
+  bridgeScript: string
+  tools: () => ToolsServiceLike | undefined
+  allowlist: () => string
+  /** Map the spawning DSH session id to the agent the call runs on behalf of. */
+  resolveAgent?: (sessionId: string) => unknown | Promise<unknown>
+  log?: (msg: string) => void
+  /** Max buffered request-body bytes (tests use a small value). */
+  maxBodyBytes?: number
+}): Promise<McpBridge> {
+  const token = randomBytes(24).toString('hex')
+  let callSeq = 0
+  // Resolve the caller once per request for BOTH routes. /tools needs it too:
+  // `schemas()` without a scope returns the global layer only, so a
+  // scope-registered tool (`fusion_*`) would never be listed and could never be
+  // called, no matter how the allowlist is written.
+  //
+  // DSH session keys come in two forms: a top-level web session is
+  // `session-<uuid>`, a sub-agent/fork session is a bare `<uuid>`. The spawning
+  // key is injected automatically, so resolve the value as given first (a bare
+  // sub-agent key must not be rewritten); only when that finds no agent and the
+  // value is not prefixed yet, retry once with `session-`.
+  const callerFor = async (req: { headers: Record<string, unknown> }): Promise<unknown> => {
+    const sessionHeader = String(req.headers['x-dsh-session'] ?? '')
+    if (sessionHeader === '' || opts.resolveAgent === undefined) return undefined
+    const resolve = async (id: string): Promise<unknown> => await Promise.resolve(opts.resolveAgent?.(id))
+    let agent = await resolve(sessionHeader)
+    if (agent === undefined && !sessionHeader.startsWith('session-')) {
+      agent = await resolve('session-' + sessionHeader)
+    }
+    return agent
+  }
+  const server: Server = createServer((req, res) => {
+    void (async () => {
+      const url = (req.url ?? '').split('?')[0]
+      const auth = String(req.headers['authorization'] ?? '')
+      if (!bearerMatches(auth, 'Bearer ' + token)) {
+        sendJson(res, 401, { error: 'unauthorized' })
+        return
+      }
+      if ((req.method === 'GET' || req.method === 'POST') && (url === '/tools' || url === '/mcp/tools')) {
+        const svc = opts.tools()
+        if (!svc) {
+          sendJson(res, 503, { error: 'tools service unavailable' })
+          return
+        }
+        const allow = opts.allowlist().split(',').map((s) => s.trim()).filter(Boolean)
+        const allowSet = new Set(allow)
+        const used = new Set<string>()
+        // Scope the listing to the calling agent: agent-scoped registrations
+        // (Fusion's `fusion_*`) live outside the global layer, so an unscoped
+        // `schemas()` silently serves an empty-of-them catalog.
+        const caller = await callerFor(req)
+        const tools = svc.schemas(caller)
+          .filter((t) => allow.length === 0 || allowSet.has(t.name))
+          // internal transports / loopback-only helpers are not bridgeable
+          .filter((t) => !INTERNAL_TOOL_NAMES.has(t.name))
+          .map((t) => {
+            // Map the DSH name to an MCP-safe name. Distinct DSH names can
+            // normalize to the same MCP name (e.g. 'a.b' and 'a_b'); rather than
+            // silently dropping one, disambiguate with a stable suffix so every
+            // real tool stays reachable. bridge.mjs calls back by the exact
+            // dshName, so the MCP-side suffix never affects execution.
+            const base = toMcpName(t.name)
+            let name = base
+            for (let i = 2; used.has(name); i++) name = base + '__' + i
+            used.add(name)
+            return {
+              name,
+              dshName: t.name,
+              description: t.description,
+              inputSchema: { type: 'object', ...t.parameters },
+            }
+          })
+        sendJson(res, 200, { tools })
+        return;
+      }
+      if (req.method === 'POST' && (url === '/call' || url === '/mcp/call')) {
+        const body = await readJsonBody(req, { maxBytes: opts.maxBodyBytes ?? MCP_MAX_BODY_BYTES })
+        if (body.tooLarge) {
+          sendJson(res, 413, { error: 'request body too large' })
+          return
+        }
+        if (body.invalid) {
+          sendJson(res, 400, { error: 'invalid JSON' })
+          return
+        }
+        const parsed = body.value as { dshName?: unknown; arguments?: unknown }
+        const svc = opts.tools()
+        if (!svc) {
+          sendJson(res, 503, { error: 'tools service unavailable' })
+          return
+        }
+        const dshName = typeof parsed.dshName === 'string' ? parsed.dshName : ''
+        if (dshName === '' || INTERNAL_TOOL_NAMES.has(dshName)) {
+          sendJson(res, 400, { error: 'bad tool name' })
+          return;
+        }
+        callSeq++
+        // Audit trail: the bridge is the only path from an external agent
+        // runtime into DSH tools, and it used to log nothing per call, so a
+        // failed run could only be reconstructed from transcripts. Log the
+        // tool, the caller and the outcome - never the arguments, which may
+        // carry file contents or secrets.
+        const startedAt = Date.now()
+        const audit = (outcome: string): void => {
+          try {
+            opts.log?.('mcp call ' + dshName + ' [' + outcome + '] ' + (Date.now() - startedAt) + 'ms')
+          } catch {
+            /* logging must never break the call */
+          }
+        }
+        // Enforce the allowlist at EXECUTION time, not just when listing tools.
+        // The agy child holds the bridge token, so it is exactly the party that
+        // mcpToolAllowlist constrains; filtering only /tools would let a
+        // (possibly prompt-injected) child POST /call with an arbitrary dshName
+        // and reach tools outside the allowlist. Empty allowlist = all allowed.
+        const allow = opts.allowlist().split(',').map((s) => s.trim()).filter(Boolean)
+        if (allow.length > 0 && !allow.includes(dshName)) {
+          audit('denied: not in allowlist')
+          sendJson(res, 403, { error: 'tool not allowed' })
+          return
+        }
+        try {
+          // Carry the caller: the session that spawned agy is the agent on
+          // whose behalf this call runs (issue #55). Without it, tools that
+          // enforce `exec.agent` reject the call.
+          const agent = await callerFor(req)
+          // Every DSH tool receives `exec.signal`; tools that await inside their
+          // body read it, so a call without one throws
+          // `Cannot read properties of undefined (reading 'aborted')`.
+          // Abort when the MCP client goes away so the tool can stop early.
+          const controller = new AbortController()
+          const abortIfOpen = (): void => {
+            if (!res.writableEnded) controller.abort()
+          }
+          req.once('aborted', abortIfOpen)
+          res.once('close', () => {
+            if (!res.writableEnded) controller.abort()
+          })
+          const result = await svc.execute({
+            callId: 'agy-mcp-' + callSeq,
+            name: dshName,
+            arguments: parsed.arguments ?? {},
+            signal: controller.signal,
+            ...(agent === undefined ? {} : { agent }),
+          })
+          audit('ok caller=' + (agent === undefined ? 'none' : 'agent'))
+          sendJson(res, 200, { ok: true, text: resultText(result) })
+        } catch (e) {
+          audit('failed: ' + String(e).slice(0, 200))
+          sendJson(res, 200, { ok: false, error: String(e) })
+        }
+        return;
+      }
+      sendJson(res, 404, { error: 'not found' })
+    })().catch(() => {
+      try { sendJson(res, 500, { error: 'internal' }) } catch { /* closed */ }
+    })
+  })
+  return new Promise((resolve, reject) => {
+    server.once('error', reject)
+    server.listen(0, '127.0.0.1', () => {
+      server.unref()
+      const addr = server.address()
+      const port = typeof addr === 'object' && addr !== null ? addr.port : 0
+      opts.log?.('mcp bridge listening on 127.0.0.1:' + port)
+      resolve({
+        bridgeScript: opts.bridgeScript,
+        token,
+        url: 'http://127.0.0.1:' + port,
+        port,
+        close: () => new Promise<void>((done) => server.close(() => done())),
+      })
+    })
+  })
+}
+
+/** `agy` home the CLI reads its configs from (mirrors the runner's isolated-home rule). */
+export function agyConfigHome(env: NodeJS.ProcessEnv = process.env): string {
+  const home = env.GEMINI_CLI_HOME
+  if (typeof home === 'string' && home !== '') return home
+  const plain = env.HOME
+  if (typeof plain === 'string' && plain !== '') return plain
+  return homedir()
+}
+
+/**
+ * Absolute path of the MCP server registry `agy` 1.4+ actually loads.
+ * `override` wins so callers can target a specific file.
+ * Correctly distinguishes between a home dir (`/path/to/home`) and a
+ * direct .gemini dir (`/path/to/home/.gemini`).
+ */
+export function agyMcpConfigPath(override = '', env: NodeJS.ProcessEnv = process.env): string {
+  if (override !== '') return override
+  const gch = env.GEMINI_CLI_HOME
+  if (typeof gch === 'string' && gch !== '') {
+    return basename(gch) === '.gemini'
+      ? join(gch, 'config', 'mcp_config.json')
+      : join(gch, '.gemini', 'config', 'mcp_config.json')
+  }
+  const home = typeof env.HOME === 'string' && env.HOME !== '' ? env.HOME : homedir()
+  return join(home, '.gemini', 'config', 'mcp_config.json')
+}
+
+/** Registry key for one bridge instance: unique per port so two DSH hosts sharing a global file never clobber each other. */
+export function mcpServerKey(port: number): string {
+  return MCP_SERVER_KEY + '-' + String(port)
+}
+
+/**
+ * Merge our server entry into the MCP registry file at `file` (`agy` 1.4+
+ * reads the global one; a workspace `.mcp.json` is ignored, see issue #55).
+ * Returns a restore function that puts the previous content back (or deletes
+ * the file we created). Never throws.
+ */
+export function writeMcpConfig(file: string, bridge: McpBridge): () => void {
+  const key = mcpServerKey(bridge.port)
+  let previous: string | null = null
+  try {
+    if (existsSync(file)) previous = readFileSync(file, 'utf8')
+  } catch {
+    previous = null
+  }
+  let root: Record<string, unknown> = {}
+  if (previous !== null) {
+    try {
+      const v = JSON.parse(previous)
+      if (v && typeof v === 'object') root = v as Record<string, unknown>
+    } catch {
+      root = {}
+    }
+  }
+  const servers = (root.mcpServers && typeof root.mcpServers === 'object' ? root.mcpServers : {}) as Record<string, unknown>
+  if (MCP_SERVER_KEY in servers) {
+    delete servers[MCP_SERVER_KEY]
+  }
+  servers[key] = {
+    type: 'stdio',
+    command: process.execPath,
+    args: [bridge.bridgeScript],
+    env: {
+      DSH_MCP_URL: bridge.url,
+      DSH_MCP_TOKEN: bridge.token,
+    },
+  }
+  root.mcpServers = servers
+  let written = false
+  let writtenBytes = ''
+  try {
+    mkdirSync(dirname(file), { recursive: true })
+    writtenBytes = JSON.stringify(root, null, 2) + '\n'
+    writeFileSync(file, writtenBytes, 'utf8')
+    written = true
+  } catch {
+    return () => {}
+  }
+  return () => {
+    try {
+      // Restore only what WE wrote: after a crash + manual edit (or another
+      // process rewriting the file), blindly restoring `previous` clobbered
+      // foreign changes. When the current content no longer contains our
+      // entry, leave the file alone.
+      if (!written) return
+      let current: string | null = null
+      try {
+        if (existsSync(file)) current = readFileSync(file, 'utf8')
+      } catch {
+        current = null
+      }
+      if (current === null) return // file vanished: nothing of ours remains
+      // Another host (or the user) rewrote the shared registry since we
+      // published. Restoring our old bytes would delete their entry, so only
+      // drop the key we own and leave everything else untouched.
+      if (current !== writtenBytes) {
+        let live: Record<string, unknown> = {}
+        try {
+          const v = JSON.parse(current)
+          if (v && typeof v === 'object') live = v as Record<string, unknown>
+        } catch {
+          return // unparseable: don't touch the file
+        }
+        const liveServers = (live.mcpServers && typeof live.mcpServers === 'object' ? live.mcpServers : {}) as Record<string, unknown>
+        if (!(key in liveServers)) return
+        delete liveServers[key]
+        const emptyRegistry = Object.keys(liveServers).length === 0
+        const nothingElse = Object.keys(live).every((k) => k === 'mcpServers')
+        if (emptyRegistry && nothingElse) {
+          // Nothing but empty bookkeeping is left: don't keep a file behind.
+          try {
+            unlinkSync(file)
+          } catch {
+            /* best effort */
+          }
+          return
+        }
+        writeFileSync(file, JSON.stringify({ ...live, mcpServers: liveServers }, null, 2) + '\n', 'utf8')
+        return
+      }
+      let parsed: Record<string, unknown> = {}
+      try {
+        const v = JSON.parse(current)
+        if (v && typeof v === 'object') parsed = v as Record<string, unknown>
+      } catch {
+        return // unparseable: assume our entry is gone, don't touch the file
+      }
+      const curServers = (parsed.mcpServers && typeof parsed.mcpServers === 'object' ? parsed.mcpServers : {}) as Record<string, unknown>
+      if (!(key in curServers)) return
+      if (previous === null) {
+        delete curServers[key]
+        if (Object.keys(curServers).length === 0) {
+          // We created the file and no other servers remain: remove it.
+          unlinkSync(file)
+        } else {
+          writeFileSync(file, JSON.stringify({ ...parsed, mcpServers: curServers }, null, 2) + '\n', 'utf8')
+        }
+      } else {
+        writeFileSync(file, previous, 'utf8')
+      }
+    } catch {
+      /* best effort */
+    }
+  }
+}

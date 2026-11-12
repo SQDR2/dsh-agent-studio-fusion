@@ -40,3 +40,11 @@ hotReload:
     - src/profile/resolve.ts
     - src/task/status-index.ts
     - src/host/compaction-routing.ts
+    - src/host/agy/index.ts
+    - src/host/agy/config.ts
+    - src/host/agy/types.ts
+    - src/host/agy/adapter.ts
+    - src/host/agy/mcp-bridge.ts
+    - src/host/agy/mirror-tool.ts
+    - src/host/agy/pool.ts
+    - src/host/agy/quota.ts

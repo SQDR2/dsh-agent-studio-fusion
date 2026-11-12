@@ -15,6 +15,71 @@ own tags and releases.
 Entry format: what changed, then what was actually validated. "Not claimed" lines mark what a release did *not* test —
 read them before assuming a platform is covered.
 
+## 0.4.0 — 2026-11-12
+
+### Runtime
+- **The complete Antigravity (agy CLI) capability is now built in**, ported from
+  [`SQDR2/dsh-agy-worker`](https://github.com/SQDR2/dsh-agy-worker) 0.6.3 (`ab49704`) under its MIT license
+  ([`docs/ATTRIBUTION-AGY.md`](docs/ATTRIBUTION-AGY.md)). One plugin identity: `installAgy(ctx, config.agy)` replaces the
+  upstream entry `apply()` and returns the disposer that unwinds every effect, so a disabled `agy` block (or an unloaded
+  plugin) rolls the whole capability back. `cordis.patch.yml` still inserts only `dsh-fusion`.
+- Kept verbatim from upstream: the `antigravity` provider route, the `/agy` command family, `agy_ask` and the `agy_tool`
+  mirror (with its `tools/pre-execute` bypass), the full `/plugins/agy-worker/*` HTTP surface (status, auth, pool,
+  config, qr, media, assets, mermaid), the account pool and per-account credential isolation, quota polling and weekly
+  warmup, media staging and TTL sweep, the doctor report, and the reverse MCP bridge (`src/host/agy/bridge.mjs`, shipped
+  as `lib/bridge.mjs`). `src/host/route-transport.ts` is untouched: it already maps `antigravity` → `agy_tool`.
+- Config moved into a `agy` subconfig on this plugin's entry; the layering is unchanged (`DSH_AGY_*` env > runtime
+  overrides file > the `agy` block > defaults). `qrcode` and `undici` became runtime dependencies because the build keeps
+  bare specifiers external, and `@types/qrcode` joined the dev dependencies.
+- `enabled` is an **install-time** switch, exactly as upstream had it: `enabled: false` mounts no `antigravity` route and
+  no background capability (quota polling, warmup, MCP bridge, media sweep), while `/agy` and the
+  `/plugins/agy-worker/*` management routes stay mounted for inspection. Neither `/agy` nor `POST /config` accepts
+  `enabled` as a settable key, so re-enabling means changing the block and restarting the Host.
+- The `installAgy` disposer now also tears down the two reactive sub-fibers (`tools`, `webServer`) it creates, so
+  one call removes the `agy_tool` registration and every `/plugins/agy-worker/*` route — a regression this release's
+  native test pins.
+- State: the **work-state path is unchanged** (`$DSH_HOME/agy-worker/` for overrides, session bindings, media cache and
+  warmup history), while the **account pool moved** to `$DSH_HOME/agy-accounts/pool.json` (upstream resolved it from
+  `DSH_STATE_DIR`, falling back to `~/.dsh`). Nothing migrates user state automatically, edits a profile or uninstalls the
+  old package; the one manual copy — needed only when `DSH_STATE_DIR` and `DSH_HOME` name different roots — is in
+  [`docs/MIGRATION-AGY.md`](docs/MIGRATION-AGY.md).
+
+### Client
+- **FusionSettings is still the only primary panel and the only sidebar entry.** The Antigravity console is a collapsible
+  section at the bottom of that page (`isModal: false`); the standalone plugin's own `main`, `sidebar.panellist`,
+  `plugins.bundle.config`, `plugins.row.config` and session-header registrations, its settings-nav icon injector and its
+  page-wide mermaid / reasoning / images / decisions / scroll scanners were deliberately not ported.
+- Exactly two keyed `tool.call.toolview` views are registered, as upstream had them: `agy_tool` and `run_code`. The
+  `run_code` view recognizes the generated mirror wrapper through `mirrorStepInvocation` — the same strict two-line parser
+  Fusion's own activity projection uses — and renders every other Code Mode program as the ordinary code card, so
+  `constraints` on plain code rendering hold. Fusion's own activity cards are unchanged.
+- The console's custom properties are declared on `.agy-console` instead of `:root`/`body` (and its overlay marker is
+  `agy-console-modal-open`), so the Antigravity palette cannot repaint Fusion's pages.
+
+### Docs
+- [`docs/ATTRIBUTION-AGY.md`](docs/ATTRIBUTION-AGY.md) carries the upstream MIT text, the
+  `dsh-agy-link → dsh-agy-worker → this package` chain, what was ported, what changed, and the bundled
+  `mermaid.min.js` licenses. [`docs/MIGRATION-AGY.md`](docs/MIGRATION-AGY.md) documents the mandatory manual
+  disable/remove of the old package (duplicate route / provider / command / toolview hard-fail) and the manual account
+  copy, in Chinese and English. `INSTALL.md`, `INSTALL.zh.md`, `README.md`, `README.en.md` and
+  [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md) are updated.
+
+### Validation
+- `pnpm typecheck` clean on Node 24.13.0.
+- `pnpm test` 605 passed in 72 files, including new `tests/agy-host-config.spec.ts`, `tests/agy-state-paths.spec.ts`,
+  `tests/agy-toolview.spec.ts`, `tests/agy-routes.spec.ts` and `tests/fusion-settings-agy.spec.ts`. The AGY cases run on a
+  throwaway `$DSH_HOME`, so no case can create or rewrite a user's real `agy-worker` state.
+- `DSHX_HARNESS=… pnpm test:host` 293 passed, 1 skipped, including the new `native-tests/agy-routes.spec.ts` (5 cases:
+  provider/command/route registration against the real registries, the `/status` payload over real HTTP, the `agy_tool`
+  mirror in the real tool runtime, full disposer teardown, and the `enabled: false` behaviour).
+- `pnpm build` emits `lib/dsh-fusion.js`, `lib/client.js`, `lib/bridge.mjs` and `lib/assets/mermaid.min.js`.
+  The vendored `assets/mermaid.min.js` is byte-identical to upstream (`cmp`-verified) and keeps its own bundled-license
+  banner; the 3.4 MiB size tradeoff and how it is packaged are recorded in
+  [`docs/ATTRIBUTION-AGY.md`](docs/ATTRIBUTION-AGY.md#size-tradeoff-accepted-decision).
+- **Not claimed:** no live `agy` binary run, no real Google login, no real Worker turn on the `antigravity` route — the
+  port is verified structurally (registration/unwinding, config layering, path resolution, tool-card projection) and by
+  the existing suites. Windows and macOS were not exercised for this release.
+
 ## 0.3.9 — 2026-11-11
 
 ### Runtime

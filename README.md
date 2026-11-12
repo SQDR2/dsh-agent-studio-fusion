@@ -76,9 +76,20 @@ Fusion 在 DeepSeek Harness（DSH）的模型菜单里就是一个普通模型�
   - 任务结束后恢复只读。
 - **额度用完或出错**：Lead、Sidekick 各自处理。可以换模型继续，也可以定时继续；进度保留。
 
-## 用 agy 当 Sidekick（dsh-agy-worker）
+## 用 agy 当 Sidekick（已内建）
 
-[`dsh-agy-worker`](https://github.com/SQDR2/dsh-agy-worker)（`dsh-agy-link` 的 fork）把 Google Antigravity 的模型接进 DSH，可以当 Sidekick 用。这条路和普通模型线路不一样，**必须三个条件同时成立**，缺任何一条都会静默失败：
+Google Antigravity（`agy` CLI）自 0.4.0 起 **内建在本插件里**：从
+[`dsh-agy-worker`](https://github.com/SQDR2/dsh-agy-worker)（`dsh-agy-link` 的 fork）以 MIT 许可移植，见
+[`docs/ATTRIBUTION-AGY.md`](docs/ATTRIBUTION-AGY.md)。它带来 `antigravity` 模型线路、`/agy` 命令、`agy_ask` /
+`agy_tool`、`/plugins/agy-worker/*` 路由、带额度跟踪的账号池，以及 Fusion 面板里的 Antigravity 管理控制台。
+不需要再装第二个包，左侧边栏仍然只有 Fusion 一个入口。
+
+> **从 `dsh-agy-worker` 迁移：** 启用本插件前 **先** 停用或移除旧包。两者用同一套路由前缀、同一个
+> `antigravity` provider、同一个 `/agy` 命令和同一组工具卡键，同时启用会在加载时失败
+> （`duplicate exact route`、`DUPLICATE_ADAPTER`、`already registered`）。完整步骤、配置搬家与唯一需要手动复制
+> 的账号池见 [`docs/MIGRATION-AGY.md`](docs/MIGRATION-AGY.md)。
+
+这条路和普通模型线路不一样，**必须三个条件同时成立**，缺任何一条都会静默失败：
 
 | 条件 | 为什么 | 缺了会怎样 |
 |---|---|---|
@@ -91,15 +102,25 @@ Fusion 在 DeepSeek Harness（DSH）的模型菜单里就是一个普通模型�
 推荐配置：
 
 ```yaml
-- id: dsh-agy-worker
+- id: dsh-fusion
   config:
-    mcpBridge: true
-    permissionMode: skip
-    mcpConfigScope: global
-    mcpToolAllowlist: "fusion_submit_result,fusion_read_state,fusion_read_evidence,bash,read,write,edit,glob,grep,job_output,job_kill"
+    agy:
+      mcpBridge: true
+      permissionMode: skip
+      mcpConfigScope: global
+      mcpToolAllowlist: "fusion_submit_result,fusion_read_state,fusion_read_evidence,bash,read,write,edit,glob,grep,job_output,job_kill"
 ```
 
-> Windows 把 `bash` 换成 `pwsh`；改过 `workerTools` 就跟着改。完整配置面、验证步骤与排障对照见
+旧插件其余键（`enabled`、`agyBin`、`workspaceRoot`、`defaultModel`、`hiddenModels`、`quotaPollIntervalMs`、
+`autoWarmup` ……）都能原样写在 `agy` 块里，且 `DSH_AGY_*` 环境变量仍然优先。`enabled: false` 是 **安装期** 的
+关闭开关：它会去掉 `antigravity` provider 路线与全部后台能力（配额轮询、预热、MCP 反桥、媒体清扫），但
+`/agy` 与管理路由仍会挂载，供你查看状态；要重新打开，改配置块后重启 DSH，它不是运行期开关。管理控制台
+（账号、额度、模型可见性、权限模式、预热）位于左侧边栏 **Fusion** 面板底部；`/agy status | pool | models | doctor`
+在输入框里回答同样的问题。
+
+> Windows 把 `bash` 换成 `pwsh`；改过 `workerTools` 就跟着改。工作状态仍在独立插件原来的位置
+> （`$DSH_HOME/agy-worker/`）；账号池用本插件的 `$DSH_HOME/agy-accounts/pool.json`，只有当 `DSH_STATE_DIR`
+> 被设置时才与上游不同 —— 一次性复制步骤见 [`docs/MIGRATION-AGY.md`](docs/MIGRATION-AGY.md)。桥接本身完整配置面、验证步骤与排障对照见
 > [dsh-agy-worker 的 MCP 桥接文档](https://github.com/SQDR2/dsh-agy-worker/blob/main/docs/MCP-BRIDGE-SETUP.md)。
 
 ### ACP 线路（内置 `deepseek-harness-acp`）
@@ -176,7 +197,7 @@ Lead 等 Sidekick 干活时，可能要等好几分钟。模型的输入缓存�
 
 - **DSH 版本：** 支持 **0.2.1-rc.5 及之后的 0.2.1 版本**（`>=0.2.1-rc.5 <0.3.0-0`），桌面版和 Web 版都可以；0.2.0 系列已不再支持。其他版本不保证可用，新版本发布后会另行适配。
 - **Node 版本：** 需要 **Node 24 或更新版本**（`engines.node` 为 `>=24.0.0`）。
-- **模型：** DSH 官方自带的模型线路，以及 [dsh-oauth-login](https://github.com/aa2246740/dsh-oauth-login)、dsh-antigravity-oauth 提供的订阅登录线路，还有 [dsh-agy-worker](https://github.com/SQDR2/dsh-agy-worker) 的 Antigravity 线路。其他第三方模型插件未经测试。
+- **模型：** DSH 官方自带的模型线路，以及 [dsh-oauth-login](https://github.com/aa2246740/dsh-oauth-login)、dsh-antigravity-oauth 提供的订阅登录线路，还有内建的 Antigravity 线路（移植自 [dsh-agy-worker](https://github.com/SQDR2/dsh-agy-worker)）。其他第三方模型插件未经测试。
 - **系统：**
   - **macOS：** 已验证（Seatbelt 沙盒）。
   - **Windows：** `v0.2.1` 已适配原生 `pwsh`，在 Windows Server 2022、PowerShell 7.6.6 上通过验证。启动 DSH 的进程 PATH 中需要有 `pwsh`。Windows 10/11 尚未验证。Windows ACL 仅提供部分隔离，普通路径写入可受限制，读取和网络不在该限制内。
@@ -197,6 +218,7 @@ Lead 等 Sidekick 干活时，可能要等好几分钟。模型的输入缓存�
 
 - **Fusion 自己的记录：** 任务说明、检查结果、用量、缓存统计和设置，都存在 `$DSH_HOME/plugins/dsh-fusion/state.sqlite`。`DSH_HOME` 默认是 `~/.dsh`。
 - **从旧名字升级：** 上一版叫 `dsh-model-fusion`，它的整个数据目录（`$DSH_HOME/plugins/dsh-model-fusion/`）会在首次启动时**整体迁移**到新名字，已有的任务、用量和设置都还在。跨文件系统时会退化成复制数据库和它的 `-wal`/`-shm`/`-journal`，只删除自己复制过的文件。
+- **内建 Antigravity（agy）：** 工作状态沿用独立插件原来的位置 —— 覆盖项、会话绑定、媒体缓存与预热历史在 `$DSH_HOME/agy-worker/`。账号池是本插件的 `$DSH_HOME/agy-accounts/pool.json`，每个账号的独立 HOME 在 `$DSH_HOME/agy-accounts/<id>/`；上游从 `DSH_STATE_DIR` 取账号池，所以只有设置过它的安装才需要 [`docs/MIGRATION-AGY.md`](docs/MIGRATION-AGY.md) 里的一次性复制。**不会**自动搬迁，卸载本包也不会删除这两个目录。
 - **会话本身：** 由 DSH 保存，Fusion 不另外上传任何数据。
 - **想清空 Fusion 的记录：** 退出 DSH 后删除这个文件。设置也会一起清掉，下次打开时重新选组合即可。
 
@@ -225,3 +247,5 @@ Windows 开发环境需将 PowerShell 7（`pwsh`）、Node 和 Python 加入运�
 ## 许可
 
 Apache-2.0。上游 fork 自 [`aa2246740/dsh-model-fusion`](https://github.com/aa2246740/dsh-model-fusion)，同样以 Apache-2.0 发布。
+
+并入的第三方成果保留各自许可：ACP provider 移植为 MIT（[`docs/ATTRIBUTION-ACP.md`](docs/ATTRIBUTION-ACP.md)）；内建的 Antigravity（agy）能力为 MIT，移植自 [`SQDR2/dsh-agy-worker`](https://github.com/SQDR2/dsh-agy-worker)（其上游为 [`amlyczz/dsh-agy-link`](https://github.com/amlyczz/dsh-agy-link)），见 [`docs/ATTRIBUTION-AGY.md`](docs/ATTRIBUTION-AGY.md)。该文档同时列出随包附带的 `mermaid.min.js` 里各库的许可。

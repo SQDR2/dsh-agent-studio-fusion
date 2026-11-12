@@ -1,0 +1,145 @@
+export type ModelFamily = 'google' | 'argon' | 'anthropic' | 'openai' | 'unknown';
+/**
+ * Map a model slug to its backend quota counter family.
+ *
+ * Gemini 4 Argon (Pro/Ultra-only) bills against its OWN weekly quota pool —
+ * never the plain Gemini one. Its ids look like `gemini-4-argon-low/-medium`
+ * and MUST be detected before the generic `gemini-` prefix below, otherwise
+ * argon usage would silently drain/report the Gemini counter.
+ */
+export declare function modelFamilyOf(modelId?: string): ModelFamily;
+export interface ModelQuotaInfo {
+    modelId: string;
+    displayName?: string;
+    remainingFraction?: number;
+    resetTime?: string;
+}
+export interface FamilyQuotaInfo {
+    /** 5-hour rolling remaining quota fraction: 0.0 (exhausted) to 1.0 (full). */
+    remainingFraction?: number;
+    /** ISO-8601 timestamp for when the 5-hour quota window resets. */
+    resetTime?: string;
+    /** Weekly remaining quota fraction: 0.0 (exhausted) to 1.0 (full). */
+    weeklyFraction?: number;
+    /** ISO-8601 timestamp for when the weekly quota resets. */
+    weeklyResetTime?: string;
+    /** Description / tooltip from upstream backend */
+    description?: string;
+    /** Timestamp when this quota was last updated locally. */
+    updatedAt?: number;
+    /** Optional model-level breakdown in this family. */
+    models?: ModelQuotaInfo[];
+}
+export interface FamilyCooldownState {
+    /** Timestamp when cooldown expires and account becomes available again. */
+    cooldownUntil: number;
+    /** Reason for cooldown (e.g. "429 Rate Limit", "Quota Exhausted"). */
+    reason: string;
+    /** Consecutive rate-limit failure count (for exponential/tiered backoff). */
+    consecutiveFailures: number;
+}
+export interface ManagedAccount {
+    id: string;
+    alias: string;
+    /** True only when `alias` is the server-owned canonical built-in default. */
+    defaultAlias?: boolean;
+    email?: string;
+    /**
+     * Absolute path to the isolated account home directory. Empty for the
+     * primary/system account: agy 1.1.15+ stores credentials in the macOS
+     * Keychain (Antigravity Safe Storage), NOT in a ~/.gemini token file, so
+     * the primary account must keep the real system HOME to stay signed in.
+     */
+    dir: string;
+    /**
+     * True when this account rides the real system HOME (no HOME injection).
+     * Always true for the primary account; only secondary pool accounts get
+     * isolated HOME directories.
+     */
+    systemHome?: boolean;
+    /** Optional custom proxy URL override (e.g. "socks5://127.0.0.1:7890"). */
+    proxyUrl?: string;
+    enabled: boolean;
+    createdAt: number;
+    lastUsedAt?: number;
+    /** Set to true when OAuth token refresh fails with invalid_grant or authentication is rejected. */
+    authRequired?: boolean;
+    /** Last authentication failure reason. */
+    authError?: string;
+    /** When authRequired was last set (drives the background re-verification cadence). */
+    authMarkedAt?: number;
+    /** Cooldown state tracked per model family. */
+    cooldowns: Partial<Record<ModelFamily, FamilyCooldownState>>;
+    /** Cached real-time quota statistics per model family. */
+    quotas: Partial<Record<ModelFamily, FamilyQuotaInfo>>;
+    /**
+     * Families this account has itself reported a dedicated quota group for.
+     *
+     * Only used to tell "the bucket went away" (Pro -> Ultra folds Argon into the
+     * Gemini bucket) apart from "this account never had one" (free tier, or a
+     * plan that never exposes Argon) — the latter must never have its cooldown
+     * cleared, because its argon cooldowns come from real 429s.
+     */
+    dedicatedGroups?: ModelFamily[];
+}
+export type AccountHealthStatus = 'healthy' | 'cooldown' | 'auth_required' | 'disabled';
+export interface AccountHealthInfo {
+    status: AccountHealthStatus;
+    message?: string;
+    cooldownMs?: number;
+}
+/**
+ * Whether the background quota poller should touch this account at all.
+ * Disabled, auth-quarantined and cooldown accounts are skipped so automatic
+ * polling never hammers Google endpoints for accounts already known to be
+ * restricted (risk-control exposure minimization). Manual force refresh
+ * from the UI bypasses this gate.
+ */
+export declare function shouldPollAccount(account: ManagedAccount): boolean;
+/**
+ * How many independent, NON-authoritative auth-classified failures are needed
+ * before an account is sticky-quarantined. agy's "not signed in" stderr banner
+ * is byte-identical for a real sign-out and for a keyring validation that died
+ * on the network, so a SINGLE occurrence is not proof of a dead login (live
+ * incident 2026-10-16: one afternoon of proxy jitter quarantined three healthy
+ * accounts on first sight). Authoritative evidence (invalid_grant, revoked…)
+ * and the explicit re-login paths bypass this gate entirely.
+ */
+export declare const AUTH_CONFIRM_STRIKES = 2;
+/**
+ * After this long, an authRequired flag becomes eligible for ONE background
+ * re-verification per poll cycle: a single transient failure used to
+ * quarantine an account until a manual quota refresh cleared it.
+ */
+export declare const AUTH_REVERIFY_DELAY_MS: number;
+/**
+ * A flagged account whose flag is old enough (or whose flag predates the
+ * authMarkedAt bookkeeping) may be re-verified in the background. If the
+ * stored token still works the flag clears itself; if not, the flag is
+ * simply re-stamped.
+ */
+export declare function needsAuthReverify(account: ManagedAccount, now?: number): boolean;
+/** Compute real-time health indicator for an account. */
+export declare function getAccountHealth(account: ManagedAccount, family?: ModelFamily): AccountHealthInfo;
+export interface AccountPoolData {
+    version: 1;
+    mode: 'sequential' | 'round-robin';
+    defaultCooldownMs: number;
+    maxCooldownMs: number;
+    primaryAccountId?: string;
+    /** Currently active account id per model family for sticky sequential drain */
+    activeAccountIds?: Partial<Record<ModelFamily, string>>;
+    /**
+     * Account of the most recent agy spawn — the single source of truth for the
+     * console's "in use" badge. Per-family pointers above are an internal
+     * scheduling detail: families can legitimately sit stale on accounts that
+     * are not running anything (that badge showed two accounts at once).
+     */
+    lastActiveAccountId?: string;
+    /** Authoritative currently active account ID computed by the pool scheduler */
+    activeAccountId?: string;
+    /** Detected system-wide or plugin-configured default proxy URL */
+    systemProxy?: string;
+    accounts: ManagedAccount[];
+}
+export declare function defaultPoolData(): AccountPoolData;

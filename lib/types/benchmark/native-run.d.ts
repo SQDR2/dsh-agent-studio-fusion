@@ -48,7 +48,7 @@ export declare function runNativeBenchmark(ctx: Context, options: NativeBenchmar
     schemaVersion: number;
     runId: string;
     variant: "lead_only" | "worker_only" | "worker_selfreview" | "naive" | "fusion";
-    dataKind: "real" | "synthetic";
+    dataKind: "synthetic" | "real";
     startedAt: string;
     endedAt: string;
     wallSeconds: number;

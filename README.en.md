@@ -79,11 +79,21 @@ After contaminated attempts were excluded, four tasks were clean in every condit
   - it returns to read-only afterwards.
 - **Quota or provider errors:** handled per role. Switch a model or schedule a continuation; progress is kept.
 
-## Using agy as the Sidekick (dsh-agy-worker)
+## Using agy as the Sidekick (built in)
 
-[`dsh-agy-worker`](https://github.com/SQDR2/dsh-agy-worker), a fork of `dsh-agy-link`, brings Google Antigravity's
-models into DSH, so one can be the Sidekick. This route is not like a plain provider: **three conditions must hold at
-the same time**, and each one fails silently on its own.
+Google Antigravity (the `agy` CLI) is **built into this plugin** since 0.4.0, ported from
+[`dsh-agy-worker`](https://github.com/SQDR2/dsh-agy-worker) (a fork of `dsh-agy-link`) under its MIT license — see
+[`docs/ATTRIBUTION-AGY.md`](docs/ATTRIBUTION-AGY.md). It brings the `antigravity` model route, the `/agy` command
+family, `agy_ask` / `agy_tool`, the `/plugins/agy-worker/*` surface, the account pool with quota tracking, and the
+Antigravity console inside the Fusion panel. No second package is installed, and Fusion stays the only sidebar entry.
+
+> **Migrating from `dsh-agy-worker`:** disable or remove the old package **before** enabling this one. Both use the same
+> route prefix, the same `antigravity` provider, the same `/agy` command and the same tool-card keys, so running both
+> fails at load (`duplicate exact route`, `DUPLICATE_ADAPTER`, `already registered`). Steps, the config move and the one
+> manual account-pool copy: [`docs/MIGRATION-AGY.md`](docs/MIGRATION-AGY.md).
+
+This route is not like a plain provider: **three conditions must hold at the same time**, and each one fails silently
+on its own.
 
 | Condition | Why | Without it |
 |---|---|---|
@@ -100,16 +110,28 @@ step as `agy_tool`, the ceiling never carried that name, the whole turn degraded
 Recommended configuration:
 
 ```yaml
-- id: dsh-agy-worker
+- id: dsh-fusion
   config:
-    mcpBridge: true
-    permissionMode: skip
-    mcpConfigScope: global
-    mcpToolAllowlist: "fusion_submit_result,fusion_read_state,fusion_read_evidence,bash,read,write,edit,glob,grep,job_output,job_kill"
+    agy:
+      mcpBridge: true
+      permissionMode: skip
+      mcpConfigScope: global
+      mcpToolAllowlist: "fusion_submit_result,fusion_read_state,fusion_read_evidence,bash,read,write,edit,glob,grep,job_output,job_kill"
 ```
 
-> On Windows use `pwsh` instead of `bash`, and follow any change you made to `workerTools`. For the full configuration
-> surface, verification steps and troubleshooting, see
+Every other upstream key (`enabled`, `agyBin`, `workspaceRoot`, `defaultModel`, `hiddenModels`, `quotaPollIntervalMs`,
+`autoWarmup`, …) works verbatim inside that `agy` block, and `DSH_AGY_*` environment variables still win over it.
+`enabled: false` is an install-time opt-out: it removes the `antigravity` provider route and every background capability
+(quota polling, warmup, MCP bridge, media sweep) while leaving `/agy` and the management routes mounted for inspection —
+re-enabling means changing the block and restarting DSH, not a live switch. The console (accounts, quota, model
+visibility, permission mode, warmup) lives at the bottom of the **Fusion** panel in the left sidebar;
+`/agy status | pool | models | doctor` answers the same questions from the composer.
+
+> On Windows use `pwsh` instead of `bash`, and follow any change you made to `workerTools`. Work state stays where the
+> standalone plugin kept it (`$DSH_HOME/agy-worker/`); the account pool is this plugin's
+> `$DSH_HOME/agy-accounts/pool.json`, which differs from upstream's `DSH_STATE_DIR` root only when that variable is set
+> — [`docs/MIGRATION-AGY.md`](docs/MIGRATION-AGY.md) has the one-time copy. For the full configuration
+> surface, verification steps and troubleshooting of the bridge itself, see
 > [dsh-agy-worker's MCP bridge guide](https://github.com/SQDR2/dsh-agy-worker/blob/main/docs/MCP-BRIDGE-SETUP.md).
 
 ### ACP routes (the built-in `deepseek-harness-acp` port)
@@ -195,7 +217,7 @@ While the Lead waits for the Sidekick, often for several minutes, the model's pr
 - **DSH version:** **0.2.1-rc.5 and later 0.2.1 releases** (`>=0.2.1-rc.5 <0.3.0-0`), desktop app or Web. The 0.2.0
   series is no longer supported. Other versions are not guaranteed; new releases will be adapted separately.
 - **Node version:** **Node 24 or newer** (`engines.node` is `>=24.0.0`).
-- **Models:** DSH's built-in providers, plus the subscription routes of [dsh-oauth-login](https://github.com/aa2246740/dsh-oauth-login) and dsh-antigravity-oauth, and the Antigravity route of [dsh-agy-worker](https://github.com/SQDR2/dsh-agy-worker). Other third-party model plugins are untested.
+- **Models:** DSH's built-in providers, plus the subscription routes of [dsh-oauth-login](https://github.com/aa2246740/dsh-oauth-login) and dsh-antigravity-oauth, and the built-in Antigravity route (ported from [dsh-agy-worker](https://github.com/SQDR2/dsh-agy-worker)). Other third-party model plugins are untested.
 - **Operating systems:**
   - **macOS:** verified (Seatbelt sandbox).
   - **Windows:** `v0.2.1` supports native `pwsh` and has been verified on Windows Server 2022 with PowerShell 7.6.6. Make sure `pwsh` is on the PATH used to launch DSH. Windows 10/11 remain unverified. Windows ACL enforcement is partial: it can restrict ordinary file writes, but does not restrict reads or networking.
@@ -216,6 +238,7 @@ The real PowerShell ACL test denied the Lead's `Set-Content probe.txt test` comm
 
 - **Fusion's own records:** briefs, check results, usage, cache statistics and settings live in `$DSH_HOME/plugins/dsh-fusion/state.sqlite`. `DSH_HOME` defaults to `~/.dsh`.
 - **Upgrading from the old name:** the previous release was `dsh-model-fusion`, and its whole directory (`$DSH_HOME/plugins/dsh-model-fusion/`) is **migrated** to the new name on first start, so existing tasks, usage and settings survive. Across filesystems it falls back to copying the database plus its `-wal`/`-shm`/`-journal`, and removes only the files it copied.
+- **Built-in Antigravity (agy):** work state stays where the standalone plugin kept it — runtime overrides, session bindings, media cache and warmup history in `$DSH_HOME/agy-worker/`. The account pool is `$DSH_HOME/agy-accounts/pool.json` with each isolated account HOME at `$DSH_HOME/agy-accounts/<id>/`; upstream read that pool from `DSH_STATE_DIR`, so only an installation that set it needs the one-time copy in [`docs/MIGRATION-AGY.md`](docs/MIGRATION-AGY.md). Nothing is moved automatically and uninstalling this package does not delete either directory.
 - **The conversations themselves:** stored by DSH. Fusion uploads nothing else.
 - **To clear Fusion's records:** quit DSH and delete that file. Settings go with it; choose the pair again next time.
 
@@ -243,4 +266,12 @@ How to cut a release (bump the version, rebuild `lib/`, push a tag, let CI publi
 
 ## License
 
-Apache-2.0. Forked from [`aa2246740/dsh-model-fusion`](https://github.com/aa2246740/dsh-model-fusion), also under Apache-2.0.
+Apache-2.0. Forked from [`aa2246740/dsh-model-fusion`](https://github.com/aa2246740/dsh-model-fusion), also under
+Apache-2.0.
+
+Bundled third-party work keeps its own license: the ACP provider port is MIT
+([`docs/ATTRIBUTION-ACP.md`](docs/ATTRIBUTION-ACP.md)), and the built-in Antigravity (agy) capability is MIT, ported from
+[`SQDR2/dsh-agy-worker`](https://github.com/SQDR2/dsh-agy-worker), itself a fork of
+[`amlyczz/dsh-agy-link`](https://github.com/amlyczz/dsh-agy-link)
+([`docs/ATTRIBUTION-AGY.md`](docs/ATTRIBUTION-AGY.md)). That document also lists the licenses of the bundled
+`mermaid.min.js` asset.

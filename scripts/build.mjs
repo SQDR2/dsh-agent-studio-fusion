@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -35,6 +35,23 @@ const clientFooter = `
 });
 `
 
+/**
+ * The runtime assets the built plugin reads at run time.
+ *
+ * `mermaid.min.js` is the Antigravity console's mermaid bundle: it is served from
+ * `/plugins/agy-worker/mermaid.min.js` and deliberately NOT bundled into
+ * `lib/client.js` (it would multiply the client bundle for a diagram renderer
+ * most pages never load). `src/host/agy/bridge.mjs` is the standalone stdio MCP
+ * server `agy` launches, shipped unbundled beside the Host module for the same
+ * reason. Both are copied next to the artifacts after every build, whichever
+ * bundler path produced them.
+ */
+function emitRuntimeAssets() {
+  mkdirSync(resolve(root, 'lib/assets'), { recursive: true })
+  copyFileSync(resolve(root, 'assets/mermaid.min.js'), resolve(root, 'lib/assets/mermaid.min.js'))
+  copyFileSync(resolve(root, 'src/host/agy/bridge.mjs'), resolve(root, 'lib/bridge.mjs'))
+}
+
 /** The harness-owned path: one bundler config per face, resolved from the checkout. */
 async function buildWithDshx(host) {
   const adapter = resolve(host, 'tools/dshx/src/client-build.js')
@@ -46,6 +63,7 @@ async function buildWithDshx(host) {
   for (const config of externalClientBundle(id, ['src/dsh-fusion.ts'], { packageRoot: root, clientEntry: 'src/client/index.ts' })) {
     await build({ ...config, config: false, cwd: root })
   }
+  emitRuntimeAssets()
 }
 
 /**
@@ -65,6 +83,7 @@ async function buildWithEsbuild() {
   await build({ entryPoints: [resolve(root, 'src/client/index.ts')], outfile: resolve(root, 'lib/client.js'),
     bundle: true, format: 'cjs', platform: 'browser', target: 'es2022', packages: 'external', jsx: 'automatic',
     sourcemap: true, logLevel: 'warning', banner: { js: clientBanner }, footer: { js: clientFooter } })
+  emitRuntimeAssets()
 }
 
 const host = process.env.DSHX_HARNESS

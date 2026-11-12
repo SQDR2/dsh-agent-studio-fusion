@@ -22,7 +22,7 @@ Services Fusion looks up at runtime (`ctx.get`), with what happens when one is m
 | `tokenMeter` | measuring each request against the context window | Fusion requests stop with an error |
 | `compaction`, `agentPresets` | compacting a long Fusion conversation | Fusion pauses when the context is full, keeping the full record |
 | `approval` | routing Sidekick approvals through DSH's own approval policy | commands that need approval fail |
-| `locale` (client) | Chinese / English UI | the UI follows the browser language |
+| `locale` (client) | Chinese / English UI, including the Antigravity console's dictionaries | the UI follows the browser language |
 
 Packages imported: `cordis`, `schemastery`, `dsh-agent`, `dsh-llm`, `dsh-session`, `dsh-session-query`,
 `dsh-subagent`, `dsh-tools`, `dsh-jobs`, `dsh-commands`, `dsh-host-webserver`, `dsh-api-session-controller`,
@@ -32,6 +32,34 @@ client packages `dsh-client-ui-*` and `dsh-client-store`. Only package entry poi
 
 Fusion writes only public session events (messages, tool calls and results, and `sandbox/mode` for the Lead's read-only
 sandbox) and stores its own records in its plugin directory.
+
+## The built-in Antigravity (agy) side
+
+`Config.agy` installs the ported `dsh-agy-worker` capability inside this plugin (see
+[`docs/ATTRIBUTION-AGY.md`](ATTRIBUTION-AGY.md)). It uses the same public services the rest of Fusion
+does — `llm` (`registerAdapter`), `commands` (`register`), `webServer` (`register`), `tools`
+(`get`/`register`), `agents`, `sessions`, `attachments`, `goals` — reached the same way:
+
+- `llm`, `commands`, `tools` and `webServer` are read through `ctx` / `ctx.inject`, so a headless
+  composition without a web server installs no routes and still loads.
+- The adapter speaks `GenerateOptions.messages`, which on this devkit is `RequestMessage[]` (a durable
+  `Message` plus the identity-free user input a hand-built one-shot request may carry). The goal/plan
+  helpers read `role` and `content` only, so they take `RequestMessage` and the protocol is unchanged.
+- `ctx.emit('llm/adapters-updated')` is wrapped in `try/catch` because the event is payload-free and a
+  Host without it should leave the model picker on its snapshot instead of failing the turn.
+- Runtime packages stay external in the build (`packages: 'external'`), so `qrcode` (QR login) and
+  `undici` (proxy-aware fetch for Google endpoints) are declared as **dependencies**, not bundled.
+- Node 24 is required, as for the rest of the package; `agy` itself must be installed separately
+  (`https://antigravity.google/docs/cli/install`).
+
+`enabled` is resolved once, when this plugin installs the capability: `false` mounts no `antigravity`
+provider and no background capability, while `/agy` and the `/plugins/agy-worker/*` management routes
+stay mounted so a dormant capability can still be inspected. Re-enabling is a Host restart with a
+changed block; it is not a runtime switch.
+
+Running the standalone `@sqdr2/dsh-agy-worker` alongside this plugin is not supported: the duplicate
+`/plugins/agy-worker/*` routes, `antigravity` provider, `/agy` command and `agy_tool`/`run_code` tool
+views are all refused at load. See [`docs/MIGRATION-AGY.md`](MIGRATION-AGY.md).
 
 ## Historical: changes from 0.2.0-rc.2 to 0.2.1-rc.2
 
