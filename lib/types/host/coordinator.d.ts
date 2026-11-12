@@ -40,6 +40,19 @@ export interface CoordinatorOptions {
     commandMaxSeconds?: number;
     /** Test clock only; production retains the recovered fixed schedule. */
     keepaliveClock?: KeepaliveClock;
+    /**
+     * The ACP route names this deployment configured. A Worker dispatched on one
+     * runs as an agent process whose only Host tools arrive through the ACP bridge;
+     * everything else is a model route. Read per dispatch, never cached by callers.
+     */
+    acpRoutes?(): ReadonlySet<string>;
+    /**
+     * Whether an ACP route refuses every Host tool to a text order. `AcpToolBridge`
+     * answers `undefined` from its grant decision for `mode: 'text'`, so with the
+     * bridge installed a text order there cannot even reach `fusion_submit_result`,
+     * let alone a file tool. The plugin wires this to its own install state.
+     */
+    grantsNoToolsInText?: boolean;
 }
 /** At least a sentence that is not a stock stub. */
 export declare function substantiveReview(reason: string): boolean;
@@ -186,6 +199,8 @@ export declare class FusionCoordinator {
     /** Only at idle selection or native running reservation, before prompt assembly. */
     selectBeforeAssembly(agent: Agent, resolved: ResolvedProfile): void;
     clear(agent: Agent): Promise<void>;
+    /** Whether this task's Worker is dispatched over an ACP route (an agent process, not a model route). */
+    acpRunsWorker(binding: SessionBinding): boolean;
     wait(agent: Agent, exec: ToolRunContext): Promise<string>;
     delegate(agent: Agent, args: DelegateInput, exec: ToolRunContext, mode?: 'explore' | 'implement' | 'text'): Promise<string>;
     rework(agent: Agent, feedback: string, exec: ToolRunContext, block?: boolean, checks?: readonly CheckDefinition[], addAllowedPaths?: readonly string[]): Promise<string>;

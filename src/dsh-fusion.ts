@@ -166,6 +166,10 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
     creating = (async () => {
       const profile = frozen ?? await primaryProfile()
       runtime = new FusionCoordinator(ctx, store, { profile, workerTools: config.workerTools ?? defaultWorkerTools,
+        // A Worker dispatched on a configured ACP route runs as an agent process
+        // served by the bridge below; every other route is a model provider.
+        acpRoutes: () => new Set(agentsOf(config).keys()),
+        grantsNoToolsInText: true,
         resumeAuthorization: binding => needsBudget(binding.profile) ? budget.check(effectiveRoutes(binding)).authorizationId : 'native-account',
         authorizeRequest: (_agent, binding) => {
           if (!needsBudget(binding.profile)) return

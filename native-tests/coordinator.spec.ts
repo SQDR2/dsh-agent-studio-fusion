@@ -1213,7 +1213,7 @@ describe('text delegation on a route without Host tools', () => {
   const reworkText = () => toolCallResponse('rework-text', 'fusion_rework', { feedback: '请再确认一次模型身份。' })
 
   it('accepts one strictly-bound text report without spending a repair generation', async () => {
-    const { parent, coordinator, adapter, taskId } = await setup([
+    const { parent, coordinator, adapter, store, taskId } = await setup([
       delegateText(), review('accept'), textResponse('The Sidekick reported its model.'),
     ], [textReport()], options)
     parent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Which model is the Sidekick running?' }] }))
@@ -1225,6 +1225,31 @@ describe('text delegation on a route without Host tools', () => {
       .toEqual(['fusion_read_evidence', 'fusion_read_state', 'fusion_submit_result'])
     expect(JSON.stringify(toolResults(parent))).toContain('review-ready')
     expect(coordinator.state(taskId), JSON.stringify(toolResults(parent))).toMatchObject({ phase: 'COMPLETED', verification: 'verified' })
+    // This order was delegated with no cwd at all, so there is no workspace to
+    // audit and the runtime record carries none.
+    expect(store.readDocument(`runtime:${taskId}`)?.value).not.toHaveProperty('workspace')
+  })
+
+  /**
+   * C: a text order has no workspace by contract, yet a bridge route keeps its own
+   * file tools. The order's evidence base is empty on purpose, so the audit is the
+   * only witness that the workspace moved — and the report must still be delivered,
+   * because it is the only account the Lead gets.
+   */
+  it('records the workspace a text order started from and reports what moved', async () => {
+    const { parent, coordinator, store, taskId, workspace } = await setup([
+      delegateText(), review('accept'), textResponse('The Sidekick reported its model.'),
+    ], [(request: GenerateOptions) => {
+      // Stands in for the route editing the workspace from inside its own loop.
+      writeFileSync(join(workspace!, 'calc.py'), 'def add(a, b):\n    return a + b\n')
+      return textResponse(reportBlock(request))
+    }], { ...options, noCwd: false })
+    parent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Which model is the Sidekick running?' }] }))
+    await parent.whenIdle()
+    expect(coordinator.state(taskId), JSON.stringify(toolResults(parent))).toMatchObject({ phase: 'COMPLETED' })
+    expect(store.readDocument(`runtime:${taskId}`)?.value).toMatchObject({
+      workspace: { mode: 'unverified', drift: { changed: ['calc.py'], truncated: false } },
+    })
   })
 
   it('keeps the Worker own words as unverified evidence and re-reports them at fusion_wait', async () => {

@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
@@ -84,6 +84,19 @@ export interface CoordinatorOptions {
   commandMaxSeconds?: number
   /** Test clock only; production retains the recovered fixed schedule. */
   keepaliveClock?: KeepaliveClock
+  /**
+   * The ACP route names this deployment configured. A Worker dispatched on one
+   * runs as an agent process whose only Host tools arrive through the ACP bridge;
+   * everything else is a model route. Read per dispatch, never cached by callers.
+   */
+  acpRoutes?(): ReadonlySet<string>
+  /**
+   * Whether an ACP route refuses every Host tool to a text order. `AcpToolBridge`
+   * answers `undefined` from its grant decision for `mode: 'text'`, so with the
+   * bridge installed a text order there cannot even reach `fusion_submit_result`,
+   * let alone a file tool. The plugin wires this to its own install state.
+   */
+  grantsNoToolsInText?: boolean
 }
 interface RuntimeRecord {
   schemaVersion: 1
@@ -137,7 +150,18 @@ interface RuntimeRecord {
     workerTextTruncated?: boolean
     /** Why a text-protocol block was refused, when the Worker sent one and it did not bind. */
     textReportRejected?: string }
+  /**
+   * C: the workspace audit of a text order, which carries no evidence base of its
+   * own. `read-only` means this Host capped the Worker route so it could not
+   * write; `unverified` means the route runs its own file tools under the
+   * deployment's permission mode and the audit is the only witness.
+   */
+  workspace?: { mode: 'read-only' | 'unverified'; start?: WorkspaceSnapshot
+    /** Filled at report time when the workspace a text order started from has moved. */
+    drift?: { changed: readonly string[]; truncated?: boolean } }
 }
+/** C: how many changed paths one text-order workspace audit may report. */
+const TEXT_ORDER_WORKSPACE_MAX = 40
 const STUB_REVIEW = /^(?:placeholder|todo|tbd|n\/?a|none|ok|okay|lgtm|done|accept(?:ed)?|looks good|fine|test)\.?$/i
 
 /** At least a sentence that is not a stock stub. */
@@ -994,7 +1018,9 @@ export class FusionCoordinator {
     if (captured !== undefined) {
       const parsed = parseTextReport(captured.text, context)
       if (parsed.kind === 'report') {
-        this.#saveRuntime({ ...this.#runtime(binding.taskId), submitted: parsed.submitted, textReport: true, workerUnreachable: undefined })
+        const runtime = this.#runtime(binding.taskId)
+        this.#saveRuntime({ ...runtime, ...this.#textOrderWorkspaceRecord(runtime), submitted: parsed.submitted,
+          textReport: true, workerUnreachable: undefined })
         this.ctx.logger.info(`[dsh-fusion] adopted the structured text report of work order ${order.id}`)
         return undefined
       }
@@ -1149,6 +1175,69 @@ export class FusionCoordinator {
    */
   #routeTransport(binding: SessionBinding, role: Role): string | undefined {
     return registeredRouteTransport(this.ctx, this.modelControl.route(binding, role).provider)
+  }
+
+  /**
+   * Whether a text order's Worker route is told to stay read-only.
+   *
+   * A text order has no workspace by contract, but a bridge route (Antigravity's
+   * agy, or an ACP agent) runs its own loop and its own file tools, so the
+   * contract only holds if the route itself is capped. The ACP bridge never
+   * issues a tool grant for `mode: 'text'` (`AcpToolBridge.#decision` answers
+   * `undefined`), so a text order dispatched over an ACP route is read-only for
+   * real. The built-in Antigravity side currently launches agy with the
+   * configured permission mode, so a text order there is reported `unverified`
+   * until that changes.
+   */
+  #capsTextOrder(binding: SessionBinding): boolean {
+    return this.options.grantsNoToolsInText === true && this.acpRunsWorker(binding)
+  }
+
+  /** Whether this task's Worker is dispatched over an ACP route (an agent process, not a model route). */
+  acpRunsWorker(binding: SessionBinding): boolean {
+    return this.options.acpRoutes?.().has(this.modelControl.route(binding, 'worker').provider) === true
+  }
+
+  /**
+   * C: the workspace a text order starts from, or `undefined` when the order has
+   * no cwd to watch. The order itself carries an empty evidence base on purpose
+   * (it has no allowed paths), so the audit keeps its own snapshot.
+   */
+  #workspaceAtOrderStart(agent: Agent): WorkspaceSnapshot | undefined {
+    const cwd = agent.session.header.cwd
+    if (!cwd) return undefined
+    try { return snapshotWorkspace(cwd) } catch { return undefined }
+  }
+
+  /**
+   * C: the runtime fields a report must carry when it closes a text order whose
+   * workspace moved. Never a gate on the report itself — the report is the only
+   * account the Lead gets, so it is delivered and the drift rides along.
+   */
+  #textOrderWorkspaceRecord(runtime: RuntimeRecord): Pick<RuntimeRecord, 'workspace'> {
+    const audit = runtime.workspace
+    if (audit === undefined) return {}
+    const drift = this.#textOrderWorkspaceDrift(runtime)
+    if (drift === undefined) return {}
+    this.ctx.logger.warn(`[dsh-fusion] text order ${this.state(runtime.taskId).currentWorkOrder?.id} moved its workspace (${audit.mode}): ${drift.changed.join(', ')}`)
+    return { workspace: { ...audit, drift } }
+  }
+
+  /**
+   * C: compare the workspace a text order started from with the one it ended on.
+   * Returns the paths that changed, or `undefined` when the order kept its
+   * promise or there is nothing to compare. Bounded so a route that rebuilt a
+   * whole tree cannot bloat the record it is reported in.
+   */
+  #textOrderWorkspaceDrift(runtime: RuntimeRecord): { changed: string[]; truncated: boolean } | undefined {
+    const start = runtime.workspace?.start
+    if (start === undefined || this.state(runtime.taskId).currentWorkOrder?.mode !== 'text') return undefined
+    if (!existsSync(start.root)) return undefined
+    let now: WorkspaceSnapshot
+    try { now = snapshotWorkspace(start.root) } catch { return undefined }
+    const changed = changedPaths(start, now)
+    if (changed.length === 0) return undefined
+    return { changed: changed.slice(0, TEXT_ORDER_WORKSPACE_MAX), truncated: changed.length > TEXT_ORDER_WORKSPACE_MAX }
   }
 
   /**
@@ -1778,7 +1867,14 @@ export class FusionCoordinator {
       this.#release(binding.taskId)
     }
     this.append(binding.taskId, 'intent/chosen', { intent: 'DELEGATE' })
-    this.#saveRuntime({ schemaVersion: 1, taskId: binding.taskId, root: base.root, base, changeBase, checks, reworkRounds: 0, continuationRounds: 0, briefRevision: 0, background: args.block === false })
+    // C: a text order claims "no workspace", but a bridge route still edits one
+    // from inside its own loop, so record the workspace as the order began and
+    // compare at report time. `capsTextOrder` settles whether this Host told the
+    // route not to write at all; when it did, the check is a second, independent
+    // witness and a violation means the route ignored `--mode plan`.
+    const auditWorkspace = mode === 'text' ? this.#workspaceAtOrderStart(agent) : undefined
+    this.#saveRuntime({ schemaVersion: 1, taskId: binding.taskId, root: base.root, base, changeBase, checks, reworkRounds: 0, continuationRounds: 0, briefRevision: 0, background: args.block === false,
+      ...(auditWorkspace === undefined ? {} : { workspace: { mode: this.#capsTextOrder(binding) ? 'read-only' as const : 'unverified' as const, start: auditWorkspace } }) })
     const shownOrder = binding.profile.interactionMode === 'model-like' ? { ...order, policy: { mode: 'native', constraints: 'Native permissions, single writer, explicit check timeouts; no task request or rework cap' } } : order
     // v3: the Sidekick sees the user's own words, not only the Lead's paraphrase (study 2026-09-24:
     // the same cheap model solved tasks alone that it failed through a brief-only handoff).
@@ -2401,7 +2497,7 @@ export class FusionCoordinator {
           }
           const explorationSubmitted = order.mode === 'explore'
             ? captureExploration(this.store, order, runtime.base, current, submitted, args.sources ?? [], snapshotFailure) : undefined
-          this.#saveRuntime({ ...runtime, submitted, textReport: undefined, explorationSubmitted })
+          this.#saveRuntime({ ...runtime, ...this.#textOrderWorkspaceRecord(runtime), submitted, textReport: undefined, explorationSubmitted })
           if (role === 'lead') { this.#release(binding.taskId); return this.#validate(agent, binding, exec) }
           exec.concludeTurn()
           return 'Report persisted. The Lead will review after this Worker becomes quiescent.'
