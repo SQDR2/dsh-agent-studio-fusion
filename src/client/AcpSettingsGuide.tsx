@@ -4,8 +4,40 @@ import {
   parseAgentImport,
   importOpsOf,
   useAcpConfigForm,
+  existingRoutesOf,
   type AgentImport,
 } from './acp-import.js'
+
+export interface ConfiguredRouteItem {
+  route: string
+  displayName: string
+  command: string
+  args: string[]
+}
+
+/**
+ * Pure helper deriving sorted configured ACP routes from the current ConfigForm snapshot.
+ * Merges resolved configuration with user overrides and falls back displayName to route id.
+ */
+export function configuredRoutesOf(
+  snapshot?: { value?: unknown; user?: unknown } | null
+): ConfiguredRouteItem[] {
+  if (!snapshot) return []
+  const map = existingRoutesOf(snapshot)
+  const items: ConfiguredRouteItem[] = []
+  for (const [route, info] of map.entries()) {
+    const merged = { ...(info.resolved ?? {}), ...(info.raw ?? {}) }
+    const rawDisplay = typeof merged.displayName === 'string' ? merged.displayName.trim() : ''
+    const displayName = rawDisplay.length > 0 ? rawDisplay : route
+    const command = typeof merged.command === 'string' ? merged.command.trim() : ''
+    const args =
+      Array.isArray(merged.args) && merged.args.every(arg => typeof arg === 'string')
+        ? (merged.args as string[])
+        : []
+    items.push({ route, displayName, command, args })
+  }
+  return items.sort((a, b) => a.route.localeCompare(b.route))
+}
 
 /**
  * The ACP section of the Fusion page.
@@ -50,6 +82,8 @@ const styles = `
 .acp-tag-neutral{background:var(--dsw-alias-interactive-bg-hover,#eee);color:var(--dsw-alias-label-secondary)}
 .acp-tag-success{background:rgba(46,160,67,0.15);color:#2ea043;border:1px solid rgba(46,160,67,0.3)}
 .acp-tag-warning{background:rgba(210,153,34,0.15);color:#d29922;border:1px solid rgba(210,153,34,0.3)}
+.acp-tag-info{background:rgba(22,119,255,0.12);color:var(--dsw-alias-brand-primary,#1677ff);border:1px solid rgba(22,119,255,0.25)}
+.acp-empty-hint{font-size:13px;line-height:21px;color:var(--dsw-alias-label-secondary);font-style:italic}
 .acp-hint-skipped{font-size:12px;color:var(--dsw-alias-label-secondary);padding-left:4px}
 .acp-import-footer{display:flex;align-items:center;justify-content:flex-end;gap:10px;padding-top:4px}
 .acp-restart-notice{font-size:13px;font-weight:500;margin-top:2px}
@@ -58,9 +92,9 @@ const styles = `
 
 const PLACEHOLDER = `{
   "agent_servers": {
-    "Claude": {
-      "command": "npx",
-      "args": ["-y", "@agentclientprotocol/claude-agent-acp"],
+    "devin": {
+      "command": "/home/zlw/.local/share/devin/cli/_versions/current/bin/devin",
+      "args": ["acp"],
       "env": {}
     }
   }
@@ -100,6 +134,7 @@ export function AcpSettingsGuide() {
   const [busy, setBusy] = useState(false)
   const [feedback, setFeedback] = useState<{ tone: 'success' | 'error' | 'warning'; message: string } | null>(null)
 
+  const configuredRoutes = configuredRoutesOf({ value, user })
   const entries = parsed?.ok === true ? parsed.entries : []
   const selected = entries.filter(entry => !excluded.has(entry.route))
 
@@ -172,6 +207,56 @@ export function AcpSettingsGuide() {
         )}
       </p>
 
+      {/* Configured routes card */}
+      <div className="acp-note" role="region" aria-label={tr(lang, '已配置的 ACP 线路', 'Configured ACP routes')}>
+        <h4>{tr(lang, '已配置的 ACP 线路', 'Configured ACP routes')}</h4>
+        <p>
+          {tr(
+            lang,
+            '以下展示当前在配置（dsh-fusion → acp.agents）中已保存的线路。此处仅为配置清单，不探测后台进程，标明“已配置”不代表当前 agent 进程正在运行。修改或导入后需要重启 Host 才会生效。',
+            'Lists routes currently saved in configuration (dsh-fusion → acp.agents). This shows configured entries only and does not probe background processes; "configured" does not mean the agent process is actively running. Restart the Host after changes or imports for new routes to take effect.'
+          )}
+        </p>
+
+        {status === 'loading' && (
+          <p role="status" className="acp-status-hint">
+            {tr(lang, '正在读取已配置线路…', 'Loading configured routes…')}
+          </p>
+        )}
+
+        {status !== 'loading' && configuredRoutes.length === 0 && (
+          <p className="acp-empty-hint">
+            {tr(lang, '当前未配置任何 ACP 线路。', 'No ACP routes are currently configured.')}
+          </p>
+        )}
+
+        {configuredRoutes.length > 0 && (
+          <div className="acp-entries-list" role="list" aria-label={tr(lang, '已配置线路清单', 'Configured routes list')}>
+            {configuredRoutes.map(item => {
+              const cmdLine = [item.command, ...item.args].filter(Boolean).join(' ')
+              return (
+                <div key={item.route} className="acp-entry-row" role="listitem">
+                  <div className="acp-entry-details">
+                    <div className="acp-entry-header">
+                      <strong className="acp-entry-name">{item.displayName}</strong>
+                      <span className="acp-tag acp-tag-neutral">{item.route}</span>
+                      <span className="acp-tag acp-tag-info">
+                        {tr(lang, '已配置', 'Configured')}
+                      </span>
+                    </div>
+                    {cmdLine ? (
+                      <code className="acp-entry-cmd" title={cmdLine}>{cmdLine}</code>
+                    ) : (
+                      <span className="acp-field-hint">{tr(lang, '（未指定命令）', '(No command specified)')}</span>
+                    )}
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        )}
+      </div>
+
       {/* Import card */}
       <div className="acp-note" role="region" aria-label={tr(lang, '导入 ACP 线路配置', 'Import ACP route configuration')}>
         <h4>{tr(lang, '导入 ACP 线路配置', 'Import ACP route configuration')}</h4>
@@ -228,6 +313,19 @@ export function AcpSettingsGuide() {
             }}
           >
             {tr(lang, '解析配置', 'Parse configuration')}
+          </button>
+          <button
+            type="button"
+            className="acp-btn-ghost"
+            disabled={busy}
+            onClick={() => {
+              setText(PLACEHOLDER)
+              setParsed(null)
+              setExcluded(new Set())
+              setFeedback(null)
+            }}
+          >
+            {tr(lang, '填入 Devin 示例', 'Insert Devin example')}
           </button>
           {entries.length > 1 && (
             <button
@@ -363,24 +461,6 @@ export function AcpSettingsGuide() {
             lang,
             '重启 Host 后，这些 ACP 线路会出现在原生模型选择和 Fusion 的组合里，可以像其他模型一样选为 Lead 或 Sidekick。它们是否列出工具、如何应答权限请求，由每个 agent 自己的实现和这里的 permission 设置决定。Fusion 只在本插件自己派发 Sidekick 任务时，才在该会话的 ACP session/new 里声明 Host 工具桥；其余 ACP 会话不带任何 MCP server。',
             'Once the Host restarts, those ACP routes appear in the native model picker and in Fusion combos, and can be chosen as Lead or Sidekick like any other model. Whether they expose tools and how they answer permission requests is decided by each agent\'s own implementation and by the permission setting you gave it. Fusion declares Host tools in an ACP session/new only while it is dispatching a Sidekick on that exact session; every other ACP session opens with no MCP server.'
-          )}
-        </p>
-      </div>
-
-      <div className="acp-note">
-        <h4>{tr(lang, '迁移提醒', 'Before you migrate')}</h4>
-        <p data-kind="warning">
-          {tr(
-            lang,
-            '如果你以前装过独立的 dsh-tauri-acp（或 deepseek-harness-acp），请先手动停用或移除它，再把同样的 provider 名写进这里的 acp.agents：同一个 provider 名被两处注册会在加载时被拒绝（DUPLICATE_ADAPTER）。本插件不会改你的 profile，也不会替你卸载任何东西。',
-            'If you previously installed the standalone dsh-tauri-acp (or deepseek-harness-acp), disable or remove it manually before assigning the same provider names here: two registrations of one provider name are refused at load (DUPLICATE_ADAPTER). This plugin never edits your profile and never uninstalls anything for you.'
-          )}
-        </p>
-        <p>
-          {tr(
-            lang,
-            '完整步骤见 docs/MIGRATION-ACP.md；ACP 部分的上游来源与许可见 docs/ATTRIBUTION-ACP.md。',
-            'Full steps are in docs/MIGRATION-ACP.md; the upstream source and license for the ACP part are in docs/ATTRIBUTION-ACP.md.'
           )}
         </p>
       </div>

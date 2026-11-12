@@ -12,7 +12,7 @@ import {
   type AgentImportEntry,
   type SettingsPathOpView,
 } from '../src/client/acp-import.js'
-import { AcpSettingsGuide } from '../src/client/AcpSettingsGuide.js'
+import { AcpSettingsGuide, configuredRoutesOf } from '../src/client/AcpSettingsGuide.js'
 import { pinLanguage } from './client-locale.js'
 
 const PATH = '/opt/homebrew/bin:/usr/bin:/bin'
@@ -391,6 +391,83 @@ describe('bindAcpConfigForm and external store', () => {
   })
 })
 
+describe('configuredRoutesOf', () => {
+  it('returns empty array when snapshot is missing or empty', () => {
+    expect(configuredRoutesOf(null)).toEqual([])
+    expect(configuredRoutesOf(undefined)).toEqual([])
+    expect(configuredRoutesOf({})).toEqual([])
+    expect(configuredRoutesOf({ value: {}, user: {} })).toEqual([])
+  })
+
+  it('extracts and sorts routes alphabetically by route id', () => {
+    const snapshot = {
+      value: {
+        acp: {
+          agents: {
+            zeta: { command: 'zeta-cmd', displayName: 'Zeta Agent' },
+            alpha: { command: 'alpha-cmd', args: ['--serve'] },
+            beta: { command: 'beta-cmd' },
+          },
+        },
+      },
+    }
+    const routes = configuredRoutesOf(snapshot)
+    expect(routes).toHaveLength(3)
+    expect(routes[0]).toEqual({
+      route: 'alpha',
+      displayName: 'alpha',
+      command: 'alpha-cmd',
+      args: ['--serve'],
+    })
+    expect(routes[1]).toEqual({
+      route: 'beta',
+      displayName: 'beta',
+      command: 'beta-cmd',
+      args: [],
+    })
+    expect(routes[2]).toEqual({
+      route: 'zeta',
+      displayName: 'Zeta Agent',
+      command: 'zeta-cmd',
+      args: [],
+    })
+  })
+
+  it('merges user overrides with resolved base values, keeping user overrides on conflict', () => {
+    const snapshot = {
+      value: {
+        acp: {
+          agents: {
+            devin: {
+              command: '/usr/local/bin/devin',
+              args: ['acp'],
+              displayName: 'Devin Base',
+            },
+          },
+        },
+      },
+      user: {
+        acp: {
+          agents: {
+            devin: {
+              displayName: 'Devin Custom',
+              args: ['acp', '--verbose'],
+            },
+          },
+        },
+      },
+    }
+    const routes = configuredRoutesOf(snapshot)
+    expect(routes).toHaveLength(1)
+    expect(routes[0]).toEqual({
+      route: 'devin',
+      displayName: 'Devin Custom',
+      command: '/usr/local/bin/devin',
+      args: ['acp', '--verbose'],
+    })
+  })
+})
+
 describe('AcpSettingsGuide component UI', () => {
   const roots: ReactTestRenderer[] = []
 
@@ -461,7 +538,8 @@ describe('AcpSettingsGuide component UI', () => {
     })
 
     // Entries should be rendered
-    const rows = root.root.findAllByProps({ className: 'acp-entry-row' })
+    const importList = root.root.findByProps({ 'aria-label': '解析得到的线路列表' })
+    const rows = importList.findAllByProps({ className: 'acp-entry-row' })
     expect(rows).toHaveLength(4)
 
     // Check replacement vs new tags
@@ -637,6 +715,147 @@ describe('AcpSettingsGuide component UI', () => {
 
     const importBtn = root.root.findByProps({ className: 'acp-btn-primary' })
     expect(importBtn.props.disabled).toBe(true)
+
+    cleanup()
+  })
+
+  it('renders textarea with Devin JSON example placeholder', async () => {
+    pinLanguage('zh-CN')
+    const form = createMockForm()
+    const cleanup = bindAcpConfigForm(form)
+
+    let root!: ReactTestRenderer
+    await act(async () => {
+      root = create(React.createElement(AcpSettingsGuide))
+    })
+    roots.push(root)
+
+    const textarea = root.root.findByProps({ className: 'acp-import-textarea' })
+    expect(textarea.props.placeholder).toContain('"devin"')
+    expect(textarea.props.placeholder).toContain('/home/zlw/.local/share/devin/cli/_versions/current/bin/devin')
+    expect(textarea.props.placeholder).toContain('"acp"')
+
+    cleanup()
+  })
+
+  it('fills Devin example on button click and allows parsing it', async () => {
+    pinLanguage('zh-CN')
+    const form = createMockForm()
+    const cleanup = bindAcpConfigForm(form)
+
+    let root!: ReactTestRenderer
+    await act(async () => {
+      root = create(React.createElement(AcpSettingsGuide))
+    })
+    roots.push(root)
+
+    const fillBtn = root.root.findByProps({ children: '填入 Devin 示例' })
+    await act(async () => {
+      fillBtn.props.onClick()
+    })
+
+    const textarea = root.root.findByProps({ className: 'acp-import-textarea' })
+    expect(textarea.props.value).toContain('"devin"')
+
+    const parseBtn = root.root.findByProps({ children: '解析配置' })
+    expect(parseBtn.props.disabled).toBe(false)
+
+    await act(async () => {
+      parseBtn.props.onClick()
+    })
+
+    const rows = root.root.findAllByProps({ className: 'acp-entry-row' })
+    expect(rows.length).toBeGreaterThanOrEqual(1)
+    const devinName = root.root.findByProps({ className: 'acp-entry-name', children: 'devin' })
+    expect(devinName).toBeDefined()
+
+    cleanup()
+  })
+
+  it('displays configured ACP routes from the form snapshot', async () => {
+    pinLanguage('zh-CN')
+    const form = createMockForm({
+      value: {
+        acp: {
+          agents: {
+            devin: {
+              displayName: 'Devin Agent',
+              command: '/home/zlw/.local/share/devin/cli/_versions/current/bin/devin',
+              args: ['acp'],
+            },
+            claude: {
+              command: 'claude-acp',
+              args: [],
+            },
+          },
+        },
+      },
+    })
+    const cleanup = bindAcpConfigForm(form)
+
+    let root!: ReactTestRenderer
+    await act(async () => {
+      root = create(React.createElement(AcpSettingsGuide))
+    })
+    roots.push(root)
+
+    const configuredSection = root.root.findByProps({
+      role: 'region',
+      'aria-label': '已配置的 ACP 线路',
+    })
+    expect(configuredSection).toBeDefined()
+
+    const list = root.root.findByProps({ 'aria-label': '已配置线路清单' })
+    expect(list).toBeDefined()
+
+    const names = root.root.findAllByProps({ className: 'acp-entry-name' })
+    const textNames = names.map(n => n.children.join(''))
+    expect(textNames).toContain('claude')
+    expect(textNames).toContain('Devin Agent')
+
+    const configuredTags = root.root.findAllByProps({ className: 'acp-tag acp-tag-info' })
+    expect(configuredTags).toHaveLength(2)
+    expect(configuredTags[0].children).toContain('已配置')
+
+    // Disclaims live process probe
+    const disclaimer = configuredSection.findAllByType('p').find(p => p.children.join('').includes('不代表当前 agent 进程正在运行'))
+    expect(disclaimer).toBeDefined()
+
+    cleanup()
+  })
+
+  it('displays empty hint when no ACP routes are configured', async () => {
+    pinLanguage('zh-CN')
+    const form = createMockForm({ value: { acp: { agents: {} } } })
+    const cleanup = bindAcpConfigForm(form)
+
+    let root!: ReactTestRenderer
+    await act(async () => {
+      root = create(React.createElement(AcpSettingsGuide))
+    })
+    roots.push(root)
+
+    const emptyHint = root.root.findByProps({ className: 'acp-empty-hint' })
+    expect(emptyHint.children.join('')).toContain('当前未配置任何 ACP 线路')
+
+    cleanup()
+  })
+
+  it('does not render migration reminder card in the DOM', async () => {
+    pinLanguage('zh-CN')
+    const form = createMockForm()
+    const cleanup = bindAcpConfigForm(form)
+
+    let root!: ReactTestRenderer
+    await act(async () => {
+      root = create(React.createElement(AcpSettingsGuide))
+    })
+    roots.push(root)
+
+    const h4Elements = root.root.findAllByType('h4')
+    const titles = h4Elements.map(h => h.children.join(''))
+    expect(titles).not.toContain('迁移提醒')
+    expect(titles).not.toContain('Before you migrate')
 
     cleanup()
   })
