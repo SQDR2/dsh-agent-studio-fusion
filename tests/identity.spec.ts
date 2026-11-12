@@ -17,27 +17,22 @@ describe('installed plugin identity', () => {
   it('publishes the renamed package without touching the manifest contract', () => {
     const manifest = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'))
     expect(manifest.name).toBe(PACKAGE_NAME)
-    // The registry identity and the runtime identity are separate on purpose:
-    // moving into a scope must not move the state directory or the patch row.
-    expect(PLUGIN_NAME).toBe('dsh-fusion')
-    expect(manifest.name).not.toBe(PLUGIN_NAME)
+    expect(PLUGIN_NAME).toBe('dsh-agent-studio-fusion')
     // Entry points move with the package name; both halves must resolve.
-    expect(manifest.exports['.'].import).toBe('./lib/dsh-fusion.js')
-    expect(manifest.exports['.'].types).toBe('./lib/types/dsh-fusion.d.ts')
-    expect(manifest.repository.url).toContain('dsh-fusion')
+    expect(manifest.exports['.'].import).toBe('./lib/dsh-agent-studio-fusion.js')
+    expect(manifest.exports['.'].types).toBe('./lib/types/dsh-agent-studio-fusion.d.ts')
+    expect(manifest.repository.url).toContain('dsh-agent-studio-fusion')
   })
 
   it('registers the bundle patch and dev-server entry under the same id', () => {
     const patch = readFileSync(join(root, 'cordis.patch.yml'), 'utf8')
-    // The row id is the runtime identity; `name` is the specifier pnpm installed,
-    // which is the package name and therefore scoped.
-    expect(patch).toContain('- id: dsh-fusion')
+    expect(patch).toContain('- id: dsh-agent-studio-fusion')
     expect(patch).toContain(`name: '${PACKAGE_NAME}'`)
     expect(patch).not.toMatch(/^\s*name: dsh-model-fusion$/m)
     const dshx = readFileSync(join(root, 'dshx.yml'), 'utf8')
-    expect(dshx).toContain('id: dsh-fusion')
-    expect(dshx).toContain('entry: src/dsh-fusion.ts')
-    expect(dshx).toContain('lib/dsh-fusion.js')
+    expect(dshx).toContain('id: dsh-agent-studio-fusion')
+    expect(dshx).toContain('entry: src/dsh-agent-studio-fusion.ts')
+    expect(dshx).toContain('lib/dsh-agent-studio-fusion.js')
   })
 
   it('keeps the old package name only where an upgrade has to read it', () => {
@@ -84,16 +79,18 @@ describe('pre-rename compatibility', () => {
   })
 
   it('reads both producer kinds so an existing session keeps its context', () => {
-    expect(FUSION_SOURCE_KIND).toBe('plugin:dsh-fusion')
+    expect(FUSION_SOURCE_KIND).toBe('plugin:dsh-agent-studio-fusion')
+    expect(isFusionSourceKind('plugin:dsh-agent-studio-fusion')).toBe(true)
+    expect(isFusionSourceKind('plugin:dsh-agent-studio')).toBe(true)
     expect(isFusionSourceKind('plugin:dsh-fusion')).toBe(true)
     expect(isFusionSourceKind('plugin:dsh-model-fusion')).toBe(true)
     expect(isFusionSourceKind('user')).toBe(false)
     expect(isFusionSourceKind(undefined)).toBe(false)
-    expect(FUSION_SOURCE_KINDS).toHaveLength(2)
+    expect(FUSION_SOURCE_KINDS).toHaveLength(4)
   })
 
   it('keeps the previous HTTP path answerable for a tab holding the old bundle', () => {
-    const host = readFileSync(join(root, 'src/dsh-fusion.ts'), 'utf8')
+    const host = readFileSync(join(root, 'src/dsh-agent-studio-fusion.ts'), 'utf8')
     expect(host).toContain('FUSION_API_PATH, handler: apiHandler')
     expect(host).toContain('LEGACY_FUSION_API_PATH, handler: apiHandler')
   })

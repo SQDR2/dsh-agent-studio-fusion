@@ -25,13 +25,14 @@ export const LEGACY_FUSION_API_PATH = '/api/model-fusion'
  * the log marker. Keeping them apart is what lets the package move into a scope
  * without moving anyone's data.
  */
-export const PACKAGE_NAME = '@sqdr2/dsh-fusion'
+export const PACKAGE_NAME = '@sqdr2/dsh-agent-studio-fusion'
 
 /** The plugin id this project registers under, and the name of its state directory. */
-export const PLUGIN_NAME = 'dsh-fusion'
+export const PLUGIN_NAME = 'dsh-agent-studio-fusion'
 
-/** The plugin id and package name this project used before the rename. */
-export const LEGACY_PLUGIN_NAME = 'dsh-model-fusion'
+/** The plugin ids this project used before the renames. */
+export const LEGACY_PLUGIN_NAME = 'dsh-fusion'
+export const LEGACY_PLUGIN_NAMES = ['dsh-fusion', 'dsh-model-fusion', 'dsh-agent-studio'] as const
 
 /** Registered provider route for the Fusion model entries. */
 export const FUSION_PROVIDER = 'dsh-fusion'
@@ -65,9 +66,9 @@ export const isFusionModel = (model: string | undefined): boolean =>
  */
 export const LEGACY_FUSION_PROVIDER = 'dsh-model-fusion'
 
-/** Whether a provider route belongs to this plugin, under either name. */
+/** Whether a provider route belongs to this plugin, under any historical name. */
 export const isFusionProvider = (provider: string | undefined): boolean =>
-  provider === FUSION_PROVIDER || provider === LEGACY_FUSION_PROVIDER
+  provider === FUSION_PROVIDER || provider === LEGACY_FUSION_PROVIDER || provider === 'dsh-agent-studio-fusion' || provider === 'dsh-agent-studio'
 
 /** Whether a route names a Fusion combo, under either provider spelling. */
 export const isFusionSelection = (route: { provider?: string; model?: string } | undefined): boolean =>
@@ -84,7 +85,7 @@ export const isFusionSelection = (route: { provider?: string; model?: string } |
  * that switched to Fusion before the rename carries the old one in its durable
  * log; any combo id matches, since combos are not physical models.
  */
-const FUSION_SELECTION_LABEL_PATTERN = /(?:(?:dsh-fusion|dsh-model-fusion)\/|→ )(?:auto|pair-[a-z0-9]{6,12})$/
+const FUSION_SELECTION_LABEL_PATTERN = /(?:(?:dsh-agent-studio-fusion|dsh-agent-studio|dsh-fusion|dsh-model-fusion)\/|→ )(?:auto|pair-[a-z0-9]{6,12})$/
 
 /** Whether a switch-notice summary describes a Fusion combo as either side. */
 export const isFusionSelectionLabel = (summary: string | undefined): boolean =>

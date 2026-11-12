@@ -5,7 +5,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { execFileSync } from 'node:child_process'
 
 /**
- * Build the two artifacts the Harness loads: the Host module (`lib/dsh-fusion.js`,
+ * Build the two artifacts the Harness loads: the Host module (`lib/dsh-agent-studio-fusion.js`,
  * plain ESM with every package external) and the Web client bundle
  * (`lib/client.js`, a CommonJS body wrapped in the Harness module-loader
  * envelope).
@@ -60,7 +60,7 @@ async function buildWithDshx(host) {
   const { externalClientBundle } = await import(pathToFileURL(adapter).href)
   emitTypes()
   mkdirSync(resolve(root, 'lib'), { recursive: true })
-  for (const config of externalClientBundle(id, ['src/dsh-fusion.ts'], { packageRoot: root, clientEntry: 'src/client/index.ts' })) {
+  for (const config of externalClientBundle(id, ['src/dsh-agent-studio-fusion.ts'], { packageRoot: root, clientEntry: 'src/client/index.ts' })) {
     await build({ ...config, config: false, cwd: root })
   }
   emitRuntimeAssets()
@@ -78,7 +78,7 @@ async function buildWithEsbuild() {
   mkdirSync(resolve(root, 'lib'), { recursive: true })
   // The Host module ships without a sourcemap, like the client bundle the harness
   // serves with one: keep the artifact set identical to the dshx build.
-  await build({ entryPoints: [resolve(root, 'src/dsh-fusion.ts')], outfile: resolve(root, 'lib/dsh-fusion.js'),
+  await build({ entryPoints: [resolve(root, 'src/dsh-agent-studio-fusion.ts')], outfile: resolve(root, 'lib/dsh-agent-studio-fusion.js'),
     bundle: true, format: 'esm', platform: 'node', target: 'node24', packages: 'external', sourcemap: false, logLevel: 'warning' })
   await build({ entryPoints: [resolve(root, 'src/client/index.ts')], outfile: resolve(root, 'lib/client.js'),
     bundle: true, format: 'cjs', platform: 'browser', target: 'es2022', packages: 'external', jsx: 'automatic',

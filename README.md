@@ -2,12 +2,11 @@
 
 [English](README.en.md) · [安装](INSTALL.zh.md) · [Install (English)](INSTALL.md) · [更新日志](CHANGELOG.md)
 
-> **本仓库是 [`aa2246740/dsh-model-fusion`](https://github.com/aa2246740/dsh-model-fusion) 的 fork，包名 `@sqdr2/dsh-fusion`。**
-> 上游的能力、算法和实测数据全部保留。这个 fork 现在把三件事装进 **一个插件**：Fusion 的 Lead/Sidekick
-> 组合、Antigravity（`agy` CLI，从 [`dsh-agy-worker`](https://github.com/SQDR2/dsh-agy-worker) 以 MIT 许可并入）
+> **本项目为独立开源插件项目，包名 `@sqdr2/dsh-agent-studio-fusion`。**
+> 核心融合了三项能力于 **一个插件**：Fusion 的 Lead/Sidekick
+> 组合（起源自 `aa2246740/dsh-model-fusion`，保留完整算法与数据）、Antigravity（`agy` CLI，从 [`dsh-agy-worker`](https://github.com/SQDR2/dsh-agy-worker) 以 MIT 许可并入）
 > 与 ACP 代理线路（从 [`deepseek-harness-acp`](https://github.com/Fleey/deepseek-harness-acp) 以 MIT 许可并入）。
-> 左侧边栏仍然只有 **Fusion** 一个入口，三个区域在同一个页面里切换；不再需要另装 `dsh-agy-worker` 或
-> `dsh-tauri-acp`。改动清单见 [本 fork 做了什么](#本-fork-做了什么)。
+> 左侧边栏统一为一个入口，三个区域在同一个页面里切换；不再需要另装多个插件。详细说明见 [相关文档与合规说明](docs/ATTRIBUTION-AGY.md)。
 
 Fusion 在 DeepSeek Harness（DSH）的模型菜单里就是一个普通模型：**你保存几个组合，菜单里就有几项**（**Fusion · 组合名称**）。每个组合背后是两个你自己选的模型：
 

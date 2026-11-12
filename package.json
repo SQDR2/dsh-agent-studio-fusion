@@ -1,5 +1,5 @@
 {
-  "name": "@sqdr2/dsh-fusion",
+  "name": "@sqdr2/dsh-agent-studio-fusion",
   "version": "0.4.0",
   "publishConfig": {
     "access": "public",
@@ -9,7 +9,7 @@
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/SQDR2/dsh-fusion.git"
+    "url": "git+https://github.com/SQDR2/dsh-agent-studio-fusion.git"
   },
   "keywords": [
     "dsh",
@@ -48,8 +48,8 @@
   ],
   "exports": {
     ".": {
-      "types": "./lib/types/dsh-fusion.d.ts",
-      "import": "./lib/dsh-fusion.js"
+      "types": "./lib/types/dsh-agent-studio-fusion.d.ts",
+      "import": "./lib/dsh-agent-studio-fusion.js"
     },
     "./client": {
       "types": "./lib/types/client/index.d.ts",

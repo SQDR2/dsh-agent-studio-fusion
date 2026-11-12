@@ -27,7 +27,7 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
   }
 }
 
-export const name = 'dsh-fusion/client'
+export const name = 'dsh-agent-studio-fusion/client'
 export const inject = ['slots']
 export const FUSION_PANEL_ID = 'fusion'
 
@@ -42,9 +42,10 @@ export function apply(ctx: Context): void {
     // same language setting; one service, two readers.
     scope.effect(() => bindAgyLocale(locale as unknown as AgyLocaleSource))
   })
-  ctx.inject(['configForms'], scope =>
-    scope.effect(() => bindAcpConfigForm((scope as unknown as { configForms: ConfigForms }).configForms.get('dsh-fusion'))),
-  )
+  ctx.inject(['configForms'], scope => {
+    const forms = (scope as unknown as { configForms: ConfigForms }).configForms
+    scope.effect(() => bindAcpConfigForm(forms.get('dsh-agent-studio-fusion') ?? forms.get('dsh-agent-studio') ?? forms.get('dsh-fusion')))
+  })
   for (const tool of fusionControlTools) ctx.slots.inject('tool.call.toolview', () => ctx.slots.register({
     name: 'tool.call.toolview', key: tool,
   }, FusionTool))

@@ -2,13 +2,12 @@
 
 [中文](README.md) · [Install](INSTALL.md) · [安装](INSTALL.zh.md) · [Changelog](CHANGELOG.md)
 
-> **This repository is a fork of [`aa2246740/dsh-model-fusion`](https://github.com/aa2246740/dsh-model-fusion), published as `@sqdr2/dsh-fusion`.**
-> Every upstream capability, algorithm and measurement is kept. The fork now puts three things in **one plugin**:
-> Fusion's Lead/Sidekick combos, Antigravity (the `agy` CLI, merged under MIT from
+> **This repository is an independent open-source plugin, published as `@sqdr2/dsh-agent-studio-fusion`.**
+> It merges three capabilities into **one plugin**: Fusion's Lead/Sidekick
+> combos (originating from `aa2246740/dsh-model-fusion`), Antigravity (the `agy` CLI, merged under MIT from
 > [`dsh-agy-worker`](https://github.com/SQDR2/dsh-agy-worker)) and ACP agent routes (merged under MIT from
-> [`deepseek-harness-acp`](https://github.com/Fleey/deepseek-harness-acp)). The left sidebar still has one entry —
-> **Fusion** — and the three live as sections of one page; neither `dsh-agy-worker` nor `dsh-tauri-acp` has to be
-> installed any more. See [What this fork changes](#what-this-fork-changes).
+> [`deepseek-harness-acp`](https://github.com/Fleey/deepseek-harness-acp)). The left sidebar provides unified access
+> where the three capabilities live as sections of one integrated page. See [docs/ATTRIBUTION-AGY.md](docs/ATTRIBUTION-AGY.md).
 
 In DeepSeek Harness (DSH), Fusion is an ordinary model in the menu: **save N combos and the menu shows N entries** (**Fusion · combo name**). Behind each one are two models you choose:
 

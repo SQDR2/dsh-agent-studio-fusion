@@ -15,7 +15,7 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
         };
     }
 }
-export declare const name = "dsh-fusion/client";
+export declare const name = "dsh-agent-studio-fusion/client";
 export declare const inject: string[];
 export declare const FUSION_PANEL_ID = "fusion";
 export { FusionPanelIcon } from './FusionPanelIcon.js';

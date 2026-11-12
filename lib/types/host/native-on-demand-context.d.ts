@@ -16,7 +16,7 @@ export declare class NativeOnDemandContext {
             text: string;
         }[];
         source: {
-            kind: "plugin:dsh-fusion";
+            kind: "plugin:dsh-agent-studio-fusion";
             form: "snapshot";
             sections: {
                 name: string;

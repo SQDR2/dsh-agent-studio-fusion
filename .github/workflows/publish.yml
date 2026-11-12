@@ -9,7 +9,7 @@ name: Publish to npm
 # a trusted publisher is configured on the package's own settings page, which a
 # name that has never been published does not have. For the very first publish
 # of a new name, publish once by hand with a granular token, then add the
-# trusted publisher (owner SQDR2, repository dsh-fusion, workflow publish.yml,
+# trusted publisher (owner SQDR2, repository dsh-agent-studio-fusion, workflow publish.yml,
 # permission "allow npm publish") and let tags do the rest. A trusted publisher
 # must complete its first publish within 2 days or it expires unvalidated.
 #

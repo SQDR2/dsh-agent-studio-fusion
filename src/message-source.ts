@@ -1,6 +1,8 @@
 import type { ContextFormed } from '@deepseek-ai/dsh-llm'
 declare module '@deepseek-ai/dsh-llm' {
   interface MessageSourceMap {
+    'plugin:dsh-agent-studio-fusion': { kind: 'plugin:dsh-agent-studio-fusion' } & ContextFormed
+    'plugin:dsh-agent-studio': { kind: 'plugin:dsh-agent-studio' } & ContextFormed
     'plugin:dsh-fusion': { kind: 'plugin:dsh-fusion' } & ContextFormed
     /**
      * The producer kind this plugin wrote before it was renamed from
@@ -12,11 +14,11 @@ declare module '@deepseek-ai/dsh-llm' {
   }
 }
 
-/** The kind every new Fusion message is written under. */
-export const FUSION_SOURCE_KIND = 'plugin:dsh-fusion'
+/** The kind every new Studio message is written under. */
+export const FUSION_SOURCE_KIND = 'plugin:dsh-agent-studio-fusion'
 
-/** Kinds a Fusion-produced message may already carry in an existing session. */
-export const FUSION_SOURCE_KINDS = [FUSION_SOURCE_KIND, 'plugin:dsh-model-fusion'] as const
+/** Kinds a Studio-produced message may already carry in an existing session. */
+export const FUSION_SOURCE_KINDS = [FUSION_SOURCE_KIND, 'plugin:dsh-agent-studio', 'plugin:dsh-fusion', 'plugin:dsh-model-fusion'] as const
 
 export type FusionSourceKind = (typeof FUSION_SOURCE_KINDS)[number]
 
