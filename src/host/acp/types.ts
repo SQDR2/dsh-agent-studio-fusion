@@ -44,7 +44,15 @@ export interface AcpAgentProfile {
   idleTimeoutMs: number
 }
 
-/** The `acp` configuration block: one profile per provider route. */
+/**
+ * The `acp` configuration block: one profile per provider route.
+ *
+ * `agents` is declared volatile so the Host publishes a live-editable settings form, so a
+ * parsed Config carries a `{ get() }` reference at that key rather than a plain map. Read it
+ * through `agentsOf()`; `Object.entries(config.acp.agents)` sees only the reference's own
+ * `get` method. The type below describes the declared (input) shape, which is what the
+ * schema validates.
+ */
 export interface AcpConfig {
   agents: Record<string, AcpAgentProfile>
 }

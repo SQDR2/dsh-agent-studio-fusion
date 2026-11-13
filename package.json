@@ -1,6 +1,6 @@
 {
   "name": "@sqdr2/dsh-agent-studio-fusion",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "publishConfig": {
     "access": "public",
     "registry": "https://registry.npmjs.org/"
@@ -77,6 +77,7 @@
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "1.4.0",
+    "@deepseek-ai/cosmokit": "~1.8.5",
     "qrcode": "^1.5.4",
     "undici": "^8.10.0"
   },

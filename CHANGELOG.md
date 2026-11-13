@@ -20,6 +20,26 @@ own tags and releases.
 Entry format: what changed, then what was actually validated. "Not claimed" lines mark what a release did *not* test —
 read them before assuming a platform is covered.
 
+## 1.0.1 — 2026-11-13
+
+### ACP
+- **A configured ACP route is no longer replaced by a phantom provider named `get`, and its model list is no longer
+  empty.** `acp.agents` is declared volatile so the Host publishes a live-editable settings form, which makes a parsed
+  Config carry a `{ get() }` reference at that key instead of the profile map. `agentsOf()` read it with
+  `Object.entries`, so the reference's only own key — the `get` method — became the route id: the adapter registered a
+  provider literally named `get` whose profile was `undefined`, and the configured route never reached the catalog.
+  The failure surfaced in the model picker as `get failed to load: Cannot read properties of undefined (reading
+  'length')` (from `profile.models.length` in `listModels`) with the real route missing entirely — every ACP agent,
+  Devin included, therefore offered no models. `agentsOf()` now unwraps the reference before reading, and still accepts
+  a plain map for callers that pass raw settings. `AcpConfig` documents the trap so the declared type is not mistaken
+  for the runtime value.
+- Validated against the real agent: a Devin route (`devin acp`) configured only through `acp.agents` now lists
+  `SWE-2 Flash Medium` and `SWE-1.6 Slow` plus the `default` fallback, and `resolveModel` returns context window and
+  reasoning metadata for them. Regression tests in `tests/acp-import.spec.ts` fail on the previous code and pass on
+  this one; the full suite is 648 passed, the host suite 300 passed / 1 skipped.
+- Not claimed: that fix covers reading the route map only. Any other consumer that reads `config.acp.agents` with
+  `Object.entries` would hit the same reference; `lib/types` is rebuilt to ship this one already unwrapped.
+
 ## 1.0.0 — 2026-11-13
 
 ### Naming and upgrade

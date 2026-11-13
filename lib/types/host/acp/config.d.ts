@@ -12,10 +12,19 @@ export declare const DEFAULT_CONTEXT_WINDOW = 200000;
 export declare const AcpAgentProfileSchema: z<AcpAgentProfile>;
 /** The `acp` block: `acp.agents` maps a provider route id to its profile. */
 export declare const AcpConfigSchema: z<AcpConfig>;
-/** Read the configured profiles; an absent block is an empty map, never an error. */
+/**
+ * Read the configured profiles; an absent block is an empty map, never an error.
+ *
+ * `agents` is declared volatile so the Host publishes a live-editable settings form, and
+ * a parsed Config therefore carries a `Volatile` reference there rather than the map. The
+ * reference is a `{ get() }` object whose only own key is `get`, so `Object.entries` over
+ * it yields the single route `"get"` — that route then reached the model catalog as a
+ * provider with an undefined profile, failing as `profile.models.length`. Unwrap the
+ * reference (and any plain value, for callers that hand in raw settings) before reading.
+ */
 export declare function agentsOf(config: {
     acp?: {
-        agents?: Record<string, AcpAgentProfile>;
+        agents?: unknown;
     };
 } | undefined): ReadonlyMap<string, AcpAgentProfile>;
 export declare function spawnFacts(profile: AcpAgentProfile): string;

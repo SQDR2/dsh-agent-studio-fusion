@@ -13,7 +13,8 @@ import {
   type SettingsPathOpView,
 } from '../src/client/acp-import.js'
 import { AcpSettingsGuide, configuredRoutesOf } from '../src/client/AcpSettingsGuide.js'
-import { AcpConfigSchema } from '../src/host/acp/config.js'
+import { AcpConfigSchema, agentsOf } from '../src/host/acp/config.js'
+import { isVolatile } from '@deepseek-ai/cosmokit'
 import { pinLanguage } from './client-locale.js'
 
 const PATH = '/opt/homebrew/bin:/usr/bin:/bin'
@@ -472,6 +473,33 @@ describe('configuredRoutesOf', () => {
 describe('AcpConfigSchema', () => {
   it('marks agents as volatile so the Host exposes it to web settings form', () => {
     expect((AcpConfigSchema as any).dict.agents.meta.volatile).toBe(true)
+  })
+
+  // Regression: a volatile field parses into a `{ get() }` reference, whose only own key is
+  // `get`. Reading it as a plain map registered a phantom route named "get" with no profile,
+  // which surfaced in the model picker as `get failed to load: Cannot read properties of
+  // undefined (reading 'length')` and hid the configured route entirely.
+  it('reads configured routes through the volatile reference the Host hands the plugin', () => {
+    // A partial entry: the schema supplies every other field, exactly as a real profile does.
+    const config = AcpConfigSchema({
+      agents: { devin: { command: '/usr/local/bin/devin', args: ['acp'] } },
+    } as never) as unknown as { agents: unknown }
+    expect(isVolatile(config.agents)).toBe(true)
+
+    const routes = [...agentsOf({ acp: config }).entries()]
+    expect(routes.map(([route]) => route)).toEqual(['devin'])
+    const profile = agentsOf({ acp: config }).get('devin')
+    expect(profile?.command).toBe('/usr/local/bin/devin')
+    expect(agentsOf({ acp: config }).has('get')).toBe(false)
+    // The phantom route used to reach the catalog and throw here.
+    expect(profile?.models.length).toBe(0)
+  })
+
+  it('still accepts a plain agent map from raw settings', () => {
+    const routes = agentsOf({ acp: { agents: { devin: { command: '/bin/devin' } } as never } })
+    expect([...routes.keys()]).toEqual(['devin'])
+    expect(agentsOf(undefined).size).toBe(0)
+    expect(agentsOf({}).size).toBe(0)
   })
 })
 

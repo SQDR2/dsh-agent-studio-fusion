@@ -11,6 +11,9 @@ importers:
       '@agentclientprotocol/sdk':
         specifier: 1.4.0
         version: 1.4.0(zod@4.6.5)
+      '@deepseek-ai/cosmokit':
+        specifier: ~1.8.5
+        version: 1.8.5
       qrcode:
         specifier: ^1.5.4
         version: 1.5.4
