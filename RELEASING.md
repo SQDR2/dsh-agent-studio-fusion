@@ -4,7 +4,7 @@
 
 Maintainer notes. Users do not need this page.
 
-`@sqdr2/dsh-fusion` publishes to npm from GitHub Actions over OIDC, so no long-lived token exists anywhere. This page
+`@sqdr2/dsh-agent-studio-fusion` publishes to npm from GitHub Actions over OIDC, so no long-lived token exists anywhere. This page
 covers the one-time setup that makes that work, and the loop for each release afterwards.
 
 ## What triggers a publish
@@ -47,7 +47,7 @@ published does not have. So the very first release of a name can only be done by
    | Field | Value |
    | --- | --- |
    | Provider | GitHub Actions |
-   | Repository | `SQDR2/dsh-fusion` |
+   | Repository | `SQDR2/dsh-agent-studio-fusion` |
    | Workflow | `publish.yml` |
    | Permission | allow npm publish |
 
@@ -80,9 +80,9 @@ DSHX_HARNESS=/path/to/deepseek-harness pnpm build   # the Host checkout you test
 pnpm typecheck && pnpm test
 DSHX_HARNESS=/path/to/deepseek-harness pnpm test:host
 # 3. Commit the source, the rebuilt lib/ and CHANGELOG.md together.
-git add -A && git commit -m "chore(release): 0.3.1"
+git add -A && git commit -m "chore(release): 1.0.0"
 # 4. Tag and push both.
-git tag v0.3.1 && git push origin main v0.3.1
+git tag v1.0.0 && git push origin main v1.0.0
 ```
 
 The workflow then runs `pnpm install`, `pnpm build`, `pnpm test` and, on a tag, `npm publish --access public`.
@@ -90,8 +90,8 @@ A published version also gets a provenance attestation, so `npm view` can point 
 
 [`CHANGELOG.md`](CHANGELOG.md) is the only place release notes live. Do not add a `RELEASE-*.md` per version: a
 directory of near-identical files that nothing links to stops being readable within a few releases, and the notes belong
-under one version heading each. It lists only versions published as `@sqdr2/dsh-fusion`; upstream `dsh-model-fusion`
-history stays in the upstream repository.
+under one version heading each. It lists only versions published from this repository (0.3.x as `@sqdr2/dsh-fusion`, 1.0.0 and later as
+`@sqdr2/dsh-agent-studio-fusion`); upstream `dsh-model-fusion` history stays in the upstream repository.
 
 ### Two things the build is pinned to
 
@@ -110,20 +110,20 @@ would commit a bundle that does not match what was tested; `0.22.14`, for instan
 ## Checking a release
 
 ```sh
-npm view @sqdr2/dsh-fusion version dist-tags
-npm view @sqdr2/dsh-fusion@0.3.0 dist.attestations   # present means it came from CI
+npm view @sqdr2/dsh-agent-studio-fusion version dist-tags
+npm view @sqdr2/dsh-agent-studio-fusion@1.0.0 dist.attestations   # present means it came from CI
 ```
 
 To check the artefact rather than the metadata:
 
 ```sh
-npm install @sqdr2/dsh-fusion@0.3.0
-node -e "import('@sqdr2/dsh-fusion').then(m => console.log(m.name, m.inject.length))"
-grep -o 'id: \"[^\"]*\"' node_modules/@sqdr2/dsh-fusion/lib/client.js | head -1
+npm install @sqdr2/dsh-agent-studio-fusion@1.0.0
+node -e "import('@sqdr2/dsh-agent-studio-fusion').then(m => console.log(m.name, m.inject.length))"
+grep -o 'id: \"[^\"]*\"' node_modules/@sqdr2/dsh-agent-studio-fusion/lib/client.js | head -1
 ```
 
-The host bundle must export `dsh-fusion`, and the client bundle's registration id must be the package name
-`@sqdr2/dsh-fusion`. They differ on purpose: see [INSTALL.md](INSTALL.md) for why, and `src/identity.ts` for how.
+The host bundle must export `dsh-agent-studio-fusion`, and the client bundle's registration id must be the package
+name `@sqdr2/dsh-agent-studio-fusion`. They differ on purpose: see [INSTALL.md](INSTALL.md) for why, and `src/identity.ts` for how.
 
 ## If a publish fails
 

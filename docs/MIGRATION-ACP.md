@@ -2,10 +2,10 @@
 
 [ATTRIBUTION-ACP.md](ATTRIBUTION-ACP.md) · English: [Migrating from dsh-tauri-acp](#english-migrating-from-dsh-tauri-acp)
 
-**这个集成版本**（本仓库当前未发布的树）自带 ACP（Agent Client Protocol）线路：Host 实现以 MIT 许可并入本插件
+**1.0.0 起**本插件自带 ACP（Agent Client Protocol）线路：Host 实现以 MIT 许可并入本插件
 （见 [ATTRIBUTION-ACP.md](ATTRIBUTION-ACP.md)），因此不再需要单独安装 `dsh-tauri-acp`
 （也就是 [`deepseek-harness-acp`](https://github.com/Fleey/deepseek-harness-acp) 发布的那个包）。
-这一路 ACP 整合在本仓库里尚未发布成版本，所以这里不给发布日期或版本号。
+这一路 ACP 整合随 1.0.0 首次发布。
 
 ## 1. 为什么必须先停用旧包
 
@@ -61,7 +61,7 @@ dsh plugin --profile web list
   `default` 模型；显式写了 `models` 时每一项都必须有 `id`。
 - 其余字段与默认值见 `src/host/acp/config.ts` 与 [COMPATIBILITY.md](COMPATIBILITY.md)。
 - 配置在 **Host 启动时读取一次**，改完或导入后都需要重启 Host 才会生效。浏览器在左侧栏 **Fusion** →
-  **ACP 线路** 中提供了配置导入能力，支持粘贴配置 JSON 解析预览并批量导入到 `dsh-fusion → acp.agents`，
+  **ACP 线路** 中提供了配置导入能力，支持粘贴配置 JSON 解析预览并批量导入到 `dsh-agent-studio-fusion → acp.agents`，
   但范围仅限导入流程，不提供完整 Agent 编辑后台、在线路由管理或实时模型发现与状态。
 
 ## 4. 数据与前缀
@@ -87,7 +87,7 @@ dsh plugin --profile web list
 
 左侧边栏 **Fusion** → 顶部三个区域按钮 **Fusion 组合 / Antigravity / ACP 线路** 中的 **ACP 线路**。
 那里包含**配置说明与导入能力**：不仅给出 `acp.agents` 的最小示例、重启要求，还支持直接粘贴旧版配置 JSON、灰色示例占位、
-解析预览、选择路线并批量导入到 `dsh-fusion → acp.agents`。
+解析预览、选择路线并批量导入到 `dsh-agent-studio-fusion → acp.agents`。
 导入后会明确提示需要重启 Host 生效；范围仅限导入流程，不实现完整 Agent 编辑后台、在线路由管理或实时模型发现与连接状态。
 
 ---
@@ -156,7 +156,7 @@ menu. Move it across verbatim:
   [COMPATIBILITY.md](COMPATIBILITY.md).
 - The routes are read **once when the Host starts**, so a Host restart is required after changes or imports.
   An in-browser import interface is provided at left sidebar **Fusion** → **ACP routes** to paste configuration
-  JSON, preview parsed routes, and import them directly into `dsh-fusion → acp.agents`. The scope is strictly
+  JSON, preview parsed routes, and import them directly into `dsh-agent-studio-fusion → acp.agents`. The scope is strictly
   limited to the import flow; no full agent editing backend, online route management, or live model discovery/status is offered.
 
 ## 4. Data and caches
@@ -190,6 +190,6 @@ Left sidebar **Fusion** → the three section buttons **Fusion combos / Antigrav
 **ACP routes**. That panel provides both **setup guidance and configuration import**: alongside the minimal
 `acp.agents` example and restart instructions, it restores the legacy configuration import flow, allowing
 pasting configuration JSON, previewing parsed routes, selecting routes, and saving them directly into
-`dsh-fusion → acp.agents`. An explicit notice indicates that a Host restart is required after importing.
+`dsh-agent-studio-fusion → acp.agents`. An explicit notice indicates that a Host restart is required after importing.
 The scope is limited strictly to the import flow; no full agent editing backend, online route management,
 or live model discovery and connection status is provided.

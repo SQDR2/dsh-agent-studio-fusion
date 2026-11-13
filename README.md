@@ -43,10 +43,10 @@
 ## 上手
 
 ```sh
-dsh plugin --profile web add github:SQDR2/dsh-agent-studio-fusion
+dsh plugin --profile web add @sqdr2/dsh-agent-studio-fusion
 ```
 
-仓库自带构建好的 `lib/`，不用自己编译。npm 上已有同名包时也可以 `dsh plugin --profile web add @sqdr2/dsh-agent-studio-fusion`。桌面版安装、本地目录安装、卸载、从旧包迁移见 **[INSTALL.zh.md](INSTALL.zh.md)**。
+也可以直接从 GitHub 装（仓库自带构建好的 `lib/`）：`dsh plugin --profile web add github:SQDR2/dsh-agent-studio-fusion`。桌面版安装、本地目录安装、卸载、从旧包迁移见 **[INSTALL.zh.md](INSTALL.zh.md)**。
 
 1. 打开左侧边栏的 **Fusion**（默认在记忆系统下方）。
 2. 在 **Fusion 组合** 里起个名字，选 Lead 和 Sidekick。DSH 里任何已登录的模型都能选，包括已配好的 Antigravity 与 ACP 线路。
@@ -75,7 +75,7 @@ dsh plugin --profile web add github:SQDR2/dsh-agent-studio-fusion
 
 ### Antigravity（`agy` CLI，已内建）
 
-0.4.0 起整块内建，移植自 [`dsh-agy-worker`](https://github.com/SQDR2/dsh-agy-worker) 0.6.3（MIT，见 [docs/ATTRIBUTION-AGY.md](docs/ATTRIBUTION-AGY.md)）：`antigravity` 线路、`/agy` 命令族、`agy_ask` / `agy_tool`、`/plugins/agy-worker/*` 路由、带额度跟踪的账号池。管理控制台在页面的 **Antigravity** 区域；`/agy status | pool | models | doctor` 在输入框里回答同一批问题。
+1.0.0 起整块内建，移植自 [`dsh-agy-worker`](https://github.com/SQDR2/dsh-agy-worker) 0.6.3（MIT，见 [docs/ATTRIBUTION-AGY.md](docs/ATTRIBUTION-AGY.md)）：`antigravity` 线路、`/agy` 命令族、`agy_ask` / `agy_tool`、`/plugins/agy-worker/*` 路由、带额度跟踪的账号池。管理控制台在页面的 **Antigravity** 区域；`/agy status | pool | models | doctor` 在输入框里回答同一批问题。
 
 当 Sidekick 用这条路时，**三个条件必须同时成立**，缺一条都会静默失败：
 

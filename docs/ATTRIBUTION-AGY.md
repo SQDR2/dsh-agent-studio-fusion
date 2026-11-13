@@ -8,7 +8,7 @@ version 0.6.3, commit `ab49704`), and is redistributed here under its MIT licens
 which keeps its own name, package and repository. The attribution chain is therefore:
 
 ```
-dsh-agy-link (amlyczz)  →  dsh-agy-worker (SQDR2)  →  this package (@sqdr2/dsh-fusion)
+dsh-agy-link (amlyczz)  →  dsh-agy-worker (SQDR2)  →  this package (@sqdr2/dsh-agent-studio-fusion)
 ```
 
 ## Upstream license
@@ -56,7 +56,7 @@ The file is served at `/plugins/agy-worker/mermaid.min.js` and is deliberately *
 ### Size tradeoff (accepted decision)
 
 `assets/mermaid.min.js` is **3,572,661 bytes (3.4 MiB)** — roughly an order of magnitude larger than
-both JavaScript bundles together (`lib/client.js` ≈ 0.32 MB, `lib/dsh-fusion.js` ≈ 1.2 MB). It is
+both JavaScript bundles together (`lib/client.js` ≈ 0.32 MB, `lib/dsh-agent-studio-fusion.js` ≈ 1.2 MB). It is
 vendored rather than generated or fetched at build time because:
 
 - the route that serves it (`/plugins/agy-worker/mermaid.min.js`) must work offline, straight after
@@ -103,11 +103,11 @@ The port keeps upstream behavior for:
 The upstream package registered itself as a separate plugin (`@sqdr2/dsh-agy-worker`, plugin id
 `agy-worker`) with its own cordis entry, its own client entry, its own sidebar panel and main
 page, and its own page-level DOM scanners. This port registers the same host capability inside
-the single `dsh-fusion` plugin and keeps the ported files' upstream behavior intact. Concretely:
+the single `dsh-agent-studio-fusion` plugin and keeps the ported files' upstream behavior intact. Concretely:
 
 - **One identity.** `installAgy(ctx, config.agy)` replaces the upstream `apply(ctx, entryConfig)`
   and returns the disposer that unwinds every effect it registered. There is no second cordis
-  entry, no second package name, and `cordis.patch.yml` still inserts only `dsh-fusion`. The
+  entry, no second package name, and `cordis.patch.yml` still inserts only `dsh-agent-studio-fusion`. The
   provider route (`antigravity`), the command (`/agy`), the tools (`agy_ask`, `agy_tool`) and the
   route prefix (`/plugins/agy-worker/*`) keep their exact upstream names.
 - **Tool-card registration.** The client entry registers exactly the two keyed

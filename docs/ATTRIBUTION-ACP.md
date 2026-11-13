@@ -49,7 +49,7 @@ upstream behavior for:
 
 The upstream package registered itself as a separate plugin (`dsh-tauri-acp`) with its own
 settings section and client bundle. This port registers the same host capability inside the
-single `dsh-fusion` plugin and leaves the ported files' upstream behavior intact, then adds
+single `dsh-agent-studio-fusion` plugin and leaves the ported files' upstream behavior intact, then adds
 one Fusion-only surface: a Sidekick-only Host-tool MCP bridge (`bridge.ts`, `bridge-route.ts`,
 and the declaration handoff in `index.ts`).
 
@@ -102,7 +102,7 @@ servers, i.e. in the upstream state. The bounded facts that hold today are:
 
 The full editor upstream shipped is **not** ported, and this document does not claim otherwise.
 A narrow, import-only UI has been restored locally in `src/client/AcpSettingsGuide.tsx` (allowing users
-to paste configuration JSON and write selected routes directly to `dsh-fusion → acp.agents` via DSH
+to paste configuration JSON and write selected routes directly to `dsh-agent-studio-fusion → acp.agents` via DSH
 ConfigForms, with an explicit Host restart requirement), but full route management, live model discovery
 and connection status, and a full-field agent editor remain outside scope:
 

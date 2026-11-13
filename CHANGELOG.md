@@ -1,12 +1,17 @@
 # Changelog
 
-Release notes for `@sqdr2/dsh-fusion`. Newest first.
+Release notes for `@sqdr2/dsh-agent-studio-fusion` (published as `@sqdr2/dsh-fusion` up to 0.3.9). Newest first.
 
 ## Origin
 
 This package is a fork of [`aa2246740/dsh-model-fusion`](https://github.com/aa2246740/dsh-model-fusion). 0.3.0 is the
-first release published under this name, and it branches from upstream 0.2.9. Upstream 0.2.10 and 0.2.11 landed after
+first release published under this fork, and it branches from upstream 0.2.9. Upstream 0.2.10 and 0.2.11 landed after
 that point and are **not** included here.
+
+**The name changed at 1.0.0.** Versions 0.3.0 through 0.3.9 were published as `@sqdr2/dsh-fusion`. From 1.0.0 the
+package is `@sqdr2/dsh-agent-studio-fusion` and the plugin id is `dsh-agent-studio-fusion`. The 0.4.x line was never
+published: it exists only in this repository's history, and 1.0.0 is its first release. Upgrading from a
+`@sqdr2/dsh-fusion` install migrates the state directory automatically; see [`INSTALL.md`](INSTALL.md).
 
 Earlier versions — `dsh-model-fusion` 0.2.0 through 0.2.11, and the pre-0.3.0 tags in this repository's history — were
 not published as `@sqdr2/dsh-fusion`, so they are not listed here. Their notes live in the upstream repository, under its
@@ -15,13 +20,28 @@ own tags and releases.
 Entry format: what changed, then what was actually validated. "Not claimed" lines mark what a release did *not* test —
 read them before assuming a platform is covered.
 
-## Unreleased
+## 1.0.0 — 2026-11-13
+
+### Naming and upgrade
+- **The package is now `@sqdr2/dsh-agent-studio-fusion`, plugin id `dsh-agent-studio-fusion`.** 1.0.0 is the first
+  release of that name and the first release after 0.3.9; the 0.4.x and 0.5.x numbers existed only in this
+  repository. `@sqdr2/dsh-fusion` stays on npm at 0.3.9 and is not updated again.
+- What the rename does **not** touch: the `dsh-fusion` provider route, the `auto`/`pair-*` model ids, the `/api/fusion`
+  path and the `Fusion · <name>` model-menu label. An existing conversation keeps its combo.
+- What moves: the state directory becomes `$DSH_HOME/plugins/dsh-agent-studio-fusion/`. `dsh-fusion`,
+  `dsh-model-fusion` and `dsh-agent-studio` directories are adopted on first start
+  (`src/dsh-agent-studio-fusion.ts`), along with the whole ledger inside them.
+- Message sources are now written as `plugin:dsh-agent-studio-fusion`. The three older kinds stay readable through
+  `isFusionSourceKind`, so context restored into a session started under an older name is still matched.
+- `docs/MIGRATION-AGY.md` and `docs/MIGRATION-ACP.md` now use the current row id in their copy-paste blocks; they had
+  still named `- id: dsh-fusion` / `name: '@sqdr2/dsh-fusion'`, which the loader no longer matches.
 
 ### Client
 - **The Fusion panel becomes the combined studio page**, titled `DSH Agent Studio With Fusion` (one constant,
   `src/client/studio-brand.ts`). The sidebar row keeps its short label `Fusion` and the panel id stays `fusion`; the
-  package name, plugin id, state directory and provider routes are unchanged, and no Harness-wide branding slot is
-  claimed — `sidebar.brand.mark` / `sidebar.brand.name` are deliberately left to the official brand plugin.
+  provider route and model ids are unchanged (see the Naming section above for what did move), and no Harness-wide
+  branding slot is claimed — `sidebar.brand.mark` / `sidebar.brand.name` are deliberately left to the official brand
+  plugin.
 - The page has three labelled section buttons — **Fusion combos** (default), **Antigravity**, **ACP routes** — as a
   `<nav>` of plain buttons with `aria-pressed` and `aria-controls`, not `role="tab"`: no roving tabindex or arrow-key
   focus management is implemented, so the page does not claim tab semantics. All three regions are always in the
@@ -58,11 +78,14 @@ read them before assuming a platform is covered.
   and no remaining claim that `dsh-agy-worker` or `dsh-tauri-acp` has to be installed separately.
 
 ### Validation
-- `pnpm typecheck` clean.
-- `pnpm test` passes, including `tests/fusion-brand.spec.ts` (page structure, draft preservation, lazy mounting, plus a
+- `pnpm typecheck` clean on Node 24.13.0.
+- `pnpm test` 646 passed in 75 files, including `tests/fusion-brand.spec.ts` (page structure, draft preservation, lazy mounting, plus a
   package-icon/metadata check and a client-`apply` check that exactly one `main`/`sidebar.panellist` entry is registered,
   labelled `Fusion`, with no `sidebar.brand.*` claim) and the adapted `tests/fusion-settings-agy.spec.ts`.
-- `DSHX_HARNESS=… pnpm test:host` passes, including the new `native-tests/agy-process.spec.ts`.
+- `DSHX_HARNESS=… pnpm test:host` 300 passed, 1 skipped, including `native-tests/agy-process.spec.ts`. The literal
+  `plugin:dsh-fusion` source-kind assertions in `native-tests/coordinator.spec.ts` and `native-tests/context.spec.ts`
+  were still pinning the pre-rename kind, so 15 of those cases failed against the renamed producer; they now use
+  `isFusionSourceKind`, the same guard the runtime reads with.
 - `pnpm build` regenerates `lib/`.
 - **Offline only.** `native-tests/agy-process.spec.ts` drives the real adapter against the fixture child at
   `native-tests/fixtures/fake-agy.mjs` and replays the recorded step through the production `agy_tool` mirror — with

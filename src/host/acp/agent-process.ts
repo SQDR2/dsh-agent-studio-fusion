@@ -536,7 +536,7 @@ export class AcpAgentProcess {
         connection.agent.request(methods.agent.initialize, {
           protocolVersion: PROTOCOL_VERSION,
           clientCapabilities: {},
-          clientInfo: { name: PLUGIN_ID, version: '0.4.0' },
+          clientInfo: { name: PLUGIN_ID, version: '1.0.0' },
         }),
         exited,
         timeout,

@@ -42,10 +42,10 @@ The samples are small (4 tasks × 1 run; 9 tasks × 2 in the other round), Pytho
 ## Use
 
 ```sh
-dsh plugin --profile web add github:SQDR2/dsh-agent-studio-fusion
+dsh plugin --profile web add @sqdr2/dsh-agent-studio-fusion
 ```
 
-The repository ships a built `lib/`, so nothing needs compiling. Once the package is on npm you can also run `dsh plugin --profile web add @sqdr2/dsh-agent-studio-fusion`. Desktop-app install, local-directory install, uninstall and migration from older packages: **[INSTALL.md](INSTALL.md)**.
+Installing straight from GitHub works too (the repository ships a built `lib/`): `dsh plugin --profile web add github:SQDR2/dsh-agent-studio-fusion`. Desktop-app install, local-directory install, uninstall and migration from older packages: **[INSTALL.md](INSTALL.md)**.
 
 1. Open **Fusion** in the left sidebar (default below Memory System).
 2. In **Fusion combos**, name the combo and choose a Lead and a Sidekick. Any model you are signed in to works, including a configured Antigravity or ACP route.
@@ -74,7 +74,7 @@ The Lead/Sidekick pair above. Either side can be a built-in DSH route, a subscri
 
 ### Antigravity (the `agy` CLI, built in)
 
-Built in as of 0.4.0, ported from [`dsh-agy-worker`](https://github.com/SQDR2/dsh-agy-worker) 0.6.3 (MIT, see [docs/ATTRIBUTION-AGY.md](docs/ATTRIBUTION-AGY.md)): the `antigravity` route, the `/agy` command family, `agy_ask` / `agy_tool`, the `/plugins/agy-worker/*` surface, and the account pool with quota tracking. The console lives in the page's **Antigravity** section; `/agy status | pool | models | doctor` answers the same questions from the composer.
+Built in as of 1.0.0, ported from [`dsh-agy-worker`](https://github.com/SQDR2/dsh-agy-worker) 0.6.3 (MIT, see [docs/ATTRIBUTION-AGY.md](docs/ATTRIBUTION-AGY.md)): the `antigravity` route, the `/agy` command family, `agy_ask` / `agy_tool`, the `/plugins/agy-worker/*` surface, and the account pool with quota tracking. The console lives in the page's **Antigravity** section; `/agy status | pool | models | doctor` answers the same questions from the composer.
 
 With this route as the Sidekick, **three conditions must hold at once**; each fails silently on its own:
 

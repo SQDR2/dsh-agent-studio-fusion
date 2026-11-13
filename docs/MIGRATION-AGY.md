@@ -2,7 +2,7 @@
 
 [ATTRIBUTION-AGY.md](ATTRIBUTION-AGY.md) · English: [Migrating from dsh-agy-worker](#english-migrating-from-dsh-agy-worker)
 
-从 0.4.0 起，`@sqdr2/dsh-fusion` 自己就带 **完整** 的 Google Antigravity（`agy CLI`）能力：
+从 1.0.0 起，`@sqdr2/dsh-agent-studio-fusion` 自己就带 **完整** 的 Google Antigravity（`agy CLI`）能力：
 `antigravity` 模型路线、`/agy` 命令、`agy_ask` / `agy_tool`、`/plugins/agy-worker/*` 路由、
 账号池与额度、MCP 反向桥接，以及左侧边栏 Fusion 面板里的 Antigravity 管理控制台。
 
@@ -147,7 +147,7 @@ cp -a "<STATE>/agy-accounts/." "$HOME/.dsh/agy-accounts/"
 
 # English: migrating from `dsh-agy-worker`
 
-Since 0.4.0 `@sqdr2/dsh-fusion` ships the **complete** Google Antigravity (`agy CLI`) capability
+Since 1.0.0 `@sqdr2/dsh-agent-studio-fusion` ships the **complete** Google Antigravity (`agy CLI`) capability
 itself: the `antigravity` model route, the `/agy` command, `agy_ask` / `agy_tool`, the
 `/plugins/agy-worker/*` HTTP surface, the account pool and quota, the reverse MCP bridge, and the
 Antigravity console inside the Fusion panel in the left sidebar. You therefore do **not** install

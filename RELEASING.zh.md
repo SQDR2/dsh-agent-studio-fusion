@@ -4,7 +4,7 @@
 
 维护者用。普通用户不需要看这一页。
 
-`@sqdr2/dsh-fusion` 由 GitHub Actions 通过 OIDC 发到 npm，任何地方都不存在长期 token。本页说明让它跑起来的一次性配置，以及之后每一版的流程。
+`@sqdr2/dsh-agent-studio-fusion` 由 GitHub Actions 通过 OIDC 发到 npm，任何地方都不存在长期 token。本页说明让它跑起来的一次性配置，以及之后每一版的流程。
 
 ## 什么会触发发布
 
@@ -41,7 +41,7 @@ OIDC 发布是按包授权的，配置在包自己的设置页上，而一个从
    | 字段 | 值 |
    | --- | --- |
    | Provider | GitHub Actions |
-   | Repository | `SQDR2/dsh-fusion` |
+   | Repository | `SQDR2/dsh-agent-studio-fusion` |
    | Workflow | `publish.yml` |
    | Permission | allow npm publish |
 
@@ -72,9 +72,9 @@ DSHX_HARNESS=/path/to/deepseek-harness pnpm build   # 指向你实际测试用�
 pnpm typecheck && pnpm test
 DSHX_HARNESS=/path/to/deepseek-harness pnpm test:host
 # 3. 源码、重建后的 lib/ 和 CHANGELOG.md 一起提交。
-git add -A && git commit -m "chore(release): 0.3.1"
+git add -A && git commit -m "chore(release): 1.0.0"
 # 4. 打 tag 并一起推。
-git tag v0.3.1 && git push origin main v0.3.1
+git tag v1.0.0 && git push origin main v1.0.0
 ```
 
 workflow 随后依次执行 `pnpm install`、`pnpm build`、`pnpm test`，在 tag 上再执行 `npm publish --access public`。
@@ -82,7 +82,8 @@ workflow 随后依次执行 `pnpm install`、`pnpm build`、`pnpm test`，在 ta
 
 发布说明只有 [`CHANGELOG.md`](CHANGELOG.md) 一处。不要再每个版本加一个 `RELEASE-*.md`：
 一堆无人引用、名字几乎相同的文件，几个版本之后就没法读了；同一个版本的内容应该按版本标题归在这一个文件里。
-它只列以 `@sqdr2/dsh-fusion` 名义发过的版本；上游 `dsh-model-fusion` 的历史留在上游仓库。
+它只列以本仓库名义发过的版本（0.3.x 是 `@sqdr2/dsh-fusion`，1.0.0 起是 `@sqdr2/dsh-agent-studio-fusion`）；
+上游 `dsh-model-fusion` 的历史留在上游仓库。
 
 ### 构建被钉死的两处
 
@@ -101,19 +102,19 @@ workflow 里的打包器版本精确钉在 `tsdown@0.22.2`。`lib/` 是提交进
 ## 检查一次发布
 
 ```sh
-npm view @sqdr2/dsh-fusion version dist-tags
-npm view @sqdr2/dsh-fusion@0.3.0 dist.attestations   # 有值说明出自 CI
+npm view @sqdr2/dsh-agent-studio-fusion version dist-tags
+npm view @sqdr2/dsh-agent-studio-fusion@1.0.0 dist.attestations   # 有值说明出自 CI
 ```
 
 想验证产物本身而不是元数据：
 
 ```sh
-npm install @sqdr2/dsh-fusion@0.3.0
-node -e "import('@sqdr2/dsh-fusion').then(m => console.log(m.name, m.inject.length))"
-grep -o 'id: "[^"]*"' node_modules/@sqdr2/dsh-fusion/lib/client.js | head -1
+npm install @sqdr2/dsh-agent-studio-fusion@1.0.0
+node -e "import('@sqdr2/dsh-agent-studio-fusion').then(m => console.log(m.name, m.inject.length))"
+grep -o 'id: "[^"]*"' node_modules/@sqdr2/dsh-agent-studio-fusion/lib/client.js | head -1
 ```
 
-宿主 bundle 必须导出 `dsh-fusion`，客户端 bundle 的注册 id 必须是包名 `@sqdr2/dsh-fusion`。
+宿主 bundle 必须导出 `dsh-agent-studio-fusion`，客户端 bundle 的注册 id 必须是包名 `@sqdr2/dsh-agent-studio-fusion`。
 两者不同是刻意的：原因见 [INSTALL.zh.md](INSTALL.zh.md)，实现见 `src/identity.ts`。
 
 ## 发布失败时

@@ -27,6 +27,7 @@ import type { SessionBinding } from '../src/host/bindings.js'
 import { NativeTaskContext, FUSION_TASK_CONTEXT } from '../src/host/native-task-context.js'
 import { SessionId as FusionSessionId } from '../src/contracts.js'
 import { assertWorkerBriefRequest } from '../src/host/native-worker-brief.js'
+import { isFusionSourceKind } from '../src/message-source.js'
 
 const cleanups: (() => Promise<void>)[] = []
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup() })
@@ -244,7 +245,7 @@ describe('native final context admission and compaction', () => {
     expect(blocked, JSON.stringify(store.listDocumentIds('context-recovery:').map(id => store.readDocument(id)?.value))).toEqual([])
     expect(adapter.requests.map(request => request.purpose ?? 'conversation')).toEqual(['conversation', 'compaction', 'conversation'])
     const retry = adapter.requests[2]!
-    const restored = retry.messages.find(message => message.source?.kind === 'plugin:dsh-fusion'
+    const restored = retry.messages.find(message => isFusionSourceKind(message.source?.kind)
       && message.source.form === 'snapshot')!
     expect(restored).toBeDefined()
     expect(JSON.stringify(restored.content)).toContain(constraint)
@@ -305,10 +306,10 @@ describe('native final context admission and compaction', () => {
       checkpoints: store.listDocumentIds('task-checkpoint:').map(id => store.readDocument(id)?.value),
     })).toEqual(['conversation', 'compaction', 'conversation'])
     const retry = adapter.requests[2]!
-    const section = retry.messages.flatMap(message => message.source?.kind === 'plugin:dsh-fusion' && message.source.form === 'snapshot'
+    const section = retry.messages.flatMap(message => isFusionSourceKind(message.source?.kind) && message.source.form === 'snapshot'
       ? message.source.sections.filter(section => section.name === FUSION_TASK_CONTEXT) : []).at(-1)!
     const facts = JSON.parse(section.text.slice(section.text.indexOf('\n') + 1)).facts
-    expect(retry.messages.flatMap(message => message.source?.kind === 'plugin:dsh-fusion' && message.source.form === 'snapshot'
+    expect(retry.messages.flatMap(message => isFusionSourceKind(message.source?.kind) && message.source.form === 'snapshot'
       ? message.source.sections.filter(candidate => candidate.name === FUSION_TASK_CONTEXT && candidate.text === section.text) : [])).toHaveLength(1)
     expect(facts.workerHandoffs).toMatchObject({ contentByteBudget: 40_000, totalRecords: 3, omittedRecords: 2,
       latestBriefRevision: 3, retainedContentBytes: 30_007, records: [{ revision: 3, content: briefs[2] }] })
