@@ -10,6 +10,7 @@ import type { SqliteFusionStore } from '../task/sqlite-store.js'
 import type { TaskState } from '../task/state.js'
 import type { SessionBinding } from './bindings.js'
 import { snapshotWorkspace } from './workspace.js'
+import { rootCallIdOf } from './tool-seam.js'
 
 type Owner = { binding: SessionBinding; role: Role }
 interface Callbacks {
@@ -155,7 +156,7 @@ export class NativeApprovals {
       snapshot: scope.snapshot, policy: scope.policy,
     })), 'application/vnd.dsh-fusion.approval-scope+json')
     this.store.writeDocument(key, 0, { schemaVersion: 1, logical, agentId: agent.id, role: owner.role,
-      toolName: exec.name, callId: exec.callId, rootCallId: exec.rootCallId, askedSeq: seq,
+      toolName: exec.name, callId: exec.callId, rootCallId: rootCallIdOf(exec), askedSeq: seq,
       askedAt: new Date().toISOString(), processId: process.pid, scopeDigest: scope.digest,
       evidence, state: 'pending', ...(previousRequest ? { previousRequest } : {}) } satisfies ApprovalRecord)
     this.callbacks.pending(owner.binding.taskId, logical)

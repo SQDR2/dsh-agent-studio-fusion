@@ -9,6 +9,7 @@ import { FUSION_MODEL, FUSION_PROVIDER, isCurrentFusionSelection, isFusionModel,
 import { modelOfProfileId } from './pairs.js'
 import type { ResolvedProfile } from '../profile/resolve.js'
 import type { FusionCoordinator } from './coordinator.js'
+import { isNativeRoutePin, recordNativeIntent } from './route-pin.js'
 
 export { FUSION_MODEL, FUSION_PROVIDER, isFusionSelection }
 
@@ -122,8 +123,13 @@ export function installNativeFusionSelection(ctx: Context, input: {
   const disposers = [
     ctx.on('session/event', (session, event) => {
       if (event.type !== 'model/selection') return
-      desired.set(session.id, event.data)
       const agent = ctx.agents.get(SessionId(session.id))
+      // Fusion records the physical route as a selection so a 0.2.2 step uses it. That is
+      // its own pin, not the user choosing another model: reading it as a choice would drain
+      // the running task on every turn. It is also why the turn boundary restores the intent.
+      if (agent && isNativeRoutePin(agent, event.data)) return
+      if (agent) recordNativeIntent(agent, event.data)
+      desired.set(session.id, event.data)
       if (agent && (agent.status === 'idle' || !isFusionSelection(event.data))) change(agent)
       else if (agent && !selected(agent)) agent.cancel({ kind: 'hook', reason: 'Fusion selection takes effect after this turn settles' }, { keepInbox: true })
     }),
@@ -135,6 +141,10 @@ export function installNativeFusionSelection(ctx: Context, input: {
       }
       // The synchronous running reservation precedes prompt/tool assembly.
       try { change(agent) } catch (error) { failures.set(agent.id, String(error)) }
+      // `change` may have persisted the virtual selection after the scope installed its
+      // physical route; the step about to be prepared reads whichever was last.
+      input.coordinator()?.pinRoute(agent)
+
     }),
     ctx.on('agent/request', async (payload, next) => {
       const config = await next(), agent = payload.agent

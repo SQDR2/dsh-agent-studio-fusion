@@ -39,6 +39,7 @@ import { AcpConfigSchema, agentsOf } from './host/acp/config.js'
 import type { AcpConfig } from './host/acp/types.js'
 import { installAcp } from './host/acp/index.js'
 import { installAgy } from './host/agy/index.js'
+import { prepareToolSeam } from './host/tool-seam.js'
 
 export * from './index.js'
 
@@ -87,6 +88,9 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
     adoptLegacyStateDirectory(join(dshHome, 'plugins', 'dsh-fusion'), join(dshHome, 'plugins', name))
     adoptLegacyStateDirectory(join(dshHome, 'plugins', 'dsh-agent-studio'), join(dshHome, 'plugins', name))
   }
+  // A 0.2.2 Host selects tool presentation per scope through an executor plugin that the
+  // 0.2.1 release does not ship, so it is resolved once here, before any Agent exists.
+  await prepareToolSeam(ctx)
   const store = new SqliteFusionStore(database), bindings = new BindingRepository(store)
   const cachePolicy = new CachePolicy(store)
   backfillHistory(store)

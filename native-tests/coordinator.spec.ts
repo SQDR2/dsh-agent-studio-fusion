@@ -44,6 +44,7 @@ import { newLedger } from '../src/usage/ledger.js'
 import { completeProfile } from '../src/profile/resolve.js'
 import { loadPromptBundle } from '../src/prompts.js'
 import { FusionCatalogAdapter, FUSION_PROVIDER, FUSION_MODEL, installNativeFusionSelection } from '../src/host/native-selection.js'
+import { executeSingleTool, type ScopedToolService } from '../src/host/tool-seam.js'
 import { FUSION_TASK_CONTEXT } from '../src/host/native-task-context.js'
 import { isFusionSourceKind } from '../src/message-source.js'
 import { KEEPALIVE_ATTEMPTS, KEEPALIVE_INTERVAL_MS, KEEPALIVE_PROMPT } from '../src/host/native-keepalive.js'
@@ -199,8 +200,11 @@ async function setup(script: Script, workerScript?: Script, options: {
       // `input` is what a real bridge forwards; without it the step is a plain
       // replay, so a fixture that only asserts the ceiling stays inert.
       if (step.tool === undefined || step.input === undefined) return 'replayed bridge step'
-      const result = await ctx.tools.execute({ name: step.tool, callId: ToolCallId(`agy-mcp-${++bridgeSeq}`),
-        arguments: step.input ?? {}, signal: exec.signal, ...(exec.agent ? { agent: exec.agent } : {}) })
+      // A bridge dispatches through the release seam, exactly like the real MCP bridge:
+      // 0.2.1 takes the single call and 0.2.2 derives a one-call raw batch from it.
+      const result = await executeSingleTool(ctx.tools as unknown as ScopedToolService, {
+        name: step.tool, callId: `agy-mcp-${++bridgeSeq}`,
+        arguments: step.input ?? {}, signal: exec.signal, agent: exec.agent })
       return result.content.map(block => block.type === 'text' ? block.text : '').join('')
     } })
   const bridgeDispose = options.bridgeTransport ? ctx.tools.register(bridgeTool) : undefined
@@ -2888,9 +2892,12 @@ describe('complete native Fusion workflow', () => {
     expect(adapter.requests[0]?.tools?.some(tool => tool.name === 'fusion_delegate')).toBe(true)
     const events = parent.session.snapshotEvents()
     const intent = events.filter(event => event.type === 'model/selection')
-    expect(intent).toHaveLength(1)
-    expect(intent[0]).toMatchObject({ data: { provider: FUSION_PROVIDER, model: FUSION_MODEL } })
-    expect(events.indexOf(intent[0]!)).toBeLessThan(events.findIndex(event => event.type === 'request/header'))
+    // The host records the user's own choice; a 0.2.2 host additionally records the physical
+    // route Fusion pinned for the step, because a step's selection is fixed before dispatch.
+    const virtual = intent.filter(event => event.data.provider === FUSION_PROVIDER)
+    expect(virtual).toHaveLength(1)
+    expect(virtual[0]).toMatchObject({ data: { provider: FUSION_PROVIDER, model: FUSION_MODEL } })
+    expect(events.indexOf(virtual[0]!)).toBeLessThan(events.findIndex(event => event.type === 'request/header'))
     // Physical request accounting stays truthful; the native menu retains the
     // separately committed virtual selection even when it was a saved default.
     expect(events.findLast(event => event.type === 'request/header')).toMatchObject({
@@ -4686,11 +4693,20 @@ describe('enforced-v3 daily-driver safeguards (study 2026-09-26)', () => {
   })
 })
 
-/** dsh-tool-search replaces assembled.tools inside system-prompt/assemble. Fusion's prepend hook calls next() first, so this listener runs underneath it. */
+/**
+ * dsh-tool-search replaces assembled.tools inside system-prompt/assemble. Fusion's prepend
+ * hook calls next() first, so this listener runs underneath it.
+ *
+ * 0.2.2 removed `tools` from that payload: the model-facing table now comes from the scoped
+ * executor's `describe()`, so this interference has no equivalent and the fixture must not
+ * pretend otherwise. The point of these tests is the role ceiling, which Fusion still owns
+ * on both releases, so a Host without the waterfall table verifies it without interference.
+ */
 function replaceAssembledTools(scope: Context): void {
   const eager = new Set(['read', 'glob', 'grep', 'bash', 'pwsh', 'write', 'edit'])
   scope.on('system-prompt/assemble', async (_assembly, _context, next) => {
     const assembled = await next()
+    if (!('tools' in assembled) || assembled.tools === undefined) return assembled
     return { ...assembled, tools: assembled.tools.filter(tool => eager.has(tool.name)) }
   })
 }

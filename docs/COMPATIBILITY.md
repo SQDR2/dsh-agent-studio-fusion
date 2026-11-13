@@ -1,7 +1,8 @@
 # DSH compatibility
 
-Fusion supports **DeepSeek Harness 0.2.1-rc.5 and later 0.2.1 releases** (`>=0.2.1-rc.5 <0.3.0-0`) on **Node 24 or
-newer** (`engines.node` is `>=24.0.0`). It is an ordinary external plugin: it uses only DSH's public plugin APIs and
+Fusion supports **DeepSeek Harness 0.2.1-rc.5 and later releases through the 0.2 line**
+(`>=0.2.1-rc.5 <0.2.2-0 || >=0.2.2-rc.2 <0.3.0-0`) on **Node 24 or newer** (`engines.node` is `>=24.0.0`).
+It is an ordinary external plugin: it uses only DSH's public plugin APIs and
 never patches, replaces or rebuilds DSH itself. `engines.dsh` declares the supported runtime, and every
 `@deepseek-ai/dsh*` peer uses the same range. 0.2.1-rc.5 is the tested floor rather than a guess: this release is
 developed and verified against that Host checkout on Node 24.13.0, and it publishes the `WebServer.getOrigin()`
@@ -121,17 +122,42 @@ native role scope Fusion already owns:
   `workerTools` for implement mode, so `NativeFusionScopes` narrows the inherited tool set. The scope is installed at
   `agent/created`, before the child's first request, and the existing deny-only guard remains the second gate.
 
-That return value also runs `tools.presentAs('native')`, so an implement-mode Worker on 0.2.1 is presented natively,
-as the read-only modes already were. The advertised names stay `workerTools`. On 0.2.0 implement mode still returns
-`undefined`. The ceiling stays the start-time `toolFilter`, and `presentAs('native')` does not start applying to those
-Workers, so 0.2.0 behaviour is unchanged. Text and explore modes already returned an allowlist on both hosts.
+That return value also selects native presentation for the role, so an implement-mode Worker on 0.2.1 is presented
+natively, as the read-only modes already were. The advertised names stay `workerTools`. On 0.2.0 implement mode still
+returns `undefined`, so the ceiling stays the start-time `toolFilter` and native presentation does not start applying
+to those Workers. Text and explore modes already returned an allowlist on both hosts.
+
+## Changes from 0.2.1 to 0.2.2
+
+0.2.2 replaced the per-agent tool *presentation mode* with a per-scope *executor*. Nearly every difference Fusion has
+to absorb lives in that one change, which is why they are listed together: getting one of them wrong is silent rather
+than loud — a role keeps a wider table than its ceiling, or a native check reports a result that never ran.
+
+| 0.2.1 | 0.2.2 | Fusion's handling |
+| --- | --- | --- |
+| `ctx.tools.presentAs('native' \| 'ptc')` | removed; the table comes from the selected executor's `describe()` | `installNativePresentation` selects the mode when `presentAs` exists, otherwise registers a `RestrictedExecutor` over `@deepseek-ai/dsh-tool-executor-native` whose `describe()` filters to the role ceiling |
+| (no executor concept) | `ctx.tools.setExecutor(executor)` | registered **once per Agent** and never released early; a second call throws `Only one tool executor may be registered in each scope`, and disposing it leaves the selection *unavailable* rather than restoring the deployment's |
+| `system-prompt/assemble` payload carried `tools` | the payload carries sections, contexts and variables only | the assemble listener returns early when `tools` is absent; the tool provider published from the composition builds the request table instead |
+| `ctx.tools.execute(ToolExecutionInput)` | `ctx.tools.execute(ToolBatchInput)` → `ToolBatchResult` | `executeSingleTool` builds the one-call raw batch on 0.2.2 (arguments as the model's JSON string) and unwraps by `callId` |
+| a nested call inherited `parent`/`rootCallId` from its enclosing call | no nested-dispatch concept: the call records itself as the root | `rootCallIdOf` answers the enclosing identity from the correlation Fusion records around dispatch, so approvals, effects and review receipts stay provable |
+| `agent/request` accepted a re-written `provider`/`model` | throws unless the proposal keeps the route fixed during step preparation | the frozen physical route is pinned at the running reservation and re-pinned after the virtual selection is recorded; `restoreNativeIntent` gives the user's own choice back on detach |
+| `drainChildren` / `drainContinuableChildren` | both removed; `startActivation` returns a receipt with `dispose()` | the receipt is retained per child on the plugin context and cancelled-then-released; `drainDescendants` is never used, because it permanently records the Lead as a closing subagent-tree root |
+| `SubagentActivationSpec` nested `request` | flattened to top-level fields | `requiresNestedActivationRequest` picks the shape from the contract, never from a version string |
+
+Two consequences are worth stating plainly, because they are what a reader will look for:
+
+- **On 0.2.2 Fusion must install its own executor.** `tools.restrict()` cannot stand in for the ceiling: a restriction
+  never applies to the viewing scope's own registrations, and the tools a role ceiling narrows are exactly that
+  (Fusion's own capabilities, plus a preset's `write`/`edit`). `describe()` is the only table-narrowing point.
+- **The role ceiling is read live, per `describe`.** 0.2.2 describes the table *before* `agent/pre-step` runs, so a
+  value cached at the refresh point would always lag one step behind a work-order or phase change made during the turn.
 
 ### Version declarations
 
 `engines.dsh` and every `@deepseek-ai/dsh*` peer use one range:
 
 ```text
->=0.2.1-rc.5 <0.3.0-0
+>=0.2.1-rc.5 <0.2.2-0 || >=0.2.2-rc.2 <0.3.0-0
 ```
 
 Two consumers read it differently, and both accept exactly the supported set:
@@ -139,8 +165,9 @@ Two consumers read it differently, and both accept exactly the supported set:
 - DSH's plugin gate evaluates requirements with `includePrerelease: true`, where a prerelease sorts below its own
   release. The upper bound `<0.3.0-0` is what keeps `0.3.0-rc.*` out; a plain `<0.3.0` would admit it.
 - `scripts/link-host.mjs` uses **plain** semver, where a prerelease only matches a comparator carrying a prerelease
-  on the same major.minor.patch. That is why the lower bound names `0.2.1-rc.5` explicitly: `>=0.2.1` would reject the
-  prerelease devkit the range exists to describe.
+  on the same major.minor.patch. That is why each branch names its floor explicitly (`0.2.1-rc.5`, `0.2.2-rc.2`):
+  `>=0.2.1` would reject the prerelease devkit it exists to describe, and no single span covers both releases because
+  a plain comparator cannot carry a prerelease from another minor.
 
 | Version | plain `satisfies` | `{ includePrerelease: true }` |
 | --- | --- | --- |
@@ -150,6 +177,11 @@ Two consumers read it differently, and both accept exactly the supported set:
 | `0.2.1-rc.5` | accept | accept |
 | `0.2.1-rc.6` | accept | accept |
 | `0.2.1` | accept | accept |
+| `0.2.2-rc.1` | **reject** | accept |
+| `0.2.2-rc.2` | accept | accept |
+| `0.2.2` | accept | accept |
+| `0.2.3-0` | reject | reject |
+| `0.2.3-rc.1` | reject | reject |
 | `0.3.0-0` | reject | reject |
 | `0.3.0-rc.1` | reject | reject |
 | `0.3.0` | reject | reject |
@@ -192,7 +224,8 @@ alternative span is gone.
    with `node scripts/link-host.mjs <harness>`. Pick the range carefully: DSH's gate uses `includePrerelease`, where a
    prerelease sorts below its own release, so a stale upper bound like `<0.3.0` still admits `0.3.0-rc.1` and silently
    passes — while `scripts/link-host.mjs` uses plain semver and rejects a prerelease unless a comparator carries one on
-   the same major.minor.patch, which is why the current range names `>=0.2.1-rc.5 <0.3.0-0`. Verify both consumers;
+   the same major.minor.patch. One plain span cannot cover two minor lines of prereleases, which is why the current
+   range is a union of per-branch floors. Verify both consumers;
    `node -e` with `semver.satisfies(v, range, { includePrerelease: true })` is enough.
 3. Read the release notes and run `dshx check` for compatibility rules; fix type errors (`pnpm typecheck`). Renames in
    the subagent seam are not caught by type checking when the old name is simply gone — grep `ctx.subagents` calls by

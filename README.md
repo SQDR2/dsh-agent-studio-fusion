@@ -14,7 +14,7 @@
 | 包名 | `@sqdr2/dsh-agent-studio-fusion` |
 | 插件 id | `dsh-agent-studio-fusion`（配置行、状态目录、日志标记都用它） |
 | 模型菜单里的线路 | `dsh-fusion`，显示为 **Fusion · 组合名称** |
-| 运行要求 | DSH `>=0.2.1-rc.5 <0.3.0-0`，Node 24+ |
+| 运行要求 | DSH `>=0.2.1-rc.5 <0.2.2-0 || >=0.2.2-rc.2 <0.3.0-0`，Node 24+ |
 
 ## 它解决什么
 
@@ -141,7 +141,7 @@ Lead 等 Sidekick 干活时可能要等好几分钟，模型的输入缓存一�
 
 | | |
 |---|---|
-| DSH | `>=0.2.1-rc.5 <0.3.0-0`，桌面版与 Web 版都支持；0.2.0 系列不再支持 |
+| DSH | `>=0.2.1-rc.5 <0.2.2-0 || >=0.2.2-rc.2 <0.3.0-0`，桌面版与 Web 版都支持；0.2.0 系列不再支持 |
 | Node | 24 或更新（`engines.node` 为 `>=24.0.0`） |
 | 模型 | DSH 自带线路、[dsh-oauth-login](https://github.com/aa2246740/dsh-oauth-login) 与 dsh-antigravity-oauth 的订阅线路、内建 Antigravity 线路；其它第三方模型插件未测试 |
 | macOS | 已验证（Seatbelt 沙盒） |

@@ -3,7 +3,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { hasStartActivation, requireSubagentMethod } from '../host/subagent-seam.js'
+import { hasStartActivation, requireSubagentMethod, requiresNestedActivationRequest } from '../host/subagent-seam.js'
 import type { PairProfile } from '../contracts.js'
 import { digestOf } from '../digest.js'
 import type { SqliteFusionStore } from '../task/sqlite-store.js'
@@ -30,6 +30,13 @@ export interface NaiveDelegation {
 }
 
 interface NaiveResult { readonly stopReason: string; readonly output: readonly { readonly type: string; readonly text?: string }[] }
+/** The task options 0.2.2 flattened out of `request`; 0.2.1 still nests them. */
+interface NaiveTaskOptions {
+  readonly parent: Agent
+  readonly prompt: readonly { readonly type: 'text'; readonly text: string }[]
+  readonly agentOptions: object
+  readonly maxDepth: number
+}
 interface NaiveChild {
   readonly childId: SessionId
   readonly result: Promise<NaiveResult>
@@ -43,14 +50,14 @@ interface NaiveSubagents {
     readonly provider: string
     readonly label: string
     readonly delivery: 'caller'
-    readonly request: {
-      readonly parent: Agent
-      readonly prompt: readonly { readonly type: 'text'; readonly text: string }[]
-      readonly agentOptions: object
-      readonly maxDepth: number
-    }
+    readonly request: NaiveTaskOptions
     readonly signal: AbortSignal
-  }): Promise<{ readonly childId: SessionId; readonly result: Promise<NaiveResult>; dispose(): Promise<void> }>
+  } | ({
+    readonly provider: string
+    readonly label: string
+    readonly delivery: 'caller'
+    readonly signal: AbortSignal
+  } & NaiveTaskOptions)): Promise<{ readonly childId: SessionId; readonly result: Promise<NaiveResult>; dispose(): Promise<void> }>
   start?(provider: string, request: {
     readonly parent: Agent
     readonly label: string
@@ -155,10 +162,12 @@ export class NaiveCoordinator {
       // one-shot `start`, with persona and toolFilter still on the request.
       const start = requireSubagentMethod(subagents, 'startActivation', 'start')
       if (start === 'startActivation') {
-        const activation = await subagents.startActivation!({
-          provider: 'spawn', label: `Naive Worker ${row.ordinal}`, delivery: 'caller',
-          request: { parent: this.parent, prompt, agentOptions, maxDepth }, signal: runSignal,
-        })
+        // 0.2.2 flattened these task options onto the spec; the same marker that
+        // removed the drains reports the nested 0.2.1 shape.
+        const task: NaiveTaskOptions = { parent: this.parent, prompt, agentOptions, maxDepth }
+        const activation = await subagents.startActivation!(requiresNestedActivationRequest(subagents)
+          ? { provider: 'spawn', label: `Naive Worker ${row.ordinal}`, delivery: 'caller', request: task, signal: runSignal }
+          : { provider: 'spawn', label: `Naive Worker ${row.ordinal}`, delivery: 'caller', ...task, signal: runSignal })
         started = { childId: activation.childId, result: activation.result, dispose: () => activation.dispose(), readChild: 'registry' }
       } else {
         const run = await subagents.start!('spawn', {

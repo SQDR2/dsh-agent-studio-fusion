@@ -9,6 +9,7 @@ import type { SqliteFusionStore } from '../task/sqlite-store.js'
 import { digestOf } from '../digest.js'
 import type { SessionBinding } from './bindings.js'
 import { isShellTool } from './shell.js'
+import { rootCallIdOf } from './tool-seam.js'
 
 interface EffectRecord {
   schemaVersion: 1
@@ -78,7 +79,7 @@ export class NativeEffects {
       let row: EffectRecord
       try {
         row = { schemaVersion: 1, taskId, agentId: exec.agent!.id, role: owner.role,
-          callId: exec.callId, rootCallId: exec.rootCallId, toolName: exec.name, processId: process.pid,
+          callId: exec.callId, rootCallId: rootCallIdOf(exec), toolName: exec.name, processId: process.pid,
           startedAt: new Date().toISOString(), state: 'dispatch-started',
           arguments: this.store.putArtifact(taskId, Buffer.from(JSON.stringify({ tool: exec.name, arguments: exec.arguments })), 'application/vnd.dsh-fusion.native-effect+json') }
         this.store.writeDocument(id, 0, row)

@@ -2,7 +2,7 @@
 
 [English](INSTALL.md) · 产品介绍：[README.md](README.md)（中文）、[README.en.md](README.en.md)
 
-需要 **DeepSeek Harness `>=0.2.1-rc.5 <0.3.0-0`**，并需要 **Node 24 或更新版本**。其他版本不支持；0.2.0 系列已不再支持。
+需要 **DeepSeek Harness `>=0.2.1-rc.5 <0.2.2-0 || >=0.2.2-rc.2 <0.3.0-0`**，并需要 **Node 24 或更新版本**。其他版本不支持；0.2.0 系列已不再支持。
 
 > 包名 `@sqdr2/dsh-agent-studio-fusion`，插件 id 为 `dsh-agent-studio-fusion`。
 > 旧的 `dsh-fusion` 或 `dsh-model-fusion` 数据会在首次启动时自动迁移。

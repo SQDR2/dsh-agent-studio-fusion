@@ -12,7 +12,6 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import type { ToolExecutionResult } from '@deepseek-ai/dsh-tools'
 import type { AcpWorkerFacts } from './bridge.js'
 import type { AcpHost, AcpHostAgent } from './host.js'
 import type { AcpAgentProfile } from './types.js'
@@ -22,6 +21,8 @@ import process from 'node:process'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { AcpToolBridge, ACP_MCP_PATH } from './bridge.js'
 import { installAcpBridgeRoute } from './bridge-route.js'
+import { executeSingleTool } from '../tool-seam.js'
+import type { ScopedToolService } from '../tool-seam.js'
 import { AcpAdapter } from './adapter.js'
 import { ContextWindows } from './context-windows.js'
 import { PromptCapabilitiesCache } from './prompt-capabilities.js'
@@ -139,7 +140,9 @@ export function installAcp(ctx: Context, options: InstallAcpOptions): () => void
     agentOf: sessionId => agents()?.get(SessionId(sessionId)) as Agent | undefined,
     workerFacts: agent => options.coordinator()?.workerFacts(agent),
     schemasOf: agent => ctx.tools.schemas(agent),
-    execute: (input): Promise<ToolExecutionResult> => ctx.tools.execute(input),
+    // The bridge is written against one call; the seam picks the transport that this
+    // Host actually exposes (0.2.1 single input, 0.2.2 one-call raw batch).
+    execute: input => executeSingleTool(ctx.tools as unknown as ScopedToolService, input),
   }, {
     workerTools: options.workerTools,
     origin: () => hostOrigin(ctx),

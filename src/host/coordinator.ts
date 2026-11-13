@@ -327,6 +327,20 @@ export class FusionCoordinator {
   readonly #auxiliary = new NativeAuxiliaryRequests()
   readonly #dispose: (() => void)[] = []
   readonly #nestedChecks = new Map<string, { agent: Agent; parent: symbol }>()
+  /**
+   * Whether one call is a frozen acceptance check Fusion dispatched itself.
+   *
+   * 0.2.1 tags it with the enclosing call's opaque `parent` token, and that is what these
+   * gates compare. 0.2.2 dispatches through a raw batch, which carries no such token, so the
+   * call arrives looking exactly like a model-direct one. The registration is keyed by the
+   * exact call id Fusion generated, which only Fusion can produce, so identity of the call is
+   * the durable part of the proof and the token is the part that is version-dependent.
+   */
+  #isNestedCheck(exec: Readonly<ToolExecution>): boolean {
+    const nested = this.#nestedChecks.get(exec.callId)
+    if (nested === undefined || nested.agent !== exec.agent) return false
+    return nested.parent === exec.parent || exec.parent === undefined
+  }
   readonly #reads = new Map<string, number>()
   readonly #held = new Map<TaskId, LeaseRecord>()
   readonly #installErrors = new Map<string, string>()
@@ -730,6 +744,16 @@ export class FusionCoordinator {
     await agent.runMaintenance(async () => {
       this.selectBeforeAssembly(agent, resolved)
     })
+  }
+
+  /**
+   * Re-pin this Agent's frozen physical route after a caller recorded the virtual selection.
+   *
+   * 0.2.2 fixes the route at step preparation, so the physical selection has to be the newest
+   * one recorded before that read. A no-op while no Fusion scope is installed.
+   */
+  pinRoute(agent: Agent): void {
+    this.scopes.pinRoute(agent)
   }
 
   /** Only at idle selection or native running reservation, before prompt assembly. */
@@ -1352,8 +1376,7 @@ export class FusionCoordinator {
     }
     if (enforcedWorkflow(binding) && role === 'lead' && !isRead(exec) && !FUSION_TOOLS.has(exec.name)
       && (!adaptiveWorkflow(binding) || state.currentWorkOrder)) {
-      const nested = this.#nestedChecks.get(exec.callId)
-      const check = isShellTool(exec.name) && nested?.agent === exec.agent && nested.parent === exec.parent
+      const check = isShellTool(exec.name) && this.#isNestedCheck(exec)
       const takeover = state.currentWorkOrder && this.#runtime(binding.taskId).takeover
       if (!check && !takeover) return this.workflow.denyEffect(binding)
     }
@@ -1399,9 +1422,8 @@ export class FusionCoordinator {
         if (dir === undefined) return `Shell commands run inside the project root ${lease.workspaceId}; workdir ${JSON.stringify(args.workdir)} is outside it. Omit workdir or pass a directory inside the project.`
         try { if (dir) workspacePath(lease.workspaceId, dir) } catch (error) { return String(error) }
       }
-      const nested = this.#nestedChecks.get(exec.callId)
       if (role === 'lead' && state.intent === 'DELEGATE' && !this.#runtime(binding.taskId).takeover
-        && (!nested || nested.agent !== exec.agent || nested.parent !== exec.parent)) {
+        && !this.#isNestedCheck(exec)) {
         return 'Lead is reviewing; use the native acceptance checks or request takeover'
       }
     }
@@ -1487,8 +1509,7 @@ export class FusionCoordinator {
       return 'FUSION_LEAD_READ_ONLY: in this Fusion mode the Lead never writes. Send corrections to the same Sidekick with fusion_rework.'
     }
     if (isRead(exec) || FUSION_TOOLS.has(exec.name)) return false
-    const nested = this.#nestedChecks.get(exec.callId)
-    if (isShellTool(exec.name) && nested && nested.agent === exec.agent && nested.parent === exec.parent) return false
+    if (isShellTool(exec.name) && this.#isNestedCheck(exec)) return false
     if (isShellTool(exec.name) && (exec.arguments as { run_in_background?: unknown }).run_in_background === true) {
       this.workflow.denyEffect(binding)
       return 'FUSION_LEAD_READ_ONLY: the Lead runs only short foreground inspection commands. Test runs and long commands belong to the Sidekick: delegate them.'

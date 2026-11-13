@@ -1,5 +1,6 @@
+import type { ScopedToolService } from '../tool-seam.js';
 /** Minimal structural view of the DSH tool registry we need. */
-export interface ToolsServiceLike {
+export interface ToolsServiceLike extends ScopedToolService {
     /**
      * Visible tool schemas for one scope. `scope` is the viewing agent (its
      * `ctx` is the registration scope): omitting it yields the GLOBAL view only,
@@ -13,18 +14,6 @@ export interface ToolsServiceLike {
         description: string;
         parameters: Record<string, unknown>;
     }>;
-    execute(input: {
-        callId: string;
-        name: string;
-        arguments: unknown;
-        agent?: unknown;
-        /**
-         * Caller-owned cancellation, required by DSH's `ToolExecutionInput`. Tools
-         * read `exec.signal` before/while they settle, so a call without one throws
-         * `Cannot read properties of undefined (reading 'aborted')`.
-         */
-        signal: AbortSignal;
-    }): Promise<unknown>;
 }
 /** MCP tool names are [a-zA-Z0-9_-]; DSH names may contain dots. */
 export declare function toMcpName(name: string): string;

@@ -13,7 +13,7 @@ After installing, the left sidebar has a **Fusion** entry whose page holds three
 | Package | `@sqdr2/dsh-agent-studio-fusion` |
 | Plugin id | `dsh-agent-studio-fusion` (config row, state directory and log marker) |
 | Provider route | `dsh-fusion`, shown in the model menu as **Fusion · combo name** |
-| Requirements | DSH `>=0.2.1-rc.5 <0.3.0-0`, Node 24+ |
+| Requirements | DSH `>=0.2.1-rc.5 <0.2.2-0 || >=0.2.2-rc.2 <0.3.0-0`, Node 24+ |
 
 ## What it solves
 
@@ -140,7 +140,7 @@ While the Lead waits for the Sidekick, often for several minutes, the prompt cac
 
 | | |
 |---|---|
-| DSH | `>=0.2.1-rc.5 <0.3.0-0`, desktop app or Web; the 0.2.0 series is no longer supported |
+| DSH | `>=0.2.1-rc.5 <0.2.2-0 || >=0.2.2-rc.2 <0.3.0-0`, desktop app or Web; the 0.2.0 series is no longer supported |
 | Node | 24 or newer (`engines.node` is `>=24.0.0`) |
 | Models | Built-in DSH routes, the subscription routes of [dsh-oauth-login](https://github.com/aa2246740/dsh-oauth-login) and dsh-antigravity-oauth, and the built-in Antigravity route; other third-party model plugins are untested |
 | macOS | Verified (Seatbelt sandbox) |

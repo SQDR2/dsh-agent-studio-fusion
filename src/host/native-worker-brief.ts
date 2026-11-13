@@ -7,6 +7,7 @@ import { digestOf } from '../digest.js'
 import type { SqliteFusionStore } from '../task/sqlite-store.js'
 import { recentHandoffSuffix } from '../context/handoff.js'
 import { isFusionSourceKind } from '../message-source.js'
+import { rootCallIdOf } from './tool-seam.js'
 
 /** Durable Lead-authored refinements survive native compaction and request races. */
 export function workerBriefs(store: SqliteFusionStore, taskId: TaskId) {
@@ -105,7 +106,7 @@ export function workerToolBriefProblem(store: SqliteFusionStore, taskId: TaskId,
   transport?: string): string | undefined {
   const events = exec.agent?.session.snapshotEvents()
   const native = events?.findLast(event => event.type === 'assistant/message'
-    && event.data.message.content.some(block => block.type === 'tool-call' && block.id === exec.rootCallId))
+    && event.data.message.content.some(block => block.type === 'tool-call' && block.id === rootCallIdOf(exec)))
   const message = native ?? (transport === undefined ? undefined
     : events?.findLast(event => event.type === 'assistant/message'
       && event.data.message.content.some(block => block.type === 'tool-call' && block.name === transport)))

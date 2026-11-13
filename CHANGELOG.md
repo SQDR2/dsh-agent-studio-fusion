@@ -20,6 +20,44 @@ own tags and releases.
 Entry format: what changed, then what was actually validated. "Not claimed" lines mark what a release did *not* test —
 read them before assuming a platform is covered.
 
+## 1.0.2 — 2026-11-13
+
+### DeepSeek Assistant 0.2.2
+- **Fusion runs on DSH 0.2.2 again, and still on 0.2.1.** Upgrading the Host from 0.2.1-rc.5 to 0.2.2 aborted every
+  Fusion turn with `scope.tools.presentAs is not a function` (117 of 301 host-suite cases failed). 0.2.2 replaced the
+  per-agent *presentation mode* with a per-scope *executor*, and six further API changes followed from it. Each is now
+  absorbed behind a runtime contract probe rather than a version string:
+  - `presentAs()` → `setExecutor()`: Fusion registers a `RestrictedExecutor` over
+    `@deepseek-ai/dsh-tool-executor-native` whose `describe()` filters the table to the role ceiling. This is the only
+    point that can narrow a table on 0.2.2 — `tools.restrict()` never applies to the viewing scope's own
+    registrations, and the tools a role ceiling narrows are exactly that (Fusion's capabilities, a preset's
+    `write`/`edit`). The registration is **one per Agent and never released early**: a second `setExecutor` throws, and
+    disposing it leaves the selection *unavailable* rather than restoring the deployment's.
+  - `system-prompt/assemble` no longer carries `tools`, so the tool-table projection that 0.2.1 relied on is skipped
+    and the request table comes from the executor.
+  - `tools.execute()` takes a raw batch on 0.2.2; `executeSingleTool` builds the one-call batch and re-attaches the
+    batch-level deferred context, which a single-call caller would otherwise silently lose.
+  - A batch has no nested-dispatch concept, so a Fusion-dispatched acceptance check records itself as its own root.
+    `rootCallIdOf` answers the enclosing identity from a correlation Fusion keeps around dispatch, which is what
+    approvals, effects and review receipts key on.
+  - `agent/request` now rejects a proposal that changes the route fixed during step preparation. The frozen physical
+    route is pinned at the running reservation (and re-pinned after the virtual selection is recorded), and the user's
+    own choice is restored on detach rather than on every turn end.
+  - `drainChildren`/`drainContinuableChildren` are gone and `startActivation` returns a receipt. The receipt is retained
+    per child on the plugin context — not on one transport instance, so a coordinator replacement can still release its
+    predecessor's child — and released by cancelling first and awaiting quiescence. `drainDescendants` is never used: it
+    permanently records the Lead as a closing subagent-tree root, which would refuse every later delegation.
+- **The supported range is now a union, `>=0.2.1-rc.5 <0.2.2-0 || >=0.2.2-rc.2 <0.3.0-0`.** The previous
+  `>=0.2.1-rc.5 <0.3.0-0` passed DSH's own gate (which uses `includePrerelease`) but failed `scripts/link-host.mjs` and
+  the peer checks, because plain semver rejects a prerelease unless a comparator carries a prerelease on the same
+  major.minor.patch. A single span cannot cover two minor lines of prereleases.
+- Validated against both checkouts: the host suite is **300 passed / 1 skipped** on `0.2.2-rc.2` (was 42 passed / 258
+  failed before this release) and unchanged on `0.2.1-rc.5`, and the unit suite is 558 passed. Both branches of the new
+  seam are covered by `tests/tool-seam.spec.ts`, which pins the 0.2.1 shape, the 0.2.2 shape, the batch argument
+  encoding, the deferred-context re-attachment and the `rootCallIdOf` correlation.
+- Not claimed: `0.2.2-rc.1` is untested and deliberately outside the range — it is the only release where the receipt
+  contract exists without the flattened activation spec, and nothing here was validated against it.
+
 ## 1.0.1 — 2026-11-13
 
 ### ACP

@@ -196,6 +196,13 @@ export declare class FusionCoordinator {
      */
     acpWorkerFacts(agent: Agent): AcpWorkerFacts | undefined;
     select(agent: Agent, resolved?: ResolvedProfile): Promise<void>;
+    /**
+     * Re-pin this Agent's frozen physical route after a caller recorded the virtual selection.
+     *
+     * 0.2.2 fixes the route at step preparation, so the physical selection has to be the newest
+     * one recorded before that read. A no-op while no Fusion scope is installed.
+     */
+    pinRoute(agent: Agent): void;
     /** Only at idle selection or native running reservation, before prompt assembly. */
     selectBeforeAssembly(agent: Agent, resolved: ResolvedProfile): void;
     clear(agent: Agent): Promise<void>;

@@ -36,11 +36,16 @@ async function drainLeadChildren(ctx: Context, parent: Agent) {
   const subagents = ctx.subagents as {
     drainChildren?: (parent: Agent, childIds: readonly SessionId[]) => Promise<void>
     drainContinuableChildren?: (parent: Agent, childIds: readonly SessionId[]) => Promise<void>
+    drainDescendants?: (parents: readonly Agent[]) => Promise<void>
   }
   const ids = ctx.agents.list().filter(agent => agent.session.header.parentSession === parent.id).map(agent => agent.id)
   if (typeof subagents.drainChildren === 'function') await subagents.drainChildren(parent, ids)
   else if (typeof subagents.drainContinuableChildren === 'function') await subagents.drainContinuableChildren(parent, ids)
-  else throw new Error('Fusion supports DeepSeek Harness 0.2.0-rc.2 and 0.2.1-rc.2; this host has neither subagents.drainChildren nor subagents.drainContinuableChildren')
+  // 0.2.2 removed release-by-id. Fixture teardown disposes this Lead and its
+  // context immediately after, so closing the whole tree is the documented
+  // remaining path; no later delegation from this Lead can be poisoned.
+  else if (typeof subagents.drainDescendants === 'function') await subagents.drainDescendants([parent])
+  else throw new Error('Fusion supports DeepSeek Assistant 0.2.0-rc.2, 0.2.1-rc.2 and 0.2.2; this host has neither subagents.drainChildren nor subagents.drainContinuableChildren nor subagents.drainDescendants')
 }
 
 async function setup(script: ConstructorParameters<typeof MockAdapter>[0]) {
