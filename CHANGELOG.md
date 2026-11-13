@@ -35,6 +35,11 @@ read them before assuming a platform is covered.
   `isFusionSourceKind`, so context restored into a session started under an older name is still matched.
 - `docs/MIGRATION-AGY.md` and `docs/MIGRATION-ACP.md` now use the current row id in their copy-paste blocks; they had
   still named `- id: dsh-fusion` / `name: '@sqdr2/dsh-fusion'`, which the loader no longer matches.
+- **Publishing the new name needs staging.** A bypass-2FA granular token cannot create a name that does not exist yet: it
+  answers `E404 Not Found - PUT` (not 401), on npm 11 and 12 alike. The first release of a name is uploaded with
+  `npm stage publish` and approved in the browser with 2FA (`RELEASING.md`, `RELEASING.zh.md`). CI's `publish.yml` then
+  finds the version already on npm and exits successfully without publishing, so the tag run is a build-and-test gate,
+  not the publisher, until a trusted publisher is added for this name.
 
 ### Client
 - **The Fusion panel becomes the combined studio page**, titled `DSH Agent Studio With Fusion` (one constant,

@@ -37,11 +37,26 @@ Open the **Actions** tab and accept the "I understand my workflows, go ahead and
 ### 2. Add a trusted publisher on npm
 
 OIDC publishing is authorised per package, on the package's own settings page, which a name that has never been
-published does not have. So the very first release of a name can only be done by hand:
+published does not have. So the very first release of a name can only be done by hand.
 
-1. Publish once with a granular token that bypasses 2FA (`bypass_2fa: true`, `package: write` on the right scope).
-   A token without 2FA bypass is rejected with `E403 Two-factor authentication ... is required to publish packages`,
-   and a token scoped to `@sqdr2` cannot publish an unscoped name at all.
+**What actually shipped 1.0.0 (2026-11-13, including the traps):** publishing a *new* name directly with a bypass-2FA
+granular token returns `E404 Not Found - PUT` (not 401), and `npm@12` behaves the same. The first publish of a name has
+to be **staged** and then approved by a maintainer in the browser with 2FA:
+
+```sh
+npx npm@12 stage publish . --access public    # uploads as staged; this is what claims the name
+npx npm@12 stage list                         # take the stage-id; status goes validating → staged
+# then approve it in npmjs.com → avatar → Staged packages (interactive 2FA; a token cannot do this)
+npx npm@12 stage list                         # after approval the entry is gone and 1.0.0 is in the registry
+```
+
+The registry first holds a `0.0.0-stage` placeholder version; once the real version is approved `dist-tags.latest`
+points at it, so the placeholder can be ignored (upstream `@sqdr2/dsh-agy-worker` carries the same `0.0.0-stage`).
+Staging also needs `--registry https://registry.npmjs.org/`: this machine's `~/.npmrc` points at npmmirror, which has no
+`/-/stage` endpoint and answers `404 .../-/stage`.
+
+1. Use the staging path above (or a granular token with 2FA bypass, `bypass_2fa: true`, `package: write`, correct
+   scope) for that first publish. Without bypass it is rejected with `EOTP This operation requires a one-time password`.
 2. On **npmjs.com → the package → Settings → Trusted publishing**, add:
 
    | Field | Value |

@@ -31,11 +31,26 @@ workflow 会跳过 npm 上已存在的版本，所以同一个 tag 重跑是安�
 
 ### 2. 在 npm 上加信任配置
 
-OIDC 发布是按包授权的，配置在包自己的设置页上，而一个从未发布过的包名没有这个页面。所以某个包名的第一版只能手发：
+OIDC 发布是按包授权的，配置在包自己的设置页上，而一个从未发布过的包名没有这个页面。所以某个包名的第一版只能手发。
 
-1. 用一个勾了 2FA bypass 的 granular token 手动发一次（`bypass_2fa: true`，`package: write`，作用域要对）。
-   不勾 bypass 会被拒：`E403 Two-factor authentication ... is required to publish packages`；
-   而作用域是 `@sqdr2` 的 token 根本无法发布无 scope 的包名。
+**1.0.0 的实际首发路径（2026-11-13，踩过的坑都在这）：** 用 bypass-2FA 的 granular token 直接 `npm publish`
+会返回 `E404 Not Found - PUT`（不是 401），换成 `npm@12` 也一样；新包名的首次发布必须先 **staging**，再由维护者
+在网页上用 2FA 批准：
+
+```sh
+npx npm@12 stage publish . --access public    # 上传为 staged，包名此时才被占住
+npx npm@12 stage list                         # 拿到 stage-id，状态 validating → staged
+# 然后在 npmjs.com → 头像 → Staged packages 里批准（这一步必须交互式 2FA，token 做不到）
+npx npm@12 stage list                         # 批准后条目消失，registry 里出现 1.0.0
+```
+
+批准后 registry 里会先出现一个 `0.0.0-stage` 占位版本，正式版本发布后 `dist-tags.latest` 指向正式版本，
+占位版本可以忽略（上游 `@sqdr2/dsh-agy-worker` 也有同样的 `0.0.0-stage`）。另外注意 staging 走的是
+`--registry https://registry.npmjs.org/`：本机 `~/.npmrc` 的默认 registry 是 npmmirror，它没有 `/-/stage` 端点，
+不显式指定会报 `404 .../-/stage`。
+
+1. 用上面那条 staging 路径（或一个勾了 2FA bypass 的 granular token，`bypass_2fa: true`、`package: write`、
+   作用域要对）完成首次发布。不勾 bypass 会被拒：`EOTP This operation requires a one-time password`。
 2. 在 **npmjs.com → 该包 → Settings → Trusted publishing** 添加：
 
    | 字段 | 值 |
