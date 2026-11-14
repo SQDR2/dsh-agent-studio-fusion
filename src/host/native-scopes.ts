@@ -222,18 +222,18 @@ export class NativeFusionScopes {
       // the rewrite below.
       const selected = requiresSelectedRoute(requesting)
       if (selected) {
-        if (rest.provider !== route.provider || rest.model !== route.model) {
-          throw new Error(`Fusion route was not pinned before step preparation: this step uses "${rest.provider}/${rest.model}", the frozen route is "${route.provider}/${route.model}"`)
+        if (rest.provider !== route.provider || rest.model !== route.model
+          || _prior !== route.reasoningEffort) {
+          throw new Error(`Fusion route was not pinned before step preparation: this step uses "${rest.provider}/${rest.model}" (effort: ${_prior ?? 'default'}), the frozen route is "${route.provider}/${route.model}" (effort: ${route.reasoningEffort ?? 'default'})`)
         }
+      }
+      const controls = {
+        provider: route.provider,
+        model: route.model,
+        ...(route.reasoningEffort === undefined ? {} : { reasoningEffort: ReasoningEffortId(route.reasoningEffort) }),
       }
       if (entry.binding.profile.interactionMode === 'model-like') {
         const { maxTokens, ...native } = rest
-        const controls = {
-          // 0.2.2: the step's selection is already the physical route and its effort, so
-          // passing either back would be a change the loop rejects.
-          ...selected ? {} : { provider: route.provider, model: route.model,
-            ...(route.reasoningEffort === undefined ? {} : { reasoningEffort: ReasoningEffortId(route.reasoningEffort) }) },
-        }
         return { ...native, ...controls, ...(role === 'lead' && maxTokens !== undefined ? { maxTokens } : {}) }
       }
       const disclosed = this.callbacks.modelLimits
@@ -246,9 +246,7 @@ export class NativeFusionScopes {
       const maxTokens = disclosed
         ? requestOutputReservation(disclosed.contextWindow, requested, disclosed.defaultMaxTokens, disclosed.testedOutputCap, policy.reserveOutputTokens)
         : Math.min(requested ?? policy.reserveOutputTokens, policy.reserveOutputTokens)
-      return { ...rest, maxTokens,
-        ...selected ? {} : { provider: route.provider, model: route.model,
-          ...(route.reasoningEffort === undefined ? {} : { reasoningEffort: ReasoningEffortId(route.reasoningEffort) }) } }
+      return { ...rest, ...controls, maxTokens }
     }, { prepend: true }))
     entry.refreshTools()
     entry.dispose.push(...this.callbacks.installTools(scope, agent, entry.binding, role))
