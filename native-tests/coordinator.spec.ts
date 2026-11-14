@@ -108,6 +108,11 @@ async function setup(script: Script, workerScript?: Script, options: {
    * adapter still script-drives it: the fixture asserts the ceiling, not agy.
    */
   bridgeTransport?: boolean
+  /**
+   * After a bridge dispatch settles, also dispatch the transport's own replay of that step,
+   * the way the session's next native card does. Used to prove a replay is never refused.
+   */
+  bridgeReplayProbe?: boolean
 } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'fusion-coordinator-'))
   const workspace = join(root, 'project')
@@ -205,7 +210,15 @@ async function setup(script: Script, workerScript?: Script, options: {
       const result = await executeSingleTool(ctx.tools as unknown as ScopedToolService, {
         name: step.tool, callId: `agy-mcp-${++bridgeSeq}`,
         arguments: step.input ?? {}, signal: exec.signal, agent: exec.agent })
-      return result.content.map(block => block.type === 'text' ? block.text : '').join('')
+      const text = result.content.map(block => block.type === 'text' ? block.text : '').join('')
+      if (!options.bridgeReplayProbe) return text
+      // The very next dispatch this session receives is the same step replayed as a native
+      // card. Do it here, in the same tick and on the same Agent, so a gate that refuses
+      // replays is visible as the card's own result instead of only on a live run.
+      const replay = await executeSingleTool(ctx.tools as unknown as ScopedToolService, {
+        name: 'agy_tool', callId: `agy-mcp-replay-${++bridgeSeq}`,
+        arguments: { run: 'run-1', step: 1 }, signal: exec.signal, agent: exec.agent })
+      return text + '\nreplay: ' + replay.content.map(block => block.type === 'text' ? block.text : '').join('')
     } })
   const bridgeDispose = options.bridgeTransport ? ctx.tools.register(bridgeTool) : undefined
   if (bridgeDispose) cleanups.push(async () => { bridgeDispose() })
@@ -1449,6 +1462,42 @@ describe('bridge-route Worker', () => {
     expect(results).not.toContain('WORKER_TOOLS_UNREACHABLE')
     expect(coordinator.state(taskId), results).toMatchObject({ phase: 'COMPLETED', verification: 'verified' })
     expect(store.readDocument(`runtime:${taskId}`)?.value).not.toHaveProperty('workerUnreachable')
+  })
+
+  /**
+   * The step that submits the report is also the step the transport reports back, so the
+   * two dispatches are adjacent: the bridge's own call lands the report and arms the
+   * post-submit gate, and the replayed card that describes that same step is dispatched
+   * immediately afterwards. That card is presentation only — it re-runs nothing — but the
+   * gate refused it, which ended the Worker turn as `blocked` with no closing message.
+   * DSH then announced "declined the task" to the Lead although the report was persisted
+   * and its checks had passed (session-a1899929), and the Lead explained that phantom
+   * refusal to the user. The gate belongs to the Worker's NEXT request, not to a replay.
+   */
+  it('replays the transport step that reported the submission instead of refusing it', async () => {
+    const { ctx, parent, coordinator, store, taskId } = await setup([
+      delegate(), textResponse('Awaiting the review.'),
+    ], [edit(), toolCallResponse('bridged-submit', 'agy_tool', { run: 'run-1', step: 2, tool: 'fusion_submit_result',
+      input: { summary: 'Corrected add in calc.py.', status: 'completed', unresolved: [] } })],
+    { bridgeTransport: true, bridgeReplayProbe: true })
+    // The Worker's card lives in its own session, and settlement disposes that session, so
+    // record what it published while it was live.
+    const workerResults: unknown[] = []
+    cleanups.push(async () => stop())
+    const stop = ctx.on('session/event', (session, event) => {
+      if (session.header.parentSession === parent.id && event.type === 'tool/result') workerResults.push(event)
+    })
+    parent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Fix addition and verify it.' }] }))
+    await parent.whenIdle()
+    const results = JSON.stringify(workerResults)
+    expect(coordinator.state(taskId), results).toMatchObject({ phase: 'REVIEWING' })
+    expect(store.readDocument(`runtime:${taskId}`)?.value).toMatchObject({ submitted: { status: 'completed' } })
+    // The report landed, and the card describing that same step replayed its recorded output.
+    expect(results).toContain('replay: replayed bridge step')
+    expect(results).not.toContain('Worker report was submitted')
+    // The gate itself is untouched: it is the Worker's NEXT request that stops, which is what
+    // settles the Lead's delegation result.
+    expect(coordinator.state(taskId).phase).toBe('REVIEWING')
   })
 
   /**
@@ -4348,6 +4397,39 @@ describe('enforced-v3 role separation', () => {
     // The child is seeded with the Lead's read-only override, then given the user's mode before its first request.
     expect(seen.get(coordinator.state(taskId).acceptedChild!)?.at(-1)).toBe('workspace-write')
     expect(readFileSync(join(workspace, 'calc.py'), 'utf8')).toContain('a + b')
+  })
+
+  /**
+   * A completed task still owes the user its closing explanation, and that explanation may
+   * need one last read to be true. The gate refused every tool once the review was accepted —
+   * although the note on the access gate promises read-only tools stay usable — so the Lead
+   * had to answer "unverified" from memory about a fact one `Get-Item` would have settled
+   * (session-a1899929). Keep the running read-only ceiling: read tools, and a shell the role
+   * sandbox still confines. Close everything that could start or change work.
+   */
+  it('lets the completed Lead verify with read-only tools and closes everything else', async () => {
+    const { ctx, parent, coordinator, taskId, workspace } = await setup([delegateV3(), acceptV3(), textResponse('Verified.')], [edit(), report()], options)
+    parent.followup(createUserMessage({ source: { kind: 'user' },  content: [{ type: 'text', text: 'Correct addition.' }] }))
+    await parent.whenIdle()
+    expect(coordinator.state(taskId), JSON.stringify(toolResults(parent))).toMatchObject({ phase: 'COMPLETED' })
+    const dispatch = async (name: string, args: unknown, suffix: string) => {
+      const outcome = await executeSingleTool(ctx.tools as unknown as ScopedToolService, {
+        name, arguments: args, agent: parent, callId: `after-accept-${suffix}`, signal: new AbortController().signal,
+      })
+      return outcome.content.map(block => (block as { text?: string }).text ?? '').join('')
+    }
+    // One last read, and the read-only command that would have settled the live question.
+    expect(await dispatch('read', { file_path: 'calc.py' }, 'read')).toContain('a + b')
+    const inspected = await dispatch(shellTool, { command: 'ls calc.py', description: 'Confirm the file is still there' }, 'shell')
+    expect(inspected).toContain('calc.py')
+    expect(inspected).not.toContain('This task is completed')
+    // Everything that could start or change work stays closed.
+    expect(await dispatch('write', { file_path: 'note.txt', content: 'x' }, 'write')).toContain('This task is completed')
+    expect(await dispatch('fusion_delegate', {
+      block: true, goal: 'Correct addition', brief: 'Fix calc.py add and preserve the test.',
+      constraints: [], allowedPaths: ['calc.py'], checks: [],
+    }, 'delegate')).toContain('This task is completed')
+    expect(() => readFileSync(join(workspace, 'note.txt'))).toThrow()
   })
 
   it('refuses Lead writes, forged takeover and sandbox escalation, but runs a read-only command', async () => {

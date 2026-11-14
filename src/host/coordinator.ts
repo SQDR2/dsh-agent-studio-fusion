@@ -63,6 +63,7 @@ import { readNativeEvidence } from './native-evidence.js'
 import { isRouteTransportName, registeredRouteTransport, withRouteTransport } from './route-transport.js'
 import type { AcpWorkerFacts } from './acp/bridge.js'
 import { isRead, READ_TOOLS } from './read-tools.js'
+import { completedToolProblem, workerSubmittedProblem } from './task-gates.js'
 import { AUTHORITY_ACTIONS, workerAuthorityProblem } from './authority.js'
 
 const textOutput = { schema: { type: 'string' as const }, render: (_args: unknown, text: string) => [{ type: 'text' as const, text }] }
@@ -472,7 +473,13 @@ export class FusionCoordinator {
       // The lease governs Fusion's own Lead and Worker only. Another session in
       // the same directory is not made read-only by a Fusion writer.
       if (!owner) return undefined
-      try { this.scopes.assertReady(exec.agent) } catch (error) { return String(error) }
+      // A bridge route's transport only replays a step the route already ran, so this guard
+      // must not read it as the Worker's own next dispatch: `assertReady` answers with the
+      // post-submit refusal, which landed on the very card that reports the submission and
+      // ended the Worker turn as `blocked` (session-a1899929).
+      if (!this.#isTransportReplay(exec, owner.binding, owner.role)) {
+        try { this.scopes.assertReady(exec.agent) } catch (error) { return String(error) }
+      }
       const cwd = exec.agent.session.header.cwd
       return workspaceWriterDenial({
         fusionOwned: true,
@@ -830,7 +837,16 @@ export class FusionCoordinator {
     finally { agent.cancel({ kind: 'hook', reason }, { keepInbox: true }) }
   }
 
-  #accessBlocked(agent: Agent, binding: SessionBinding, role: Role): string | undefined {
+  /**
+   * @param replayed The dispatch is a bridge route's transport replaying a step that
+   * route already executed in its own loop, not a new request. It carries no authority
+   * of its own, so the post-submit gate must not refuse it: the step that submits the
+   * report is exactly the step the transport reports back, and refusing that card ended
+   * the Worker turn as `blocked`, which DSH announced to the Lead as "declined the task"
+   * although the report was persisted (session-a1899929). The Worker's NEXT request is
+   * still gated here, which is what makes the Lead's delegation result settle.
+   */
+  #accessBlocked(agent: Agent, binding: SessionBinding, role: Role, replayed = false): string | undefined {
     const unavailable = this.modelControl?.blocked(binding, role)
     if (unavailable) return unavailable
     if (this.#closing) return 'Fusion runtime is closing'
@@ -846,7 +862,8 @@ export class FusionCoordinator {
     }
     if (role === 'worker') {
       const runtime = this.#runtime(binding.taskId)
-      if (runtime.submitted) return 'Worker report was submitted; wait for Lead feedback'
+      const problem = workerSubmittedProblem(Boolean(runtime.submitted), replayed)
+      if (problem) return problem
     }
     return undefined
   }
@@ -1202,6 +1219,16 @@ export class FusionCoordinator {
   }
 
   /**
+   * Whether this dispatch is a bridge route's own transport replaying a step that route
+   * already executed in its own loop (`agy_tool` for Antigravity). Such a call is
+   * presentation, not a new request: it re-runs nothing and carries no authority, so no
+   * Fusion gate may read it as the Worker asking for more work.
+   */
+  #isTransportReplay(exec: Readonly<{ name: string }>, binding: SessionBinding, role: Role): boolean {
+    return isRouteTransportName(exec.name) && this.#routeTransport(binding, role) === exec.name
+  }
+
+  /**
    * Whether a text order's Worker route is told to stay read-only.
    *
    * A text order has no workspace by contract, but a bridge route (Antigravity's
@@ -1321,7 +1348,11 @@ export class FusionCoordinator {
 
   #toolBlocked(exec: Readonly<ToolExecution>, binding: SessionBinding, role: Role): string | undefined {
     if (!exec.agent) return 'Fusion tools require a native Agent'
-    const blocked = this.#accessBlocked(exec.agent, binding, role)
+    // A bridge route (Antigravity's agy) reports each step it ran inside its own loop through
+    // its transport (`agy_tool`), which only replays the recorded output. Resolve that once:
+    // the post-submit gate below must not refuse the very card that reports the submission.
+    const replayed = this.#isTransportReplay(exec, binding, role)
+    const blocked = this.#accessBlocked(exec.agent, binding, role, replayed)
     if (blocked) return blocked
     if (binding.profile.interactionMode === 'model-like' && !enforcedWorkflow(binding)) {
       const stalled = this.#readStreak(exec, role)
@@ -1333,7 +1364,20 @@ export class FusionCoordinator {
       const issue = this.effects.jobProblem(exec, binding.taskId)
       if (issue) return issue
     }
-    if (state.control.mode === 'completed') return 'This task is completed; begin a new task before using tools'
+    if (state.control.mode === 'completed') {
+      // A completed task still owes the user its closing explanation, and that explanation may
+      // need one last read to be true. Keep exactly what the running read-only Lead could do —
+      // read tools, and a shell the role sandbox still resolves read-only and confines, which
+      // `#separatedLeadGuard` then re-checks — and close everything that could start or change
+      // work. Refusing all of it made the Lead answer "unverified" from memory
+      // (session-a1899929), and contradicted the note on the gate above.
+      const problem = completedToolProblem({
+        role,
+        read: isRead(exec),
+        confinedShell: role === 'lead' && isShellTool(exec.name) && this.roleSandbox.leadShellProblem(exec) === undefined,
+      })
+      if (problem) return problem
+    }
     if (role === 'lead' && ['fusion_delegate', 'fusion_delegate_text', 'fusion_explore', 'fusion_rework', 'fusion_takeover'].includes(exec.name) && this.modelControl.waiting(binding, 'worker')
       // A Worker that stopped without its report, looped, or hit an unclassified error can be redirected by the
       // Lead with a new instruction (bounded); quota and credential stops still need the user.
@@ -1341,16 +1385,14 @@ export class FusionCoordinator {
       && !(exec.name !== 'fusion_takeover' && this.modelControl.leadRecover(binding, 'worker'))) {
       return 'Sidekick is unavailable; preserve its task and use the local Fusion controls to continue or replace its model. Do not retry delegation or take over automatically.'
     }
-    // A bridge route (Antigravity's agy) reports each step it ran inside its own
-    // loop through its transport (`agy_tool`), which only replays the recorded
-    // output. It carries no authority of its own: the real call was dispatched
-    // inside the bridge, where the agent-scope guard applied first. So it must
-    // not be refused as an unconfigured tool, counted as a read-only violation
-    // or a stale-brief action, or made to hold the write lease — every role and
-    // mode that reports back (a Lead delegating, a Worker exploring or
-    // implementing) needs it, and losing it silently degrades the turn to prose
-    // (WORKER_TOOLS_UNREACHABLE).
-    if (isRouteTransportName(exec.name) && this.#routeTransport(binding, role) === exec.name) return undefined
+    // A bridge route reports each step through its transport (`agy_tool`), which only
+    // replays the recorded output. It carries no authority of its own: the real call was
+    // dispatched inside the bridge, where the agent-scope guard applied first. So it must
+    // not be refused as an unconfigured tool, counted as a read-only violation or a
+    // stale-brief action, or made to hold the write lease — every role and mode that
+    // reports back (a Lead delegating, a Worker exploring or implementing) needs it, and
+    // losing it silently degrades the turn to prose (WORKER_TOOLS_UNREACHABLE).
+    if (replayed) return undefined
     if (role === 'worker' && !isRead(exec)) {
       const problem = workerToolBriefProblem(this.store, binding.taskId, exec, this.#runtime(binding.taskId).briefRevision ?? 0,
         this.#routeTransport(binding, role))
