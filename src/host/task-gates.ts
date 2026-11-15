@@ -102,6 +102,47 @@ export function dispatchAwaitsInspection(state: string, workerStopped: boolean):
 }
 
 /**
+ * What a dispatch may do while the task is paused or awaiting an inspection.
+ *
+ * The gate exists to stop effects: a command may still be running, or a task is deliberately
+ * paused. It never needed to stop the Lead from reading the conversation, the workspace or its
+ * own state — yet it refused the whole request, so the model never ran and the user got a turn
+ * that ended in four milliseconds with nothing in it (session-6fdb5c73). Read-only work is the
+ * one thing that cannot make a stopped task worse, and it is what the user expects: the Lead
+ * reads what is recorded, says what it sees, and asks before anything writes.
+ * @param input - the role asking, whether this dispatch only reads, and the gate's state.
+ */
+export function gatedDispatchProblem(input: {
+  readonly role: GateRole
+  readonly readOnly: boolean
+  readonly phase: string
+  readonly recovering: boolean
+}): string | undefined {
+  if (input.role === 'lead' && input.readOnly) return undefined
+  if (input.role !== 'lead') return `Fusion execution is gated: ${input.phase}`
+  const remedy = input.recovering
+    ? 'record the inspection with /fusion recover <inspection note>'
+    : 'continue with /fusion resume (or the Fusion panel)'
+  return `Fusion execution is gated: ${input.phase}. Reading, inspecting and answering still work; to delegate, write files or run effectful tools, ${remedy} first.`
+}
+
+/**
+ * Why a gated turn stops after it tried to start an effect.
+ *
+ * Admitting a gated Lead request is what lets it read and answer, but a model that keeps calling
+ * the refused delegation would keep asking for another step — measured as seven requests where the
+ * turn used to send none (native-tests, restored recovering task). One refusal is the answer to
+ * the question it asked; a second step has nothing left to do until the task runs again.
+ * @param input - whether the task waits on an inspection, which decides the remedy to name.
+ */
+export function gatedTurnStopped(input: { readonly recovering: boolean; readonly phase: string }): string {
+  const remedy = input.recovering
+    ? 'record the inspection with /fusion recover <inspection note>, then /fusion resume'
+    : '/fusion resume (or the Fusion panel) to continue'
+  return `Fusion execution is gated: ${input.phase}, and this turn already reached that limit. Nothing else will run until you ${remedy}. Answer the user with what was read; do not retry.`
+}
+
+/**
  * Whether a startup check should open a recovery gate it just disproved.
  *
  * The gate exists so that a Host exit never silently resumes work whose commands may still be
@@ -110,12 +151,15 @@ export function dispatchAwaitsInspection(state: string, workerStopped: boolean):
  * compaction, effect or handoff) was gated for a trace that no longer exists, and keeping it
  * refuses every request — a message, "continue", a route change — leaving only a note nobody can
  * write meaningfully (session-6fdb5c73). A real interruption sets `unfinished`, so it stays closed.
- * @param input - the gate's current state, whether anything is unfinished, and the task's mode.
+ * @param input - the gate's current state, whether anything is unfinished, the task's mode, and
+ *   whether the task stopped in the middle of a handoff (that pause is the Host saying a child may
+ *   still be live, so only an inspection may open it).
  */
 export function staleRecoveryGate(input: {
   readonly recovering: boolean
   readonly unfinished: boolean
   readonly mode: string
+  readonly handoffStop: boolean
 }): boolean {
-  return input.recovering && !input.unfinished && input.mode !== 'completed'
+  return input.recovering && !input.unfinished && input.mode !== 'completed' && !input.handoffStop
 }

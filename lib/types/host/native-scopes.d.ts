@@ -17,7 +17,7 @@ export interface FusionScopeCallbacks {
     beforeStep?(agent: Agent, binding: SessionBinding, role: Role): void;
     projectMessage?(agent: Agent, binding: SessionBinding, role: Role, message: UserMessage): UserMessage;
     /** All independent pause, budget, recovery and unknown-effect gates are checked here. */
-    canAccess?(agent: Agent, binding: SessionBinding, role: Role): string | undefined;
+    canAccess?(agent: Agent, binding: SessionBinding, role: Role, readOnly?: boolean): string | undefined;
     /** Shared gates plus limits that apply only to admitting a new generation. */
     prepareRequest?(agent: Agent, binding: SessionBinding, role: Role, signal: AbortSignal): Promise<void>;
     canRequest(agent: Agent, binding: SessionBinding, role: Role): string | undefined;
@@ -55,7 +55,7 @@ export declare class NativeFusionScopes {
         binding: SessionBinding;
         role: Role;
     } | undefined;
-    assertReady(agent: Agent): void;
+    assertReady(agent: Agent, readOnly?: boolean): void;
     install(agent: Agent, binding: SessionBinding, role: Role): void;
     /**
      * Re-pin a live scope's frozen route.

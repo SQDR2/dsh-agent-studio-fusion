@@ -25,7 +25,7 @@ export interface FusionScopeCallbacks {
   beforeStep?(agent: Agent, binding: SessionBinding, role: Role): void
   projectMessage?(agent: Agent, binding: SessionBinding, role: Role, message: UserMessage): UserMessage
   /** All independent pause, budget, recovery and unknown-effect gates are checked here. */
-  canAccess?(agent: Agent, binding: SessionBinding, role: Role): string | undefined
+  canAccess?(agent: Agent, binding: SessionBinding, role: Role, readOnly?: boolean): string | undefined
   /** Shared gates plus limits that apply only to admitting a new generation. */
   prepareRequest?(agent: Agent, binding: SessionBinding, role: Role, signal: AbortSignal): Promise<void>
   canRequest(agent: Agent, binding: SessionBinding, role: Role): string | undefined
@@ -78,10 +78,10 @@ export class NativeFusionScopes {
     return entry?.agent === agent ? { binding: entry.binding, role: entry.role } : undefined
   }
 
-  assertReady(agent: Agent): void {
+  assertReady(agent: Agent, readOnly = false): void {
     const entry = this.#entries.get(agent.id)
     if (!entry || entry.agent !== agent || !entry.ready) throw new Error('Fusion Agent scope is not ready; execution is blocked')
-    const reason = (this.callbacks.canAccess ?? this.callbacks.canRequest)(agent, entry.binding, entry.role)
+    const reason = (this.callbacks.canAccess ?? this.callbacks.canRequest)(agent, entry.binding, entry.role, readOnly)
     if (reason) throw new Error(reason)
   }
 
@@ -206,7 +206,9 @@ export class NativeFusionScopes {
       return { ...assembled, variables, tools: projected.tools }
     }, { prepend: true }))
     entry.dispose.push(scope.on('agent/request', async ({ agent: requesting, turn, step, signal }, next) => {
-      this.assertReady(requesting)
+      // A request is not an effect: a gated Lead keeps reading, inspecting and answering, while
+      // effectful tools stay closed in the coordinator's tool gate.
+      this.assertReady(requesting, role === 'lead')
       await this.callbacks.prepareRequest?.(requesting, entry.binding, role, signal)
       signal.throwIfAborted()
       const reason = this.callbacks.canRequest(requesting, entry.binding, role)

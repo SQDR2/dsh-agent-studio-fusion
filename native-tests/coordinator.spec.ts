@@ -2224,6 +2224,49 @@ describe('owned native background commands', () => {
   })
 })
 
+describe('a gated task still answers', () => {
+  /**
+   * An inspection gate has no panel control that lifts it. Refusing the whole turn gave neither an
+   * answer nor a way forward — the model never ran, so the turn ended in milliseconds with nothing
+   * in it (session-6fdb5c73). A turn the user starts after the gate reads what is recorded, answers,
+   * and stops at the first effect it asks for, so a model cannot turn the refusal into a retry loop.
+   */
+  it('lets an inspecting Lead read and answer while effectful tools stay closed', async () => {
+    const lead: Script = [delegate(false), textResponse('Working.')]
+    const { parent, coordinator, adapter, taskId } = await setup(lead, [edit(), report()], { files: true })
+    parent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Fix addition.' }] }))
+    await parent.whenIdle()
+    await waitForNative(() => expect(coordinator.state(taskId).acceptedChild).toBeDefined())
+    // The state a restart arms when the last Host left something to inspect.
+    coordinator.append(taskId, 'recovery/needed', { reason: 'scripted interruption' })
+    expect(coordinator.state(taskId).control.recovering).toBe(true)
+    const before = adapter.requests.length
+    lead.push(
+      toolCallResponse('read-again', 'read', { file_path: 'calc.py' }),
+      toolCallResponse('delegate-blocked', 'fusion_delegate', {
+        block: true, goal: 'Correct addition', brief: 'Fix calc.py add and preserve the test.',
+        constraints: [], allowedPaths: ['calc.py'],
+        checks: [{ id: 'addition', description: 'Existing addition test passes', command: py('python3 -B -m unittest -v test_calc'),
+          kind: 'test', parser: 'unittest', definitionPaths: ['test_calc.py'] }],
+      }),
+      textResponse('I can read; delegation waits for the inspection.'),
+    )
+    parent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'What does it hold?' }] }))
+    await parent.whenIdle()
+    const tail = parent.session.snapshotEvents().slice(-4).map(event => `${event.type} ${JSON.stringify(event.data).slice(0, 240)}`).join('\n')
+    // Two steps — read, then the refused delegation — and the third request is refused, so no
+    // retry storm follows the refusal.
+    expect(adapter.requests.length, tail).toBe(before + 2)
+    const results = toolResults(parent).slice(-3).map(result => JSON.stringify(result.message.content)).join('\n')
+    expect(results).toContain('return a - b')
+    expect(results).toContain('/fusion recover')
+    expect(results).toContain('execution is gated')
+    // Nothing effectful ran and the gate is still closed.
+    expect(coordinator.state(taskId).control.recovering).toBe(true)
+    expect(coordinator.state(taskId).currentWorkOrder?.mode).toBe('implement')
+  })
+})
+
 describe('Sidekick paths in the leased workspace', () => {
   // The lease holds the realpath; models write the session's spelling (macOS /tmp is /private/tmp, a symlinked checkout).
   it('accepts any spelling of the project root and its subdirectories, and refuses directories outside it', async () => {

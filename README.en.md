@@ -76,15 +76,20 @@ A task stops in one of three ways, and each continues differently:
 1. **A model pause** (quota, credentials, timeout, no progress): switch to a usable route, or just send
    another message; `/fusion resume` also works.
 2. **Interrupted work awaiting a check** (`control.recovering` is `true` in `/fusion status`): a Host
-   exit does **not** end the commands and child processes it started, so Fusion refuses requests until
-   a human confirms. Messages, "Continue" and route changes **do nothing** in this state; run:
-   ```
-   /fusion recover I checked: the commands and child processes have stopped
-   /fusion resume
-   ```
-   The note needs at least 12 characters; if unfinished commands are reported, add
-   `--effects-stopped` (meaning you stopped them). The check records timestamped evidence — a
-   workspace snapshot plus your note — for later inspection.
+   exit does **not** end the commands and child processes it started, so Fusion closes "effects". In
+   this state:
+
+   - **A message you send is still handled**: the Lead reads the record, the files and the state and
+     tells you what it sees and what it suggests. Delegation, file writes and commands are refused,
+     and the turn ends at the first such attempt — so it cannot retry in a loop and burn tokens.
+   - To go back to real work, record the inspection and resume:
+     ```
+     /fusion recover I checked: the commands and child processes have stopped
+     /fusion resume
+     ```
+     The note needs at least 12 characters; if unfinished commands are reported, add
+     `--effects-stopped` (meaning you stopped them). The check records timestamped evidence — a
+     workspace snapshot plus your note — for later inspection.
 3. **A completed task**: send the next message and Fusion starts a new task; the old record stays.
 
 > The startup check only arms the gate when it actually finds unfinished work (a lease, a prepared

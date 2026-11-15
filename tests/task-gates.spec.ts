@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { backgroundHandoffNeedsInspection, completedToolProblem, dispatchAwaitsInspection, staleRecoveryGate, workerSubmittedProblem } from '../src/host/task-gates.js'
+import { backgroundHandoffNeedsInspection, completedToolProblem, dispatchAwaitsInspection, gatedDispatchProblem, gatedTurnStopped, staleRecoveryGate, workerSubmittedProblem } from '../src/host/task-gates.js'
 
 /**
  * Two gate readings that each cost a whole turn when wrong (session-a1899929): one ended a
@@ -111,22 +111,69 @@ describe('queued Worker dispatch after a restart', () => {
   })
 })
 
+/**
+ * A stopped task has two halves: effects must not start, and the user must still get an answer.
+ * Refusing the whole turn gave neither — the model never ran, so the turn ended in milliseconds
+ * with no explanation (session-6fdb5c73). A turn that asks for an effect is answered once and then
+ * stops, so a model cannot turn the refusal into a retry loop.
+ */
+describe('a gated task still lets the Lead read', () => {
+  it('admits a read-only Lead dispatch while the task is paused or awaiting an inspection', () => {
+    for (const recovering of [true, false]) {
+      expect(gatedDispatchProblem({ role: 'lead', readOnly: true, phase: recovering ? 'RECOVERING' : 'PAUSED', recovering }))
+        .toBeUndefined()
+    }
+  })
+
+  it('refuses an effectful Lead dispatch and names the control that lifts it', () => {
+    const paused = gatedDispatchProblem({ role: 'lead', readOnly: false, phase: 'PAUSED', recovering: false })
+    expect(paused).toContain('PAUSED')
+    expect(paused).toContain('/fusion resume')
+    const recovering = gatedDispatchProblem({ role: 'lead', readOnly: false, phase: 'RECOVERING', recovering: true })
+    expect(recovering).toContain('/fusion recover')
+  })
+
+  it('still refuses every Sidekick dispatch', () => {
+    for (const readOnly of [true, false]) {
+      expect(gatedDispatchProblem({ role: 'worker', readOnly, phase: 'PAUSED', recovering: false }))
+        .toBe('Fusion execution is gated: PAUSED')
+    }
+  })
+
+  it('stops a gated turn after its one refused effect, naming the next step', () => {
+    const paused = gatedTurnStopped({ recovering: false, phase: 'PAUSED' })
+    expect(paused).toContain('already reached that limit')
+    expect(paused).toContain('/fusion resume')
+    expect(paused).toContain('do not retry')
+    expect(gatedTurnStopped({ recovering: true, phase: 'RECOVERING' })).toContain('/fusion recover')
+  })
+})
+
 describe('stale recovery gate', () => {
   it('opens a gate nothing is left behind', () => {
-    expect(staleRecoveryGate({ recovering: true, unfinished: false, mode: 'running' })).toBe(true)
-    expect(staleRecoveryGate({ recovering: true, unfinished: false, mode: 'paused' })).toBe(true)
+    expect(staleRecoveryGate({ recovering: true, unfinished: false, mode: 'running', handoffStop: false })).toBe(true)
+    expect(staleRecoveryGate({ recovering: true, unfinished: false, mode: 'paused', handoffStop: false })).toBe(true)
   })
 
   it('keeps a gate that still has work behind it', () => {
-    expect(staleRecoveryGate({ recovering: true, unfinished: true, mode: 'running' })).toBe(false)
+    expect(staleRecoveryGate({ recovering: true, unfinished: true, mode: 'running', handoffStop: false })).toBe(false)
+  })
+
+  /**
+   * A pause the Host recorded while a background handoff was live is the Host saying a child may
+   * still be running. Everything else may have settled since, but that is exactly the case an
+   * inspection exists for, so it never opens by itself.
+   */
+  it('keeps a gate the Host set while a handoff was live', () => {
+    expect(staleRecoveryGate({ recovering: true, unfinished: false, mode: 'paused', handoffStop: true })).toBe(false)
   })
 
   it('leaves an unarmed gate alone', () => {
-    expect(staleRecoveryGate({ recovering: false, unfinished: false, mode: 'running' })).toBe(false)
-    expect(staleRecoveryGate({ recovering: false, unfinished: true, mode: 'running' })).toBe(false)
+    expect(staleRecoveryGate({ recovering: false, unfinished: false, mode: 'running', handoffStop: false })).toBe(false)
+    expect(staleRecoveryGate({ recovering: false, unfinished: true, mode: 'running', handoffStop: false })).toBe(false)
   })
 
   it('does not touch a completed task', () => {
-    expect(staleRecoveryGate({ recovering: true, unfinished: false, mode: 'completed' })).toBe(false)
+    expect(staleRecoveryGate({ recovering: true, unfinished: false, mode: 'completed', handoffStop: false })).toBe(false)
   })
 })
