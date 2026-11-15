@@ -20,6 +20,48 @@ own tags and releases.
 Entry format: what changed, then what was actually validated. "Not claimed" lines mark what a release did *not* test —
 read them before assuming a platform is covered.
 
+## 1.1.0 — 2026-11-15
+
+### A stopped task no longer locks the conversation
+
+- **A gate that had nothing behind it opened itself.** The start-up check armed "interrupted work"
+  for any trace it found and then never let go. Two of those traces were bookkeeping, not work:
+  `runtime.background` (which only says the last handoff did not block the Lead's turn) and an
+  `accepted` outbox row (which stays forever after the Worker's turn ends). A session whose Sidekick
+  had stopped on a provider error was therefore gated on the next start, and from then on **every**
+  message ended in four milliseconds with nothing in it — `turn/end blocked`, the model never called
+  (session-6fdb5c73). Both traces now count only while the task could still have work, and a start
+  that finds nothing unfinished records what it checked and opens the gate itself. A real
+  interruption still sets it: a live lease, a prepared dispatch, an uncertain check, a pending
+  approval, an unfinished compaction, a recorded native effect, or a handoff the Host did not see
+  end. A pause the Host recorded *while* a handoff was live never opens by itself.
+- **An inspecting Lead answers instead of going dark.** While a task waits on human inspection,
+  a turn the user starts afterwards now runs in read-only mode: the Lead reads the ledger, the
+  files and a confined shell, and says what it sees. Delegation, writes, submission and commands
+  stay refused, and the **first** such refusal ends the turn, so a model cannot turn the refusal
+  into a retry loop (measured: seven requests where the turn used to send none). A deliberate pause
+  keeps its old contract — the Fusion panel and `/fusion resume` are the way forward, and a turn
+  that was already running when the gate armed still stops.
+- **The blocked-turn notice names the command that works.** It used to recommend the recovery
+  panel's "Continue once", which that panel disables in exactly this state, and "send another
+  message", which hits the same gate. It now names `/fusion recover <inspection note>` (with
+  `--effects-stopped` when commands are unfinished) and `/fusion resume`, and says plainly which
+  actions do nothing until then.
+- **`README` gained a "Commands and states" section** (both languages): the `/fusion` command table,
+  and the three ways a task stops — model pause, interrupted work awaiting a check, completed — with
+  what continues each one. Last release documented installation and the task loop but never the
+  commands, so a stopped task looked like a broken one.
+
+Validated: unit suite 683 passed / 1 skipped; host suite 286 passed / 9 skipped / 9 failed against the
+pinned `0.2.1-rc.2` checkout, where the nine are the PowerShell-7-dependent cases that fail
+identically on the unmodified source (this machine has only Windows PowerShell 5.1). The new native
+test drives a recovering task: the read executes and its content reaches the transcript, the
+delegation is refused naming `/fusion recover`, the gate stays closed, and the turn stops after
+exactly two requests. Two further host-suite cases that were already failing on `main` are fixed
+here: the start-up check opening a gate the Host had set mid-handoff, and `gates replacement during a
+background rework`. Not claimed: the read-only turn was not exercised against a live Antigravity
+route.
+
 ## 1.0.2 — 2026-11-13
 
 ### DeepSeek Assistant 0.2.2
