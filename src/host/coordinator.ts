@@ -63,7 +63,7 @@ import { readNativeEvidence } from './native-evidence.js'
 import { isRouteTransportName, registeredRouteTransport, withRouteTransport } from './route-transport.js'
 import type { AcpWorkerFacts } from './acp/bridge.js'
 import { isRead, READ_TOOLS } from './read-tools.js'
-import { backgroundHandoffNeedsInspection, completedToolProblem, workerSubmittedProblem } from './task-gates.js'
+import { backgroundHandoffNeedsInspection, completedToolProblem, staleRecoveryGate, workerSubmittedProblem } from './task-gates.js'
 import { AUTHORITY_ACTIONS, workerAuthorityProblem } from './authority.js'
 
 const textOutput = { schema: { type: 'string' as const }, render: (_args: unknown, text: string) => [{ type: 'text' as const, text }] }
@@ -658,15 +658,54 @@ export class FusionCoordinator {
         state.control,
         this.modelControl.waiting(binding, 'worker') !== undefined,
       )
-      if ((state.lease || pendingDispatch || uncertainCheck || interruptedCompaction || interruptedApproval || interruptedEffect || uncertainBrief || detachedWorker || state.pendingApprovalIds.length) && state.control.mode !== 'completed' && !state.control.recovering) {
+      const unfinished = Boolean(state.lease || pendingDispatch || uncertainCheck || interruptedCompaction
+        || interruptedApproval || interruptedEffect || uncertainBrief || detachedWorker || state.pendingApprovalIds.length)
+      if (unfinished && state.control.mode !== 'completed' && !state.control.recovering) {
         this.append(binding.taskId, 'recovery/needed', { reason: 'Host runtime was replaced with a recorded writer, pending dispatch/approval, uncertain check, unfinished compaction or a runtime it did not start' })
+      } else if (staleRecoveryGate({ recovering: state.control.recovering, unfinished, mode: state.control.mode })) {
+        // The gate is armed but this Host found nothing left to inspect. Keeping it would refuse
+        // every request — a message, "continue", a route change — with no way forward except a
+        // note nobody can write meaningfully, which is exactly how session-6fdb5c73 died. Record
+        // the check this Host just performed and open the gate; a real interruption stays closed
+        // above, because it sets `unfinished`.
+        this.#healStaleRecovery(binding, state)
       }
     }
     for (const agent of ctx.agents.list()) this.#attachKnown(agent)
   }
 
-  state(id: TaskId): TaskState {
-    const state = this.store.load(id)
+  /**
+   * Open a gate that this Host's own startup check just disproved.
+   *
+   * `reconcile()` is the human command, and it stays human: it attests that interrupted
+   * commands and child processes were stopped. This is the narrower case where there is nothing
+   * to attest — no lease, no prepared dispatch, no uncertain check, no pending approval, no
+   * unfinished compaction or native effect, no recorded handoff to inspect. The evidence written
+   * here says exactly that and nothing more, so the audit trail still explains why the gate
+   * opened. Never throws: a failed heal leaves the gate closed, which is the safe direction.
+   */
+  #healStaleRecovery(binding: SessionBinding, state: TaskState): void {
+    try {
+      const runtime = this.store.readDocument(`runtime:${binding.taskId}`)?.value as RuntimeRecord | undefined
+      const evidence = this.store.putArtifact(binding.taskId, Buffer.from(JSON.stringify({
+        schemaVersion: 1,
+        kind: 'host-startup-inspection',
+        note: 'No unfinished native work was found at startup: no live lease, prepared dispatch, uncertain check, pending approval, unfinished compaction, unfinished native effect or recorded handoff remained to inspect.',
+        phase: state.phase,
+        mode: state.control.mode,
+        at: new Date().toISOString(),
+      })), 'application/json')
+      const snapshot = runtime?.root
+        ? (() => { try { return snapshotWorkspace(runtime.root).id } catch { return SnapshotId(`startup:${randomUUID()}`) } })()
+        : SnapshotId(`startup:${randomUUID()}`)
+      this.append(binding.taskId, 'recovery/reconciled', { snapshot, evidenceRef: evidence.id })
+      this.ctx.logger.info(`[dsh-fusion] opened a stale recovery gate on ${binding.taskId}: nothing was left to inspect (evidence ${evidence.id})`)
+    } catch (error) {
+      this.ctx.logger.warn(`[dsh-fusion] stale recovery check failed for ${binding.taskId}: ${String(error)}`)
+    }
+  }
+
+  state(id: TaskId): TaskState {    const state = this.store.load(id)
     if (!state) throw new Error('Fusion task is missing; reconcile durable state')
     return state
   }

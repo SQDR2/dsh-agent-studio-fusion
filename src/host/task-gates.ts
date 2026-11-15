@@ -84,3 +84,22 @@ export function backgroundHandoffNeedsInspection(
 ): boolean {
   return runtime?.background === true && control.mode === 'running' && !runtime.submitted && !workerStopped
 }
+
+/**
+ * Whether a startup check should open a recovery gate it just disproved.
+ *
+ * The gate exists so that a Host exit never silently resumes work whose commands may still be
+ * running — the user has to attest to what they saw. But it must also not outlive its reason:
+ * a task that comes back with nothing unfinished (no lease, dispatch, check, approval,
+ * compaction, effect or handoff) was gated for a trace that no longer exists, and keeping it
+ * refuses every request — a message, "continue", a route change — leaving only a note nobody can
+ * write meaningfully (session-6fdb5c73). A real interruption sets `unfinished`, so it stays closed.
+ * @param input - the gate's current state, whether anything is unfinished, and the task's mode.
+ */
+export function staleRecoveryGate(input: {
+  readonly recovering: boolean
+  readonly unfinished: boolean
+  readonly mode: string
+}): boolean {
+  return input.recovering && !input.unfinished && input.mode !== 'completed'
+}

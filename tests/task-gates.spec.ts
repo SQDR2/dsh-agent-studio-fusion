@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { backgroundHandoffNeedsInspection, completedToolProblem, workerSubmittedProblem } from '../src/host/task-gates.js'
+import { backgroundHandoffNeedsInspection, completedToolProblem, staleRecoveryGate, workerSubmittedProblem } from '../src/host/task-gates.js'
 
 /**
  * Two gate readings that each cost a whole turn when wrong (session-a1899929): one ended a
@@ -76,5 +76,30 @@ describe('boot-time background handoff', () => {
   it('ignores a task that never delegated in the background', () => {
     expect(backgroundHandoffNeedsInspection(undefined, { mode: 'running' }, false)).toBe(false)
     expect(backgroundHandoffNeedsInspection({ background: false }, { mode: 'running' }, false)).toBe(false)
+  })
+})
+
+/**
+ * A gate that outlives its reason refuses every request with no way forward except a note nobody
+ * can write meaningfully (session-6fdb5c73), so a startup check that finds nothing unfinished
+ * opens it again — while a genuine interruption keeps it closed.
+ */
+describe('stale recovery gate', () => {
+  it('opens a gate nothing is left behind', () => {
+    expect(staleRecoveryGate({ recovering: true, unfinished: false, mode: 'running' })).toBe(true)
+    expect(staleRecoveryGate({ recovering: true, unfinished: false, mode: 'paused' })).toBe(true)
+  })
+
+  it('keeps a gate that still has work behind it', () => {
+    expect(staleRecoveryGate({ recovering: true, unfinished: true, mode: 'running' })).toBe(false)
+  })
+
+  it('leaves an unarmed gate alone', () => {
+    expect(staleRecoveryGate({ recovering: false, unfinished: false, mode: 'running' })).toBe(false)
+    expect(staleRecoveryGate({ recovering: false, unfinished: true, mode: 'running' })).toBe(false)
+  })
+
+  it('does not touch a completed task', () => {
+    expect(staleRecoveryGate({ recovering: true, unfinished: false, mode: 'completed' })).toBe(false)
   })
 })
