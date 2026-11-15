@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { backgroundHandoffNeedsInspection, completedToolProblem, staleRecoveryGate, workerSubmittedProblem } from '../src/host/task-gates.js'
+import { backgroundHandoffNeedsInspection, completedToolProblem, dispatchAwaitsInspection, staleRecoveryGate, workerSubmittedProblem } from '../src/host/task-gates.js'
 
 /**
  * Two gate readings that each cost a whole turn when wrong (session-a1899929): one ended a
@@ -84,6 +84,33 @@ describe('boot-time background handoff', () => {
  * can write meaningfully (session-6fdb5c73), so a startup check that finds nothing unfinished
  * opens it again — while a genuine interruption keeps it closed.
  */
+/**
+ * A leftover outbox row described a handoff, not an effect. Once the child took the brief and its
+ * stop is recorded, nothing is queued any more — reading it as unfinished kept a whole conversation
+ * locked (session-6fdb5c73).
+ */
+describe('queued Worker dispatch after a restart', () => {
+  it('keeps a dispatch that never reached the child', () => {
+    expect(dispatchAwaitsInspection('prepared', false)).toBe(true)
+    expect(dispatchAwaitsInspection('prepared', true)).toBe(true)
+    expect(dispatchAwaitsInspection('dispatched', true)).toBe(true)
+  })
+
+  it('keeps an accepted dispatch while the Worker could still be running', () => {
+    expect(dispatchAwaitsInspection('accepted', false)).toBe(true)
+  })
+
+  it('drops an accepted dispatch once the Worker stop is recorded', () => {
+    expect(dispatchAwaitsInspection('accepted', true)).toBe(false)
+  })
+
+  it('ignores settled states', () => {
+    for (const state of ['settled', 'rejected', 'cancelled']) {
+      expect(dispatchAwaitsInspection(state, false)).toBe(false)
+    }
+  })
+})
+
 describe('stale recovery gate', () => {
   it('opens a gate nothing is left behind', () => {
     expect(staleRecoveryGate({ recovering: true, unfinished: false, mode: 'running' })).toBe(true)

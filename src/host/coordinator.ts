@@ -63,7 +63,7 @@ import { readNativeEvidence } from './native-evidence.js'
 import { isRouteTransportName, registeredRouteTransport, withRouteTransport } from './route-transport.js'
 import type { AcpWorkerFacts } from './acp/bridge.js'
 import { isRead, READ_TOOLS } from './read-tools.js'
-import { backgroundHandoffNeedsInspection, completedToolProblem, staleRecoveryGate, workerSubmittedProblem } from './task-gates.js'
+import { backgroundHandoffNeedsInspection, completedToolProblem, dispatchAwaitsInspection, staleRecoveryGate, workerSubmittedProblem } from './task-gates.js'
 import { AUTHORITY_ACTIONS, workerAuthorityProblem } from './authority.js'
 
 const textOutput = { schema: { type: 'string' as const }, render: (_args: unknown, text: string) => [{ type: 'text' as const, text }] }
@@ -630,8 +630,12 @@ export class FusionCoordinator {
     // no old prepared outbox is blindly dispatched again.
     for (const binding of this.bindings.selected()) {
       const state = this.state(binding.taskId)
+      // A recorded Worker stop is the Host's own note that the handoff ended; it decides two of
+      // the traces below (a still-queued dispatch and a `background` flag), because both describe
+      // a handoff rather than an effect.
+      const workerStopped = this.modelControl.waiting(binding, 'worker') !== undefined
       const pendingDispatch = this.store.outbox(binding.taskId).some(row => row.kind === 'native-worker'
-        && ['prepared', 'dispatched', 'accepted'].includes(row.state))
+        && dispatchAwaitsInspection(row.state, workerStopped))
       const uncertainCheck = this.store.listDocumentIds(`check-invocation:${binding.taskId}:`).some(id => {
         const row = this.store.readDocument(id)?.value as { evidence?: { state?: string } } | undefined
         return row?.evidence?.state === 'started' || row?.evidence?.state === 'outcome-unknown'
@@ -656,7 +660,7 @@ export class FusionCoordinator {
       const detachedWorker = backgroundHandoffNeedsInspection(
         this.store.readDocument(`runtime:${binding.taskId}`)?.value as RuntimeRecord | undefined,
         state.control,
-        this.modelControl.waiting(binding, 'worker') !== undefined,
+        workerStopped,
       )
       const unfinished = Boolean(state.lease || pendingDispatch || uncertainCheck || interruptedCompaction
         || interruptedApproval || interruptedEffect || uncertainBrief || detachedWorker || state.pendingApprovalIds.length)

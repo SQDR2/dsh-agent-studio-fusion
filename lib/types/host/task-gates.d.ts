@@ -74,6 +74,18 @@ export declare function backgroundHandoffNeedsInspection(runtime: {
     readonly mode: string;
 }, workerStopped: boolean): boolean;
 /**
+ * Whether a queued Worker dispatch is still something to inspect after a restart.
+ *
+ * `prepared` never reached the child and `dispatched` may be in flight, so both stay unfinished.
+ * `accepted` means the child took the brief: the handoff is no longer queued on this Host, and if
+ * the Worker's stop is recorded the child turn has ended — its effects, if it started any, are
+ * recorded separately. Treating that row as unfinished kept a gate armed on a task whose Sidekick
+ * had already failed, so the row outlived the work it described (session-6fdb5c73).
+ * @param state - the outbox row state.
+ * @param workerStopped - a model-control wait is recorded for this task's Worker.
+ */
+export declare function dispatchAwaitsInspection(state: string, workerStopped: boolean): boolean;
+/**
  * Whether a startup check should open a recovery gate it just disproved.
  *
  * The gate exists so that a Host exit never silently resumes work whose commands may still be
