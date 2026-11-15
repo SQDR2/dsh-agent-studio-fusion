@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { completedToolProblem, workerSubmittedProblem } from '../src/host/task-gates.js'
+import { backgroundHandoffNeedsInspection, completedToolProblem, workerSubmittedProblem } from '../src/host/task-gates.js'
 
 /**
  * Two gate readings that each cost a whole turn when wrong (session-a1899929): one ended a
@@ -45,5 +45,36 @@ describe('completed-task gate', () => {
           .toBe('This task is completed; begin a new task before using tools')
       }
     }
+  })
+})
+
+describe('boot-time background handoff', () => {
+  it('inspects a task that was running a non-blocking handoff when the Host went away', () => {
+    expect(backgroundHandoffNeedsInspection({ background: true }, { mode: 'running' }, false)).toBe(true)
+  })
+
+  /**
+   * A recorded Worker stop is the Host's own note that the handoff ended. Treating the flag as
+   * live work anyway armed the reconciliation gate on a task whose Sidekick had stopped on a
+   * provider error and whose effects were all settled, and every later message the user typed
+   * ended before reaching the model (session-6fdb5c73).
+   */
+  it('leaves a task alone once the Worker was recorded as stopped', () => {
+    expect(backgroundHandoffNeedsInspection({ background: true }, { mode: 'running' }, true)).toBe(false)
+  })
+
+  it('leaves a task that was already paused alone', () => {
+    for (const mode of ['paused', 'completed', 'cancelled', 'stop-requested']) {
+      expect(backgroundHandoffNeedsInspection({ background: true }, { mode }, false)).toBe(false)
+    }
+  })
+
+  it('leaves a task alone once its Worker handed in a report', () => {
+    expect(backgroundHandoffNeedsInspection({ background: true, submitted: { status: 'completed' } }, { mode: 'running' }, false)).toBe(false)
+  })
+
+  it('ignores a task that never delegated in the background', () => {
+    expect(backgroundHandoffNeedsInspection(undefined, { mode: 'running' }, false)).toBe(false)
+    expect(backgroundHandoffNeedsInspection({ background: false }, { mode: 'running' }, false)).toBe(false)
   })
 })

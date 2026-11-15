@@ -63,7 +63,7 @@ import { readNativeEvidence } from './native-evidence.js'
 import { isRouteTransportName, registeredRouteTransport, withRouteTransport } from './route-transport.js'
 import type { AcpWorkerFacts } from './acp/bridge.js'
 import { isRead, READ_TOOLS } from './read-tools.js'
-import { completedToolProblem, workerSubmittedProblem } from './task-gates.js'
+import { backgroundHandoffNeedsInspection, completedToolProblem, workerSubmittedProblem } from './task-gates.js'
 import { AUTHORITY_ACTIONS, workerAuthorityProblem } from './authority.js'
 
 const textOutput = { schema: { type: 'string' as const }, render: (_args: unknown, text: string) => [{ type: 'text' as const, text }] }
@@ -647,7 +647,17 @@ export class FusionCoordinator {
         || this.effects.strandedRetained(binding.taskId).length > 0
       const uncertainBrief = this.store.listDocumentIds(`worker-delivery:${binding.taskId}:`).some(id =>
         (this.store.readDocument(id)?.value as { state?: string } | undefined)?.state === 'prepared')
-      const detachedWorker = (this.store.readDocument(`runtime:${binding.taskId}`)?.value as RuntimeRecord | undefined)?.background
+      // `background` only says the last handoff did not block the Lead's turn. It is evidence
+      // of live work only while the task could still have some: still running, no report in,
+      // and no Worker stop recorded for this task. Reading it as evidence otherwise armed this
+      // gate on a task whose Sidekick had already stopped on a provider error, and then every
+      // later message ended before reaching the model (session-6fdb5c73). The checks above still
+      // speak for themselves.
+      const detachedWorker = backgroundHandoffNeedsInspection(
+        this.store.readDocument(`runtime:${binding.taskId}`)?.value as RuntimeRecord | undefined,
+        state.control,
+        this.modelControl.waiting(binding, 'worker') !== undefined,
+      )
       if ((state.lease || pendingDispatch || uncertainCheck || interruptedCompaction || interruptedApproval || interruptedEffect || uncertainBrief || detachedWorker || state.pendingApprovalIds.length) && state.control.mode !== 'completed' && !state.control.recovering) {
         this.append(binding.taskId, 'recovery/needed', { reason: 'Host runtime was replaced with a recorded writer, pending dispatch/approval, uncertain check, unfinished compaction or a runtime it did not start' })
       }

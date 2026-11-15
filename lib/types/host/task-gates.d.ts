@@ -49,3 +49,27 @@ export declare function completedToolProblem(input: {
     readonly read: boolean;
     readonly confinedShell: boolean;
 }): string | undefined;
+/**
+ * Whether a boot-time `runtime.background` flag is evidence of work this Host must inspect.
+ *
+ * `background` records only that the last handoff did not block the Lead's turn. On its own it
+ * proves nothing about work in flight, and reading it as if it did bricked a whole conversation:
+ * the Sidekick had already stopped on a provider error, every native effect was settled, and yet
+ * the next start armed the reconciliation gate — after which every message the user typed ended
+ * at once, because that gate refuses the request before it reaches the model (session-6fdb5c73).
+ *
+ * Real interruptions leave real traces, and each is still checked separately at boot: a live
+ * lease, a prepared dispatch, an uncertain check, a pending approval, an unfinished compaction or
+ * a recorded native effect. So the flag only counts while the task could still have had work: it
+ * was running, its Worker had not reported, and no Worker stop was recorded for it. A recorded
+ * stop is the Host's own note that the handoff ended.
+ * @param runtime - the task's recorded runtime, if it has one.
+ * @param control - that task's control state.
+ * @param workerStopped - a model-control wait is recorded for this task's Worker.
+ */
+export declare function backgroundHandoffNeedsInspection(runtime: {
+    readonly background?: boolean;
+    readonly submitted?: unknown;
+} | undefined, control: {
+    readonly mode: string;
+}, workerStopped: boolean): boolean;
