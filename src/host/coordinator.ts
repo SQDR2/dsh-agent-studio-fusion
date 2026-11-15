@@ -182,9 +182,20 @@ function atOrAfter(start: { turn: number; step: number } | undefined, step: { tu
  * turn end at once, plus the local controls that actually lift it.
  * @param role - Role whose next request the gate refused.
  * @param reason - The Host's own gate explanation.
+ * @param reconcile - The gate is the interrupted-effects one, which the recovery panel's
+ *   own controls cannot lift. That panel disables "Continue once" while it waits for the
+ *   inspection (`FusionRecovery` disables its fieldset on `recovering`), so advice to use it
+ *   sent the user in a circle: every click queued another empty continuation and every turn
+ *   ended at once (session-6fdb5c73). Name the command that does lift it.
  */
-export function blockedNoticeText(role: Role, reason: string): string {
+export function blockedNoticeText(role: Role, reason: string, reconcile = false): string {
   const who = role === 'lead' ? 'Lead' : 'Sidekick'
+  if (reconcile) {
+    return bi(
+      `Fusion 没有把这一轮发给模型：上一个 Host 被替换时还有未核对的落盘/进程操作，${who} 在核对完成前不会继续（${reason}）。此时「继续一次」、换模型、再发一条消息都不会生效；请先在本会话提交核对记录：/fusion recover <检查记录>（提示还有未收尾的命令时用 /fusion recover --effects-stopped <检查记录>），再用 /fusion resume 继续。`,
+      `Fusion did not send this turn to the model: the previous Host was replaced while file/process effects were still unreconciled, so ${who} stays stopped until they are inspected (${reason}). Continuing, a route change and another message do nothing in this state; record the inspection first: /fusion recover <inspection note> (add --effects-stopped when it reports unfinished commands), then continue with /fusion resume.`,
+    )
+  }
   return bi(
     `Fusion 没有把这一轮发给模型：${who} 当前被暂停（${reason}）。在 Fusion 状态面板点「继续一次」，或直接再发一条消息继续；只有额度或凭据类错误需要先更换模型。`,
     `Fusion did not send this turn to the model: ${who} is paused (${reason}). Continue from the Fusion status panel ("Continue once"), or send another message; only quota and credential stops need a route change first.`,
@@ -881,16 +892,26 @@ export class FusionCoordinator {
     if (role !== 'lead') return
     try {
       const view = readModelControl(this.store, binding)
+      // The interrupted-effects gate has no panel control that lifts it, so the notice must
+      // name `/fusion recover` instead of sending the user back to "Continue once".
+      const reconcile = this.#needsReconcile(binding.taskId)
       // The control revision moves whenever a wait is lifted or added, so a
       // repeated attempt on the same state stays silent while a new gate speaks.
-      const id = `blocked-notice:${binding.taskId}:${digestOf({ role, reason, revision: view?.revision ?? 0 })}`
+      const id = `blocked-notice:${binding.taskId}:${digestOf({ role, reason, reconcile, revision: view?.revision ?? 0 })}`
       if (this.store.readDocument(id)) return
       const message = createUserMessage({ source: { kind: FUSION_SOURCE_KIND, form: 'notice',
         summary: bi('Fusion 暂停了这一轮', 'Fusion stopped this turn') },
-        content: [{ type: 'text', text: blockedNoticeText(role, reason) }] })
+        content: [{ type: 'text', text: blockedNoticeText(role, reason, reconcile) }] })
       const event = agent.session.append('user/message', message, { surfaceOp: 'append' })
-      this.store.writeDocument(id, 0, { schemaVersion: 1, taskId: binding.taskId, role, reason, eventSeq: event.seq })
+      this.store.writeDocument(id, 0, { schemaVersion: 1, taskId: binding.taskId, role, reason, reconcile, eventSeq: event.seq })
     } catch (error) { this.ctx.logger.warn(`[dsh-fusion] blocked-step notice failed: ${String(error)}`) }
+  }
+
+  /** Whether a task waits on human inspection of interrupted effects rather than on a pause. */
+  #needsReconcile(taskId: TaskId): boolean {
+    if (this.#trackingErrors.has(taskId)) return true
+    const control = this.state(taskId).control
+    return control.recovering || control.outcomeUnknown
   }
 
   async #prepareStatus(taskId: TaskId, signal?: AbortSignal): Promise<void> {

@@ -95,6 +95,27 @@ describe('explicit continuation and the blocked-step notice', () => {
     expect(text).toMatch(/TIMEOUT/)
     expect(text).toContain(' / ')
   })
+
+  /**
+   * A session whose last Host was replaced while effects were unfinished is gated on the
+   * inspection, not on a pause. The recovery panel disables "Continue once" in exactly that
+   * state (`FusionRecovery` disables its fieldset on `recovering`), so the pause advice sent
+   * the user in a circle: three clicks queued three empty continuations and every turn ended
+   * at once (session-6fdb5c73). The notice must name the command that does lift it.
+   */
+  it('names the reconciliation command when the gate is an uninspected interruption', () => {
+    const text = blockedNoticeText('lead', 'Fusion execution is gated: RECOVERING', true)
+    expect(text).toContain('/fusion recover')
+    expect(text).toContain('--effects-stopped')
+    expect(text).toContain('/fusion resume')
+    expect(text).toMatch(/RECOVERING/)
+    expect(text).toContain(' / ')
+    // The old notice made the disabled control the instruction; now it is named only to say it does nothing.
+    expect(text).not.toContain('在 Fusion 状态面板点「继续一次」')
+    expect(text).not.toContain('or send another message; only quota')
+    expect(text).toContain('不会生效')
+    expect(text).toContain('do nothing')
+  })
 })
 
 describe('a rejected step reports the gate instead of ending silently', () => {
