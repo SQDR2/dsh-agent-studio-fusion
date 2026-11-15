@@ -76,3 +76,161 @@ describe('NativeFusionScopes replacement', () => {
       .toThrow('An existing Fusion scope must settle and detach before replacement')
   })
 })
+
+describe('agent/request route preservation and effort pinning', () => {
+  function agentWithEvents(id: string, opts?: { model?: { current(): any; select(s: any): void } }) {
+    const handlers = new Map<string, Function[]>()
+    const disposer = (): (() => void) => () => {}
+    const on = (event: string, handler: Function) => {
+      if (!handlers.has(event)) handlers.set(event, [])
+      handlers.get(event)!.push(handler)
+      return () => {}
+    }
+    const agent = {
+      id,
+      status: 'running',
+      ctx: {
+        tools: { restrict: disposer, presentAs: disposer, guard: disposer, schemas: () => [] },
+        on,
+        systemPrompt: { section: disposer },
+      },
+      model: opts?.model,
+    } as unknown as Agent
+    return { agent, handlers }
+  }
+
+  it('preserves reasoning effort in agent/request proposal on 0.2.2', async () => {
+    let currentSelection: any = { provider: 'aihub', model: 'deepseek-v4.1-flash', reasoningEffort: 'high' }
+    const model = {
+      current: () => currentSelection,
+      select: (s: any) => { currentSelection = s },
+    }
+    const { agent, handlers } = agentWithEvents('session-a206402e', { model })
+    const fusion = scopes(() => true)
+    const effortBinding = {
+      ...binding,
+      profile: {
+        ...binding.profile,
+        lead: { provider: 'aihub', model: 'deepseek-v4.1-flash', reasoningEffort: 'high' },
+      },
+    } as unknown as SessionBinding
+
+    fusion.install(agent, effortBinding, 'lead')
+    const requestHandler = handlers.get('agent/request')?.[0]
+    expect(requestHandler).toBeDefined()
+
+    const outcome = await requestHandler!({
+      agent,
+      turn: 1,
+      step: 1,
+      signal: new AbortController().signal,
+    }, async () => ({
+      provider: 'aihub',
+      model: 'deepseek-v4.1-flash',
+      reasoningEffort: 'high',
+    }))
+
+    // In 0.2.2, proposedConfig must match the pinned route, including reasoningEffort
+    expect(outcome.provider).toBe('aihub')
+    expect(outcome.model).toBe('deepseek-v4.1-flash')
+    expect(outcome.reasoningEffort).toBe('high')
+  })
+
+  it('preserves reasoning effort in model-like mode on 0.2.2', async () => {
+    let currentSelection: any = { provider: 'aihub', model: 'deepseek-v4.1-flash', reasoningEffort: 'high' }
+    const model = {
+      current: () => currentSelection,
+      select: (s: any) => { currentSelection = s },
+    }
+    const { agent, handlers } = agentWithEvents('session-a206402e', { model })
+    const fusion = scopes(() => true)
+    const effortBinding = {
+      ...binding,
+      profile: {
+        interactionMode: 'model-like',
+        context: { lead: {}, worker: {} },
+        lead: { provider: 'aihub', model: 'deepseek-v4.1-flash', reasoningEffort: 'high' },
+      },
+    } as unknown as SessionBinding
+
+    fusion.install(agent, effortBinding, 'lead')
+    const requestHandler = handlers.get('agent/request')?.[0]
+    expect(requestHandler).toBeDefined()
+
+    const outcome = await requestHandler!({
+      agent,
+      turn: 1,
+      step: 1,
+      signal: new AbortController().signal,
+    }, async () => ({
+      provider: 'aihub',
+      model: 'deepseek-v4.1-flash',
+      reasoningEffort: 'high',
+    }))
+
+    expect(outcome.provider).toBe('aihub')
+    expect(outcome.model).toBe('deepseek-v4.1-flash')
+    expect(outcome.reasoningEffort).toBe('high')
+  })
+
+  it('proposes physical route with reasoning effort on 0.2.1 legacy host', async () => {
+    const { agent, handlers } = agentWithEvents('session-021')
+    const fusion = scopes(() => true)
+    const effortBinding = {
+      ...binding,
+      profile: {
+        ...binding.profile,
+        lead: { provider: 'aihub', model: 'deepseek-v4.1-flash', reasoningEffort: 'high' },
+      },
+    } as unknown as SessionBinding
+
+    fusion.install(agent, effortBinding, 'lead')
+    const requestHandler = handlers.get('agent/request')?.[0]
+    expect(requestHandler).toBeDefined()
+
+    const outcome = await requestHandler!({
+      agent,
+      turn: 1,
+      step: 1,
+      signal: new AbortController().signal,
+    }, async () => ({
+      provider: 'dsh-fusion',
+      model: 'combo-1',
+    }))
+
+    expect(outcome.provider).toBe('aihub')
+    expect(outcome.model).toBe('deepseek-v4.1-flash')
+    expect(outcome.reasoningEffort).toBe('high')
+  })
+
+  it('throws diagnostic error on 0.2.2 when route was not pinned before step preparation', async () => {
+    let currentSelection: any = { provider: 'wrong-provider', model: 'wrong-model' }
+    const model = {
+      current: () => currentSelection,
+      select: (s: any) => { currentSelection = s },
+    }
+    const { agent, handlers } = agentWithEvents('session-unpinned', { model })
+    const fusion = scopes(() => true)
+    const effortBinding = {
+      ...binding,
+      profile: {
+        ...binding.profile,
+        lead: { provider: 'aihub', model: 'deepseek-v4.1-flash', reasoningEffort: 'high' },
+      },
+    } as unknown as SessionBinding
+
+    fusion.install(agent, effortBinding, 'lead')
+    const requestHandler = handlers.get('agent/request')?.[0]
+    expect(requestHandler).toBeDefined()
+
+    await expect(requestHandler!({
+      agent,
+      turn: 1,
+      step: 1,
+      signal: new AbortController().signal,
+    }, async () => ({
+      provider: 'wrong-provider',
+      model: 'wrong-model',
+    }))).rejects.toThrow('Fusion route was not pinned before step preparation')
+  })
+})

@@ -8,6 +8,8 @@
 
 After installing, the left sidebar has a **Fusion** entry whose page holds three sections: **Fusion combos**, **Antigravity** (the `agy` CLI) and **ACP routes**. No `dsh-agy-worker`, no `dsh-tauri-acp`, no companion package.
 
+When a task stops and you do not know what to type, or you want to pause it, switch the Sidekick or leave Fusion: **[Commands and states](#commands-and-states)** (`/fusion status|pause|resume|recover|off`).
+
 | | |
 |---|---|
 | Package | `@sqdr2/dsh-agent-studio-fusion` |
@@ -55,6 +57,45 @@ Installing straight from GitHub works too (the repository ships a built `lib/`):
 **Up to 6 combos** can coexist — a cheap "fast" one and a strong "thorough" one, each its own model-menu entry. With several conversations open, each can pick a different combo; a conversation freezes the combo it picked, so later edits or other conversations never change it. A pre-combo installation is migrated into one combo named "自动" whose model id stays `auto`, so existing conversations keep working.
 
 The composer's permission control reads `Custom` once a task is dispatched: the Lead's session is pinned to read-only, and "read-only plus your approval policy" usually matches no configured preset. That control still sets the **Sidekick's** permission — change it and the Sidekick's next step uses that mode, while the Lead stays read-only. If you would rather it read a name instead of `Custom`, add a preset to your profile's `presets` with `sandbox: read-only` and `approval: never` — pure configuration, this plugin does not depend on it.
+
+## Commands and states
+
+The `/fusion` commands read and write local state directly and **never call a model**, so they still
+work when a task is stopped.
+
+| Command | What it does |
+|---|---|
+| `/fusion status` | Current task id, phase, control state, unfinished native operations, cost |
+| `/fusion pause` | Pause the task (progress, workspace and the Sidekick session are kept) |
+| `/fusion resume` | Let it run once more |
+| `/fusion recover [--effects-stopped] <inspection note>` | Interrupted-work check: confirm the commands and child processes the last Host started have stopped, then open the gate |
+| `/fusion off` | Leave Fusion; the conversation returns to an ordinary model (task records stay) |
+
+A task stops in one of three ways, and each continues differently:
+
+1. **A model pause** (quota, credentials, timeout, no progress): switch to a usable route, or just send
+   another message; `/fusion resume` also works.
+2. **Interrupted work awaiting a check** (`control.recovering` is `true` in `/fusion status`): a Host
+   exit does **not** end the commands and child processes it started, so Fusion closes "effects". In
+   this state:
+
+   - **A message you send is still handled**: the Lead reads the record, the files and the state and
+     tells you what it sees and what it suggests. Delegation, file writes and commands are refused,
+     and the turn ends at the first such attempt — so it cannot retry in a loop and burn tokens.
+   - To go back to real work, record the inspection and resume:
+     ```
+     /fusion recover I checked: the commands and child processes have stopped
+     /fusion resume
+     ```
+     The note needs at least 12 characters; if unfinished commands are reported, add
+     `--effects-stopped` (meaning you stopped them). The check records timestamped evidence — a
+     workspace snapshot plus your note — for later inspection.
+3. **A completed task**: send the next message and Fusion starts a new task; the old record stays.
+
+> The startup check only arms the gate when it actually finds unfinished work (a lease, a prepared
+> dispatch, an uncertain check, a pending approval, an unfinished compaction, an unfinished native
+> operation, or a handoff that may still be running). If it later finds nothing left to check, the
+> next start opens the gate itself and records why.
 
 ## How one task runs
 
