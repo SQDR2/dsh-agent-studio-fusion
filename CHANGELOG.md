@@ -20,6 +20,38 @@ own tags and releases.
 Entry format: what changed, then what was actually validated. "Not claimed" lines mark what a release did *not* test —
 read them before assuming a platform is covered.
 
+## 1.1.2 — 2026-11-16
+
+### A combo switch no longer dies on the route it is leaving
+
+- **The first step after a switch could still carry the virtual route, and the Host's switch
+  compaction priced it.** Switching to "6.1 --> V4.1 Flash" mid-conversation ran one step with
+  `dsh-fusion/pair-77828c13` as the step's selection — the drain that installs the new task's
+  scope is asynchronous, so the running reservation had nothing to pin — and the Host's
+  automatic compaction on a model switch then asked that virtual route for its window:
+  `Cannot switch to dsh-fusion/pair-77828c13: context compaction failed: no context capacity …
+  configure contextWindow on that adapter model` (session-7f326880, turn 2). Two changes:
+  exact-route resolution now answers with the Lead's `context` and `defaultMaxTokens` — the
+  window the pair's requests actually land in — and `agent/pre-step` re-pins the frozen route
+  after the scope is ready, so the next step is back on the pair even when this one captured
+  the virtual selection.
+- **A pin a restarted Host no longer remembers was read as the user leaving Fusion.** The map
+  that recognises Fusion's own appends lives in the Host process. After the restart, the newest
+  recorded selection was still the pair's Lead, so the next turn was treated as a model switch
+  — it drained the task and then refused every request with `先停止当前 Fusion 任务，
+  再切换模型。` (session-7f326880, turn 3). A route that is exactly the frozen Lead or Sidekick
+  route is now recognised as Fusion's own: the turn is allowed, and the combo is re-stated at
+  the running reservation instead of draining.
+- **The switch notice after a combo change stays.** `model changed: gpt-5.6-sol → gpt-6.1-sol`
+  is truthful — those turns were another model's — and only the pseudo notice that compared the
+  virtual menu route with the pinned one is suppressed.
+
+Validated: unit suite 691 passed (4 new cases: two for a restarted Host's pin, two for the
+catalog's capacity answer, both red on 1.1.1's source); host suite 303 passed / 1 skipped
+against a `0.2.2-rc.2` checkout. Not claimed: the combo switch itself was not replayed against a
+live provider in this release; the fixed paths are covered by the unit cases and by the existing
+host workflow cases, which still pass unchanged.
+
 ## 1.1.1 — 2026-11-16
 
 ### The model menu keeps the combo, not the pair's Lead
