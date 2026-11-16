@@ -84,8 +84,8 @@ describe('AGY state paths stay exactly where the standalone plugin kept them', (
   it('puts work state under $DSH_HOME/agy-worker', () => {
     withHome('/tmp/dsh-fusion-agy-home')
     expect(dshHome()).toBe('/tmp/dsh-fusion-agy-home')
-    expect(stateDir()).toBe('/tmp/dsh-fusion-agy-home/agy-worker')
-    expect(overridesPath()).toBe('/tmp/dsh-fusion-agy-home/agy-worker/runtime-overrides.json')
+    expect(stateDir()).toBe(join('/tmp/dsh-fusion-agy-home', 'agy-worker'))
+    expect(overridesPath()).toBe(join('/tmp/dsh-fusion-agy-home', 'agy-worker', 'runtime-overrides.json'))
   })
 
   it('puts the account pool under $DSH_HOME/agy-accounts, independent of DSH_STATE_DIR', () => {
@@ -95,7 +95,7 @@ describe('AGY state paths stay exactly where the standalone plugin kept them', (
     try {
       // The recorded task decision: `$DSH_HOME/agy-accounts/pool.json`. An upstream
       // DSH_STATE_DIR must not silently relocate the pool this build reads.
-      expect(agyAccountsDir()).toBe('/tmp/dsh-fusion-agy-home/agy-accounts')
+      expect(agyAccountsDir()).toBe(join('/tmp/dsh-fusion-agy-home', 'agy-accounts'))
     } finally {
       if (before === undefined) delete process.env.DSH_STATE_DIR
       else process.env.DSH_STATE_DIR = before
@@ -112,8 +112,8 @@ describe('AGY state paths stay exactly where the standalone plugin kept them', (
   it('never moves or copies existing state on a path read', () => {
     withHome('/tmp/dsh-fusion-agy-home')
     // A read is a pure path computation: no adoption, no rename, no mkdir.
-    expect(stateDir()).toBe('/tmp/dsh-fusion-agy-home/agy-worker')
-    expect(agyAccountsDir()).toBe('/tmp/dsh-fusion-agy-home/agy-accounts')
-    expect(stateDir()).toBe('/tmp/dsh-fusion-agy-home/agy-worker')
+    expect(stateDir()).toBe(join('/tmp/dsh-fusion-agy-home', 'agy-worker'))
+    expect(agyAccountsDir()).toBe(join('/tmp/dsh-fusion-agy-home', 'agy-accounts'))
+    expect(stateDir()).toBe(join('/tmp/dsh-fusion-agy-home', 'agy-worker'))
   })
 })

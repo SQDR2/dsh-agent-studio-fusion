@@ -36,6 +36,31 @@ describe('FusionCatalogAdapter input modalities', () => {
   })
 })
 
+describe('FusionCatalogAdapter capacity', () => {
+  // Automatic compaction on a model switch prices the *route* the next step proposes, and it
+  // asks the catalog for that route's window. A combo answers with its Lead's: session-7f326880
+  // switched to "6.1 --> V4.1 Flash", the first step of the new task still carried the virtual
+  // selection, and the turn died with `no context capacity for dsh-fusion/pair-77828c13`.
+  const withCapacity = { id: 'pair-a1b2c3d4', name: 'Fusion · 稳', inputModalities: ['text'] as const,
+    context: { contextWindow: 512_000 }, defaultMaxTokens: 65_536 }
+
+  it('answers exact-route resolution with the Lead budget the combo was built from', async () => {
+    const adapter = new FusionCatalogAdapter(async () => [withCapacity])
+    expect(await adapter.resolveModel(FUSION_PROVIDER, 'pair-a1b2c3d4')).toMatchObject({
+      context: { contextWindow: 512_000 }, defaultMaxTokens: 65_536,
+    })
+  })
+
+  it('omits capacity a Lead does not declare instead of inventing one', async () => {
+    const adapter = new FusionCatalogAdapter(async () => [combo('auto', 'Fusion · 快', ['text'])])
+    const resolved = await adapter.resolveModel(FUSION_PROVIDER, FUSION_MODEL)
+    expect(resolved).not.toHaveProperty('context')
+    expect(resolved).not.toHaveProperty('defaultMaxTokens')
+    // The menu entry stays an `LlmModelInfo`: capacity never enters the selector.
+    expect(await adapter.listModels(FUSION_PROVIDER)).toMatchObject({ 0: { id: FUSION_MODEL } })
+  })
+})
+
 describe('savedLeadRoute', () => {
   it('extracts the saved Lead route and rejects unconfigured or self-referential values', () => {
     expect(savedLeadRoute({ lead: { provider: 'llm-deepseek', model: 'deepseek-chat' } })).toEqual({ provider: 'llm-deepseek', model: 'deepseek-chat' })

@@ -25,7 +25,7 @@ export interface FusionScopeCallbacks {
   beforeStep?(agent: Agent, binding: SessionBinding, role: Role): void
   projectMessage?(agent: Agent, binding: SessionBinding, role: Role, message: UserMessage): UserMessage
   /** All independent pause, budget, recovery and unknown-effect gates are checked here. */
-  canAccess?(agent: Agent, binding: SessionBinding, role: Role): string | undefined
+  canAccess?(agent: Agent, binding: SessionBinding, role: Role, readOnly?: boolean): string | undefined
   /** Shared gates plus limits that apply only to admitting a new generation. */
   prepareRequest?(agent: Agent, binding: SessionBinding, role: Role, signal: AbortSignal): Promise<void>
   canRequest(agent: Agent, binding: SessionBinding, role: Role): string | undefined
@@ -78,10 +78,10 @@ export class NativeFusionScopes {
     return entry?.agent === agent ? { binding: entry.binding, role: entry.role } : undefined
   }
 
-  assertReady(agent: Agent): void {
+  assertReady(agent: Agent, readOnly = false): void {
     const entry = this.#entries.get(agent.id)
     if (!entry || entry.agent !== agent || !entry.ready) throw new Error('Fusion Agent scope is not ready; execution is blocked')
-    const reason = (this.callbacks.canAccess ?? this.callbacks.canRequest)(agent, entry.binding, entry.role)
+    const reason = (this.callbacks.canAccess ?? this.callbacks.canRequest)(agent, entry.binding, entry.role, readOnly)
     if (reason) throw new Error(reason)
   }
 
@@ -206,7 +206,9 @@ export class NativeFusionScopes {
       return { ...assembled, variables, tools: projected.tools }
     }, { prepend: true }))
     entry.dispose.push(scope.on('agent/request', async ({ agent: requesting, turn, step, signal }, next) => {
-      this.assertReady(requesting)
+      // A request is not an effect: a gated Lead keeps reading, inspecting and answering, while
+      // effectful tools stay closed in the coordinator's tool gate.
+      this.assertReady(requesting, role === 'lead')
       await this.callbacks.prepareRequest?.(requesting, entry.binding, role, signal)
       signal.throwIfAborted()
       const reason = this.callbacks.canRequest(requesting, entry.binding, role)
@@ -222,18 +224,18 @@ export class NativeFusionScopes {
       // the rewrite below.
       const selected = requiresSelectedRoute(requesting)
       if (selected) {
-        if (rest.provider !== route.provider || rest.model !== route.model) {
-          throw new Error(`Fusion route was not pinned before step preparation: this step uses "${rest.provider}/${rest.model}", the frozen route is "${route.provider}/${route.model}"`)
+        if (rest.provider !== route.provider || rest.model !== route.model
+          || _prior !== route.reasoningEffort) {
+          throw new Error(`Fusion route was not pinned before step preparation: this step uses "${rest.provider}/${rest.model}" (effort: ${_prior ?? 'default'}), the frozen route is "${route.provider}/${route.model}" (effort: ${route.reasoningEffort ?? 'default'})`)
         }
+      }
+      const controls = {
+        provider: route.provider,
+        model: route.model,
+        ...(route.reasoningEffort === undefined ? {} : { reasoningEffort: ReasoningEffortId(route.reasoningEffort) }),
       }
       if (entry.binding.profile.interactionMode === 'model-like') {
         const { maxTokens, ...native } = rest
-        const controls = {
-          // 0.2.2: the step's selection is already the physical route and its effort, so
-          // passing either back would be a change the loop rejects.
-          ...selected ? {} : { provider: route.provider, model: route.model,
-            ...(route.reasoningEffort === undefined ? {} : { reasoningEffort: ReasoningEffortId(route.reasoningEffort) }) },
-        }
         return { ...native, ...controls, ...(role === 'lead' && maxTokens !== undefined ? { maxTokens } : {}) }
       }
       const disclosed = this.callbacks.modelLimits
@@ -246,9 +248,7 @@ export class NativeFusionScopes {
       const maxTokens = disclosed
         ? requestOutputReservation(disclosed.contextWindow, requested, disclosed.defaultMaxTokens, disclosed.testedOutputCap, policy.reserveOutputTokens)
         : Math.min(requested ?? policy.reserveOutputTokens, policy.reserveOutputTokens)
-      return { ...rest, maxTokens,
-        ...selected ? {} : { provider: route.provider, model: route.model,
-          ...(route.reasoningEffort === undefined ? {} : { reasoningEffort: ReasoningEffortId(route.reasoningEffort) }) } }
+      return { ...rest, ...controls, maxTokens }
     }, { prepend: true }))
     entry.refreshTools()
     entry.dispose.push(...this.callbacks.installTools(scope, agent, entry.binding, role))

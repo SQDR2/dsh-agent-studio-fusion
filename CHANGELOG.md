@@ -20,6 +20,144 @@ own tags and releases.
 Entry format: what changed, then what was actually validated. "Not claimed" lines mark what a release did *not* test —
 read them before assuming a platform is covered.
 
+## 1.1.2 — 2026-11-16
+
+### A combo switch no longer dies on the route it is leaving
+
+- **The first step after a switch could still carry the virtual route, and the Host's switch
+  compaction priced it.** Switching to "6.1 --> V4.1 Flash" mid-conversation ran one step with
+  `dsh-fusion/pair-77828c13` as the step's selection — the drain that installs the new task's
+  scope is asynchronous, so the running reservation had nothing to pin — and the Host's
+  automatic compaction on a model switch then asked that virtual route for its window:
+  `Cannot switch to dsh-fusion/pair-77828c13: context compaction failed: no context capacity …
+  configure contextWindow on that adapter model` (session-7f326880, turn 2). Two changes:
+  exact-route resolution now answers with the Lead's `context` and `defaultMaxTokens` — the
+  window the pair's requests actually land in — and `agent/pre-step` re-pins the frozen route
+  after the scope is ready, so the next step is back on the pair even when this one captured
+  the virtual selection.
+- **A pin a restarted Host no longer remembers was read as the user leaving Fusion.** The map
+  that recognises Fusion's own appends lives in the Host process. After the restart, the newest
+  recorded selection was still the pair's Lead, so the next turn was treated as a model switch
+  — it drained the task and then refused every request with `先停止当前 Fusion 任务，
+  再切换模型。` (session-7f326880, turn 3). A route that is exactly the frozen Lead or Sidekick
+  route is now recognised as Fusion's own: the turn is allowed, and the combo is re-stated at
+  the running reservation instead of draining.
+- **The switch notice after a combo change stays.** `model changed: gpt-5.6-sol → gpt-6.1-sol`
+  is truthful — those turns were another model's — and only the pseudo notice that compared the
+  virtual menu route with the pinned one is suppressed.
+
+Validated: unit suite 691 passed (4 new cases: two for a restarted Host's pin, two for the
+catalog's capacity answer, both red on 1.1.1's source); host suite 303 passed / 1 skipped
+against a `0.2.2-rc.2` checkout. Not claimed: the combo switch itself was not replayed against a
+live provider in this release; the fixed paths are covered by the unit cases and by the existing
+host workflow cases, which still pass unchanged.
+
+## 1.1.1 — 2026-11-16
+
+### The model menu keeps the combo, not the pair's Lead
+
+- **A pinned turn never gave the user's selection back.** On a 0.2.2 Host, Fusion records the
+  pair's Lead route as the step's `model/selection` before the loop fixes that step, because a
+  proposal that differs from the captured route throws. That pin is also the newest recorded
+  selection, and the composer reads `modelSelection.next` (`pending ?? lastUsed`), so a session
+  opened on a Fusion combo displayed the Lead from its first turn on and never went back:
+  session-7f326880 picked the combo "6.1 --> Gemini 3.8" and the composer showed
+  `gz/gpt-5.6-sol` for the whole task. `restoreNativeIntent` existed for exactly this hand-back
+  but nothing called it, and `consumeNativePin`/`consumedNativePin` were never read. The restore
+  now runs on the Agent's `running` → `idle` transition, and the unused pair is gone.
+- **The hand-back cannot run from `turn/end` itself.** A Session refuses to append while another
+  append is being published (`session append cannot reenter while another append is being
+  published`), so the restore waits for the status transition that ends the turn. A turn that is
+  still running keeps showing the pair's Lead: the Host fixes a step's route before any listener
+  can run, and every step of that turn dispatches with it.
+
+Validated: unit suite 687 passed, including 3 new cases in `tests/route-pin.spec.ts` that are red
+on 1.1.0's source; host suite 303 passed / 1 skipped against a `0.2.2-rc.2` checkout
+(`DSHX_HARNESS=<checkout> pnpm test:host`), including the updated native-selection case that now
+asserts the newest recorded selection names the combo once the turn settles. Not claimed: the
+composer was not driven through a browser in this release; the projection's `next` was verified
+from the recorded events it reads.
+
+## 1.1.0 — 2026-11-15
+
+### A stopped task no longer locks the conversation
+
+- **A gate that had nothing behind it opened itself.** The start-up check armed "interrupted work"
+  for any trace it found and then never let go. Two of those traces were bookkeeping, not work:
+  `runtime.background` (which only says the last handoff did not block the Lead's turn) and an
+  `accepted` outbox row (which stays forever after the Worker's turn ends). A session whose Sidekick
+  had stopped on a provider error was therefore gated on the next start, and from then on **every**
+  message ended in four milliseconds with nothing in it — `turn/end blocked`, the model never called
+  (session-6fdb5c73). Both traces now count only while the task could still have work, and a start
+  that finds nothing unfinished records what it checked and opens the gate itself. A real
+  interruption still sets it: a live lease, a prepared dispatch, an uncertain check, a pending
+  approval, an unfinished compaction, a recorded native effect, or a handoff the Host did not see
+  end. A pause the Host recorded *while* a handoff was live never opens by itself.
+- **An inspecting Lead answers instead of going dark.** While a task waits on human inspection,
+  a turn the user starts afterwards now runs in read-only mode: the Lead reads the ledger, the
+  files and a confined shell, and says what it sees. Delegation, writes, submission and commands
+  stay refused, and the **first** such refusal ends the turn, so a model cannot turn the refusal
+  into a retry loop (measured: seven requests where the turn used to send none). A deliberate pause
+  keeps its old contract — the Fusion panel and `/fusion resume` are the way forward, and a turn
+  that was already running when the gate armed still stops.
+- **The blocked-turn notice names the command that works.** It used to recommend the recovery
+  panel's "Continue once", which that panel disables in exactly this state, and "send another
+  message", which hits the same gate. It now names `/fusion recover <inspection note>` (with
+  `--effects-stopped` when commands are unfinished) and `/fusion resume`, and says plainly which
+  actions do nothing until then.
+- **`README` gained a "Commands and states" section** (both languages): the `/fusion` command table,
+  and the three ways a task stops — model pause, interrupted work awaiting a check, completed — with
+  what continues each one. Last release documented installation and the task loop but never the
+  commands, so a stopped task looked like a broken one.
+
+Validated: unit suite 683 passed / 1 skipped; host suite 286 passed / 9 skipped / 9 failed against the
+pinned `0.2.1-rc.2` checkout, where the nine are the PowerShell-7-dependent cases that fail
+identically on the unmodified source (this machine has only Windows PowerShell 5.1). The new native
+test drives a recovering task: the read executes and its content reaches the transcript, the
+delegation is refused naming `/fusion recover`, the gate stays closed, and the turn stops after
+exactly two requests. Two further host-suite cases that were already failing on `main` are fixed
+here: the start-up check opening a gate the Host had set mid-handoff, and `gates replacement during a
+background rework`. Not claimed: the read-only turn was not exercised against a live Antigravity
+route.
+
+## 1.0.2 — 2026-11-13
+
+### DeepSeek Assistant 0.2.2
+- **Fusion runs on DSH 0.2.2 again, and still on 0.2.1.** Upgrading the Host from 0.2.1-rc.5 to 0.2.2 aborted every
+  Fusion turn with `scope.tools.presentAs is not a function` (117 of 301 host-suite cases failed). 0.2.2 replaced the
+  per-agent *presentation mode* with a per-scope *executor*, and six further API changes followed from it. Each is now
+  absorbed behind a runtime contract probe rather than a version string:
+  - `presentAs()` → `setExecutor()`: Fusion registers a `RestrictedExecutor` over
+    `@deepseek-ai/dsh-tool-executor-native` whose `describe()` filters the table to the role ceiling. This is the only
+    point that can narrow a table on 0.2.2 — `tools.restrict()` never applies to the viewing scope's own
+    registrations, and the tools a role ceiling narrows are exactly that (Fusion's capabilities, a preset's
+    `write`/`edit`). The registration is **one per Agent and never released early**: a second `setExecutor` throws, and
+    disposing it leaves the selection *unavailable* rather than restoring the deployment's.
+  - `system-prompt/assemble` no longer carries `tools`, so the tool-table projection that 0.2.1 relied on is skipped
+    and the request table comes from the executor.
+  - `tools.execute()` takes a raw batch on 0.2.2; `executeSingleTool` builds the one-call batch and re-attaches the
+    batch-level deferred context, which a single-call caller would otherwise silently lose.
+  - A batch has no nested-dispatch concept, so a Fusion-dispatched acceptance check records itself as its own root.
+    `rootCallIdOf` answers the enclosing identity from a correlation Fusion keeps around dispatch, which is what
+    approvals, effects and review receipts key on.
+  - `agent/request` now rejects a proposal that changes the route fixed during step preparation. The frozen physical
+    route is pinned at the running reservation (and re-pinned after the virtual selection is recorded), and the user's
+    own choice is restored on detach rather than on every turn end.
+  - `drainChildren`/`drainContinuableChildren` are gone and `startActivation` returns a receipt. The receipt is retained
+    per child on the plugin context — not on one transport instance, so a coordinator replacement can still release its
+    predecessor's child — and released by cancelling first and awaiting quiescence. `drainDescendants` is never used: it
+    permanently records the Lead as a closing subagent-tree root, which would refuse every later delegation.
+- **The supported range is now a union, `>=0.2.1-rc.5 <0.2.2-0 || >=0.2.2-rc.2 <0.3.0-0`.** The previous
+  `>=0.2.1-rc.5 <0.3.0-0` passed DSH's own gate (which uses `includePrerelease`) but failed `scripts/link-host.mjs` and
+  the peer checks, because plain semver rejects a prerelease unless a comparator carries a prerelease on the same
+  major.minor.patch. A single span cannot cover two minor lines of prereleases.
+- Validated against both checkouts: the host suite is **300 passed / 1 skipped** on `0.2.2-rc.2` (was 42 passed / 258
+  failed before this release) and unchanged on `0.2.1-rc.5`, and the unit suite is 558 passed. Both branches of the new
+  seam are covered by `tests/tool-seam.spec.ts`, which pins the 0.2.1 shape, the 0.2.2 shape, the batch argument
+  encoding, the deferred-context re-attachment and the `rootCallIdOf` correlation.
+- Not claimed: `0.2.2-rc.1` is untested and deliberately outside the range — it is the only release where the receipt
+  contract exists without the flattened activation spec, and nothing here was validated against it.
+
 ## 1.0.1 — 2026-11-13
 
 ### ACP

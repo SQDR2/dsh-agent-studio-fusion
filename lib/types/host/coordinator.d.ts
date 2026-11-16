@@ -66,8 +66,13 @@ export declare function substantiveReview(reason: string): boolean;
  * turn end at once, plus the local controls that actually lift it.
  * @param role - Role whose next request the gate refused.
  * @param reason - The Host's own gate explanation.
+ * @param reconcile - The gate is the interrupted-effects one, which the recovery panel's
+ *   own controls cannot lift. That panel disables "Continue once" while it waits for the
+ *   inspection (`FusionRecovery` disables its fieldset on `recovering`), so advice to use it
+ *   sent the user in a circle: every click queued another empty continuation and every turn
+ *   ended at once (session-6fdb5c73). Name the command that does lift it.
  */
-export declare function blockedNoticeText(role: Role, reason: string): string;
+export declare function blockedNoticeText(role: Role, reason: string, reconcile?: boolean): string;
 type LooseCheck = {
     command: string;
     id?: string;

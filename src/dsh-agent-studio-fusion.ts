@@ -227,12 +227,21 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
     }
     return Promise.all(items.map(async item => {
       let modalities: readonly ModelModality[] = []
+      let context: FusionModelEntry['context'], defaultMaxTokens: number | undefined
       try {
         // An unresolvable Lead route (unregistered provider, retired model, broken
-        // profile file) cannot verify image support; the entry stays text-only.
-        modalities = (await ctx.llm.resolveModelInfo(item.pair.lead.provider, item.pair.lead.model)).inputModalities ?? []
+        // profile file) cannot verify image support; the entry stays text-only. The same
+        // resolution answers a Host that prices this virtual route — automatic compaction
+        // on a model switch asks the catalog, and the Lead's window is where the pair's
+        // requests land, so that is the window to answer with.
+        const info = await ctx.llm.resolveModelInfo(item.pair.lead.provider, item.pair.lead.model)
+        modalities = info.inputModalities ?? []
+        context = info.context
+        defaultMaxTokens = info.defaultMaxTokens
       } catch { modalities = [] }
-      return { id: item.id, name: `Fusion · ${item.name}`, inputModalities: modalities }
+      return { id: item.id, name: `Fusion · ${item.name}`, inputModalities: modalities,
+        ...(context === undefined ? {} : { context }),
+        ...(defaultMaxTokens === undefined ? {} : { defaultMaxTokens }) }
     }))
   }
   ctx.effect(() => ctx.llm.registerAdapter([FUSION_PROVIDER], new FusionCatalogAdapter(fusionModels)))
@@ -256,8 +265,15 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
   ctx.effect(() => ctx.on('agent/pre-step', async (payload, next) => {
     const binding = bindings.read(payload.agent.id)?.binding
     if (!binding?.selected) return next()
-    try { await getRuntime({ profile: binding.profile, prompts: binding.prompts }); if (restoreFailure.has(payload.agent.id)) restoreFailure.delete(payload.agent.id) }
-    catch (error) { restoreFailure.set(payload.agent.id, String(error)); return { kind: 'reject' } }
+    try {
+      const runtime = await getRuntime({ profile: binding.profile, prompts: binding.prompts })
+      // A combo switch drains the previous task first, and the scope installs on a later
+      // tick, so the running reservation can find nothing to pin and this step would carry
+      // the virtual selection. Re-pin here — idempotent, and outside any append — so the
+      // next step is back on the pair's route even when this one already captured it.
+      runtime.pinRoute(payload.agent)
+      if (restoreFailure.has(payload.agent.id)) restoreFailure.delete(payload.agent.id)
+    } catch (error) { restoreFailure.set(payload.agent.id, String(error)); return { kind: 'reject' } }
     return next()
   }, { prepend: true }))
   const apiHandler: Parameters<Context['webServer']['register']>[0]['handler'] = async (req, res) => {

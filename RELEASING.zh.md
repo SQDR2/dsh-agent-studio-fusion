@@ -104,7 +104,7 @@ workflow 随后依次执行 `pnpm install`、`pnpm build`、`pnpm test`，在 ta
 
 `scripts/build.mjs` 不再按 Host 版本把关：它用 `DSHX_HARNESS` 指向的 checkout 构建（没给时走本地 esbuild），
 因此任何受支持版本的 checkout 都能复现一次发布构建。受支持范围只在一处声明——`engines.dsh`
-（`>=0.2.1-rc.5 <0.3.0-0`）与 `engines.node`（`>=24.0.0`）——并由 `scripts/link-host.mjs` 与 peer 范围检查，
+（`>=0.2.1-rc.5 <0.2.2-0 || >=0.2.2-rc.2 <0.3.0-0`）与 `engines.node`（`>=24.0.0`）——并由 `scripts/link-host.mjs` 与 peer 范围检查，
 不再由打包脚本检查。
 
 CI 仍然 checkout 较旧的 devkit tag 来跑 `pnpm build` / `pnpm test`。那是本仓库的构建期依赖，不代表受支持的运行时：

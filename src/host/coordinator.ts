@@ -65,6 +65,7 @@ import { readNativeEvidence } from './native-evidence.js'
 import { isRouteTransportName, registeredRouteTransport, withRouteTransport } from './route-transport.js'
 import type { AcpWorkerFacts } from './acp/bridge.js'
 import { isRead, READ_TOOLS } from './read-tools.js'
+import { backgroundHandoffNeedsInspection, completedToolProblem, dispatchAwaitsInspection, gatedDispatchProblem, gatedTurnStopped, staleRecoveryGate, workerSubmittedProblem } from './task-gates.js'
 import { AUTHORITY_ACTIONS, workerAuthorityProblem } from './authority.js'
 
 /**
@@ -98,6 +99,8 @@ function formatForemanConcerns(assessment: ForemanAssessment, round: number): st
   }
   return lines.join('\n')
 }
+/** The pause the Host records when a Lead turn ends while its background handoff was live. */
+const BACKGROUND_HANDOFF_PAUSE = 'Lead turn stopped during a background handoff'
 
 const textOutput = { schema: { type: 'string' as const }, render: (_args: unknown, text: string) => [{ type: 'text' as const, text }] }
 const stringList = { type: 'array' as const, items: { type: 'string' as const }, required: true as const }
@@ -217,9 +220,20 @@ function atOrAfter(start: { turn: number; step: number } | undefined, step: { tu
  * turn end at once, plus the local controls that actually lift it.
  * @param role - Role whose next request the gate refused.
  * @param reason - The Host's own gate explanation.
+ * @param reconcile - The gate is the interrupted-effects one, which the recovery panel's
+ *   own controls cannot lift. That panel disables "Continue once" while it waits for the
+ *   inspection (`FusionRecovery` disables its fieldset on `recovering`), so advice to use it
+ *   sent the user in a circle: every click queued another empty continuation and every turn
+ *   ended at once (session-6fdb5c73). Name the command that does lift it.
  */
-export function blockedNoticeText(role: Role, reason: string): string {
+export function blockedNoticeText(role: Role, reason: string, reconcile = false): string {
   const who = role === 'lead' ? 'Lead' : 'Sidekick'
+  if (reconcile) {
+    return bi(
+      `Fusion 没有把这一轮发给模型：上一个 Host 被替换时还有未核对的落盘/进程操作，${who} 在核对完成前不会继续（${reason}）。此时「继续一次」、换模型、再发一条消息都不会生效；请先在本会话提交核对记录：/fusion recover <检查记录>（提示还有未收尾的命令时用 /fusion recover --effects-stopped <检查记录>），再用 /fusion resume 继续。`,
+      `Fusion did not send this turn to the model: the previous Host was replaced while file/process effects were still unreconciled, so ${who} stays stopped until they are inspected (${reason}). Continuing, a route change and another message do nothing in this state; record the inspection first: /fusion recover <inspection note> (add --effects-stopped when it reports unfinished commands), then continue with /fusion resume.`,
+    )
+  }
   return bi(
     `Fusion 没有把这一轮发给模型：${who} 当前被暂停（${reason}）。在 Fusion 状态面板点「继续一次」，或直接再发一条消息继续；只有额度或凭据类错误需要先更换模型。`,
     `Fusion did not send this turn to the model: ${who} is paused (${reason}). Continue from the Fusion status panel ("Continue once"), or send another message; only quota and credential stops need a route change first.`,
@@ -390,6 +404,11 @@ export class FusionCoordinator {
   readonly #installErrors = new Map<string, string>()
   readonly #trackingErrors = new Map<TaskId, string>()
   readonly #leadMutations = new Map<TaskId, symbol>()
+  /**
+   * The user-message seq of a gated Lead turn that already tried to start an effect. Keyed by the
+   * user message, so the next user message clears it without any other bookkeeping.
+   */
+  readonly #gatedEffect = new Map<TaskId, number>()
   readonly #stoppingTasks = new Map<TaskId, number>()
   readonly #backgroundStops = new Map<TaskId, Promise<void>>()
   readonly #statusAbort = new AbortController()
@@ -433,7 +452,7 @@ export class FusionCoordinator {
         this.#acknowledgeUserRetry(agent, binding.taskId)
       },
       projectMessage: (agent, binding, role, message) => role === 'lead' ? notices.project(agent, binding, message) : message,
-      canAccess: (agent, binding, role) => this.#accessBlocked(agent, binding, role),
+      canAccess: (agent, binding, role, readOnly) => this.#accessBlocked(agent, binding, role, { readOnly: readOnly === true }),
       prepareRequest: (_agent, binding, _role, signal) => this.#prepareStatus(binding.taskId, signal),
       canRequest: (agent, binding, role) => this.#requestBlocked(agent, binding, role),
       blockedNotice: (agent, binding, role, reason) => this.#announceBlocked(agent, binding, role, reason),
@@ -516,7 +535,18 @@ export class FusionCoordinator {
       // The lease governs Fusion's own Lead and Worker only. Another session in
       // the same directory is not made read-only by a Fusion writer.
       if (!owner) return undefined
-      try { this.scopes.assertReady(exec.agent) } catch (error) { return String(error) }
+      // A bridge route's transport only replays a step the route already ran, so this guard
+      // must not read it as the Worker's own next dispatch: `assertReady` answers with the
+      // post-submit refusal, which landed on the very card that reports the submission and
+      // ended the Worker turn as `blocked` (session-a1899929).
+      if (!this.#isTransportReplay(exec, owner.binding, owner.role)) {
+        // A gated Lead may still read; only effects are closed, so pass that through.
+        const readOnly = this.#readOnlyDispatch(exec, owner.role)
+        try { this.scopes.assertReady(exec.agent, readOnly) } catch (error) {
+          this.#noteGatedEffect(exec, owner.binding, owner.role, readOnly)
+          return String(error)
+        }
+      }
       const cwd = exec.agent.session.header.cwd
       return workspaceWriterDenial({
         fusionOwned: true,
@@ -556,7 +586,8 @@ export class FusionCoordinator {
     this.#dispose.push(context.install((_agent, owner, request) => {
       options.reserveRequest?.(request, owner.binding, owner.role)
     }, (agent, request) => {
-      this.scopes.assertReady(agent)
+      // A request is not an effect: a gated Lead keeps reading and answering.
+      this.scopes.assertReady(agent, this.owner(agent)?.role === 'lead')
       this.keepalive.assertRequest(agent, request)
       const owner = this.owner(agent)
       if (owner && owner.binding.profile.interactionMode !== 'model-like') this.taskContext.assertPresent(agent, owner.binding, owner.role, request)
@@ -680,8 +711,12 @@ export class FusionCoordinator {
           record,
         })
       }
+      // A recorded Worker stop is the Host's own note that the handoff ended; it decides two of
+      // the traces below (a still-queued dispatch and a `background` flag), because both describe
+      // a handoff rather than an effect.
+      const workerStopped = this.modelControl.waiting(binding, 'worker') !== undefined
       const pendingDispatch = this.store.outbox(binding.taskId).some(row => row.kind === 'native-worker'
-        && ['prepared', 'dispatched', 'accepted'].includes(row.state))
+        && dispatchAwaitsInspection(row.state, workerStopped))
       const uncertainCheck = this.store.listDocumentIds(`check-invocation:${binding.taskId}:`).some(id => {
         const row = this.store.readDocument(id)?.value as { evidence?: { state?: string } } | undefined
         return row?.evidence?.state === 'started' || row?.evidence?.state === 'outcome-unknown'
@@ -697,12 +732,70 @@ export class FusionCoordinator {
         || this.effects.strandedRetained(binding.taskId).length > 0
       const uncertainBrief = this.store.listDocumentIds(`worker-delivery:${binding.taskId}:`).some(id =>
         (this.store.readDocument(id)?.value as { state?: string } | undefined)?.state === 'prepared')
-      const detachedWorker = (this.store.readDocument(`runtime:${binding.taskId}`)?.value as RuntimeRecord | undefined)?.background
-      if ((state.lease || pendingDispatch || uncertainCheck || interruptedCompaction || interruptedApproval || interruptedEffect || uncertainBrief || detachedWorker || state.pendingApprovalIds.length) && state.control.mode !== 'completed' && !state.control.recovering) {
+      // `background` only says the last handoff did not block the Lead's turn. It is evidence
+      // of live work only while the task could still have some: still running, no report in,
+      // and no Worker stop recorded for this task. Reading it as evidence otherwise armed this
+      // gate on a task whose Sidekick had already stopped on a provider error, and then every
+      // later message ended before reaching the model (session-6fdb5c73). The checks above still
+      // speak for themselves.
+      const detachedWorker = backgroundHandoffNeedsInspection(
+        this.store.readDocument(`runtime:${binding.taskId}`)?.value as RuntimeRecord | undefined,
+        state.control,
+        workerStopped,
+      )
+      const unfinished = Boolean(state.lease || pendingDispatch || uncertainCheck || interruptedCompaction
+        || interruptedApproval || interruptedEffect || uncertainBrief || detachedWorker || state.pendingApprovalIds.length)
+      if (unfinished && state.control.mode !== 'completed' && !state.control.recovering) {
         this.append(binding.taskId, 'recovery/needed', { reason: 'Host runtime was replaced with a recorded writer, pending dispatch/approval, uncertain check, unfinished compaction or a runtime it did not start' })
+      } else if (staleRecoveryGate({
+        recovering: state.control.recovering,
+        unfinished,
+        mode: state.control.mode,
+        // A pause the Host recorded while a background handoff was live is not "nothing to inspect":
+        // it is the Host saying a child may still be running, so only an inspection may open it.
+        handoffStop: this.store.events(binding.taskId).some(event => event.type === 'task/paused'
+          && (event.payload as { reason?: string }).reason === BACKGROUND_HANDOFF_PAUSE),
+      })) {
+        // The gate is armed but this Host found nothing left to inspect. Keeping it would refuse
+        // every request — a message, "continue", a route change — with no way forward except a
+        // note nobody can write meaningfully, which is exactly how session-6fdb5c73 died. Record
+        // the check this Host just performed and open the gate; a real interruption stays closed
+        // above, because it sets `unfinished`.
+        this.#healStaleRecovery(binding, state)
       }
     }
     for (const agent of ctx.agents.list()) this.#attachKnown(agent)
+  }
+
+  /**
+   * Open a gate that this Host's own startup check just disproved.
+   *
+   * `reconcile()` is the human command, and it stays human: it attests that interrupted
+   * commands and child processes were stopped. This is the narrower case where there is nothing
+   * to attest — no lease, no prepared dispatch, no uncertain check, no pending approval, no
+   * unfinished compaction or native effect, no recorded handoff to inspect. The evidence written
+   * here says exactly that and nothing more, so the audit trail still explains why the gate
+   * opened. Never throws: a failed heal leaves the gate closed, which is the safe direction.
+   */
+  #healStaleRecovery(binding: SessionBinding, state: TaskState): void {
+    try {
+      const runtime = this.store.readDocument(`runtime:${binding.taskId}`)?.value as RuntimeRecord | undefined
+      const evidence = this.store.putArtifact(binding.taskId, Buffer.from(JSON.stringify({
+        schemaVersion: 1,
+        kind: 'host-startup-inspection',
+        note: 'No unfinished native work was found at startup: no live lease, prepared dispatch, uncertain check, pending approval, unfinished compaction, unfinished native effect or recorded handoff remained to inspect.',
+        phase: state.phase,
+        mode: state.control.mode,
+        at: new Date().toISOString(),
+      })), 'application/json')
+      const snapshot = runtime?.root
+        ? (() => { try { return snapshotWorkspace(runtime.root).id } catch { return SnapshotId(`startup:${randomUUID()}`) } })()
+        : SnapshotId(`startup:${randomUUID()}`)
+      this.append(binding.taskId, 'recovery/reconciled', { snapshot, evidenceRef: evidence.id })
+      this.ctx.logger.info(`[dsh-fusion] opened a stale recovery gate on ${binding.taskId}: nothing was left to inspect (evidence ${evidence.id})`)
+    } catch (error) {
+      this.ctx.logger.warn(`[dsh-fusion] stale recovery check failed for ${binding.taskId}: ${String(error)}`)
+    }
   }
 
   get auxiliary(): NativeAuxiliaryRequests {
@@ -902,7 +995,22 @@ export class FusionCoordinator {
     finally { agent.cancel({ kind: 'hook', reason }, { keepInbox: true }) }
   }
 
-  #accessBlocked(agent: Agent, binding: SessionBinding, role: Role): string | undefined {
+  /**
+   * @param opts.replayed The dispatch is a bridge route's transport replaying a step that
+   * route already executed in its own loop, not a new request. It carries no authority
+   * of its own, so the post-submit gate must not refuse it: the step that submits the
+   * report is exactly the step the transport reports back, and refusing that card ended
+   * the Worker turn as `blocked`, which DSH announced to the Lead as "declined the task"
+   * although the report was persisted (session-a1899929). The Worker's NEXT request is
+   * still gated here, which is what makes the Lead's delegation result settle.
+   * @param opts.readOnly The dispatch only reads. A Lead whose task is paused or awaiting an
+   * inspection may still read, inspect and answer — that cannot make a stopped task worse, and
+   * refusing the whole turn left the user with a four-millisecond dead turn and no explanation
+   * (session-6fdb5c73). Effects stay closed, and the turn stops after the first refused one so a
+   * model cannot keep asking; see `gatedDispatchProblem` and `gatedTurnStopped`.
+   */
+  #accessBlocked(agent: Agent, binding: SessionBinding, role: Role,
+    opts: { replayed?: boolean; readOnly?: boolean } = {}): string | undefined {
     const unavailable = this.modelControl?.blocked(binding, role)
     if (unavailable) return unavailable
     if (this.#closing) return 'Fusion runtime is closing'
@@ -913,12 +1021,29 @@ export class FusionCoordinator {
     if (trackingFailure) return trackingFailure
     const state = this.state(binding.taskId), control = state.control
     if (control.mode === 'completed' && role === 'lead') return undefined // final explanation; tools remain read-only
-    if (control.mode !== 'running' || control.budgetBlocked || control.recovering || control.outcomeUnknown || control.pendingApprovalIds.length) {
-      return `Fusion execution is gated: ${state.phase}`
+    // Budget and a pending approval are decisions about the request itself, not about its effects.
+    if (control.budgetBlocked || control.pendingApprovalIds.length) return `Fusion execution is gated: ${state.phase}`
+    if (control.recovering || control.outcomeUnknown) {
+      // An inspection gate has no panel control that lifts it, so a fresh turn gets to read and
+      // answer instead of dying in milliseconds (session-6fdb5c73). Effects stay closed below.
+      if (role !== 'lead') return `Fusion execution is gated: ${state.phase}`
+      if (!opts.readOnly || this.#turnStartTime(agent) <= this.#gatedSince(binding.taskId)) {
+        return gatedDispatchProblem({ role, readOnly: false, phase: state.phase, recovering: true })
+      }
+      // A refused effect already answered the question this turn asked; a further step could only
+      // retry it (measured: seven requests where the turn used to send none).
+      if (this.#gatedEffect.get(binding.taskId) === this.#latestUserSeq(agent)) {
+        return gatedTurnStopped({ recovering: true, phase: state.phase })
+      }
+      return gatedDispatchProblem({ role, readOnly: true, phase: state.phase, recovering: true })
     }
+    // A deliberate pause keeps stopping requests: the panel's "Continue once" and `/fusion resume`
+    // are the way forward, and a message cannot know which of them the user meant.
+    if (control.mode !== 'running') return `Fusion execution is gated: ${state.phase}`
     if (role === 'worker') {
       const runtime = this.#runtime(binding.taskId)
-      if (runtime.submitted) return 'Worker report was submitted; wait for Lead feedback'
+      const problem = workerSubmittedProblem(Boolean(runtime.submitted), opts.replayed === true)
+      if (problem) return problem
     }
     return undefined
   }
@@ -936,16 +1061,26 @@ export class FusionCoordinator {
     if (role !== 'lead') return
     try {
       const view = readModelControl(this.store, binding)
+      // The interrupted-effects gate has no panel control that lifts it, so the notice must
+      // name `/fusion recover` instead of sending the user back to "Continue once".
+      const reconcile = this.#needsReconcile(binding.taskId)
       // The control revision moves whenever a wait is lifted or added, so a
       // repeated attempt on the same state stays silent while a new gate speaks.
-      const id = `blocked-notice:${binding.taskId}:${digestOf({ role, reason, revision: view?.revision ?? 0 })}`
+      const id = `blocked-notice:${binding.taskId}:${digestOf({ role, reason, reconcile, revision: view?.revision ?? 0 })}`
       if (this.store.readDocument(id)) return
       const message = createUserMessage({ source: { kind: FUSION_SOURCE_KIND, form: 'notice',
         summary: bi('Fusion 暂停了这一轮', 'Fusion stopped this turn') },
-        content: [{ type: 'text', text: blockedNoticeText(role, reason) }] })
+        content: [{ type: 'text', text: blockedNoticeText(role, reason, reconcile) }] })
       const event = agent.session.append('user/message', message, { surfaceOp: 'append' })
-      this.store.writeDocument(id, 0, { schemaVersion: 1, taskId: binding.taskId, role, reason, eventSeq: event.seq })
+      this.store.writeDocument(id, 0, { schemaVersion: 1, taskId: binding.taskId, role, reason, reconcile, eventSeq: event.seq })
     } catch (error) { this.ctx.logger.warn(`[dsh-fusion] blocked-step notice failed: ${String(error)}`) }
+  }
+
+  /** Whether a task waits on human inspection of interrupted effects rather than on a pause. */
+  #needsReconcile(taskId: TaskId): boolean {
+    if (this.#trackingErrors.has(taskId)) return true
+    const control = this.state(taskId).control
+    return control.recovering || control.outcomeUnknown
   }
 
   async #prepareStatus(taskId: TaskId, signal?: AbortSignal): Promise<void> {
@@ -963,7 +1098,9 @@ export class FusionCoordinator {
   }
 
   #requestBlocked(agent: Agent, binding: SessionBinding, role: Role): string | undefined {
-    const blocked = this.#accessBlocked(agent, binding, role)
+    // A gated Lead still gets its turn: it reads what is recorded and says what it sees, while
+    // every effectful tool stays closed (`#toolBlocked`). Only the Worker's own requests stop.
+    const blocked = this.#accessBlocked(agent, binding, role, { readOnly: role === 'lead' })
     if (blocked) return blocked
     if (role === 'worker') {
       // The last admitted response may still contain tools or its report.
@@ -983,6 +1120,22 @@ export class FusionCoordinator {
   #latestUserSeq(agent: Agent): number {
     return agent.session.snapshotEvents().findLast(event => event.type === 'user/message'
       && (event.data.source === undefined || event.data.source.kind === 'user'))?.seq ?? 0
+  }
+
+  /**
+   * When the current turn started. A turn that began before the task stopped was planned against
+   * a task that could still act, so it keeps stopping; a turn the user starts afterwards is the
+   * one that may answer in read-only mode.
+   */
+  #turnStartTime(agent: Agent): number {
+    return agent.session.snapshotEvents().findLast(event => event.type === 'turn/start')?.time ?? 0
+  }
+
+  /** When the task stopped, so only a turn started afterwards may answer in read-only mode. */
+  #gatedSince(taskId: TaskId): number {
+    const stop = this.store.events(taskId).findLast(event =>
+      event.type === 'task/paused' || event.type === 'recovery/needed' || event.type === 'task/stop-requested')
+    return stop === undefined ? 0 : Date.parse(stop.createdAt)
   }
 
   /** One durable `worker-request:` row: the identity of a request and the brief it saw. */
@@ -1274,6 +1427,16 @@ export class FusionCoordinator {
   }
 
   /**
+   * Whether this dispatch is a bridge route's own transport replaying a step that route
+   * already executed in its own loop (`agy_tool` for Antigravity). Such a call is
+   * presentation, not a new request: it re-runs nothing and carries no authority, so no
+   * Fusion gate may read it as the Worker asking for more work.
+   */
+  #isTransportReplay(exec: Readonly<{ name: string }>, binding: SessionBinding, role: Role): boolean {
+    return isRouteTransportName(exec.name) && this.#routeTransport(binding, role) === exec.name
+  }
+
+  /**
    * Whether a text order's Worker route is told to stay read-only.
    *
    * A text order has no workspace by contract, but a bridge route (Antigravity's
@@ -1391,10 +1554,38 @@ export class FusionCoordinator {
       ? undefined : [...READ_TOOLS, ...FUSION_TOOLS]
   }
 
+  /** Whether this dispatch only reads: a read tool, or a shell the role sandbox still confines. */
+  #readOnlyDispatch(exec: Readonly<ToolExecution>, role: Role): boolean {
+    if (role !== 'lead') return false
+    if (isRead(exec)) return true
+    if (!isShellTool(exec.name)) return false
+    return this.roleSandbox.leadShellProblem(exec) === undefined
+  }
+
+  /**
+   * Record that a gated Lead turn asked for an effect and was refused, so its next step stops
+   * instead of retrying (measured: seven requests where the turn used to send none). Both the
+   * tool gate and the global guard can refuse, so both call this.
+   */
+  #noteGatedEffect(exec: Readonly<ToolExecution>, binding: SessionBinding, role: Role, readOnly: boolean): void {
+    if (role !== 'lead' || readOnly || !exec.agent) return
+    const control = this.state(binding.taskId).control
+    if (control.mode === 'running' && !control.recovering && !control.outcomeUnknown) return
+    this.#gatedEffect.set(binding.taskId, this.#latestUserSeq(exec.agent))
+  }
+
   #toolBlocked(exec: Readonly<ToolExecution>, binding: SessionBinding, role: Role): string | undefined {
     if (!exec.agent) return 'Fusion tools require a native Agent'
-    const blocked = this.#accessBlocked(exec.agent, binding, role)
-    if (blocked) return blocked
+    // A bridge route (Antigravity's agy) reports each step it ran inside its own loop through
+    // its transport (`agy_tool`), which only replays the recorded output. Resolve that once:
+    // the post-submit gate below must not refuse the very card that reports the submission.
+    const replayed = this.#isTransportReplay(exec, binding, role)
+    const readOnly = this.#readOnlyDispatch(exec, role)
+    const blocked = this.#accessBlocked(exec.agent, binding, role, { replayed, readOnly })
+    if (blocked) {
+      this.#noteGatedEffect(exec, binding, role, readOnly)
+      return blocked
+    }
     if (binding.profile.interactionMode === 'model-like' && !enforcedWorkflow(binding)) {
       const stalled = this.#readStreak(exec, role)
       if (stalled) return stalled
@@ -1405,7 +1596,20 @@ export class FusionCoordinator {
       const issue = this.effects.jobProblem(exec, binding.taskId)
       if (issue) return issue
     }
-    if (state.control.mode === 'completed') return 'This task is completed; begin a new task before using tools'
+    if (state.control.mode === 'completed') {
+      // A completed task still owes the user its closing explanation, and that explanation may
+      // need one last read to be true. Keep exactly what the running read-only Lead could do —
+      // read tools, and a shell the role sandbox still resolves read-only and confines, which
+      // `#separatedLeadGuard` then re-checks — and close everything that could start or change
+      // work. Refusing all of it made the Lead answer "unverified" from memory
+      // (session-a1899929), and contradicted the note on the gate above.
+      const problem = completedToolProblem({
+        role,
+        read: isRead(exec),
+        confinedShell: role === 'lead' && isShellTool(exec.name) && this.roleSandbox.leadShellProblem(exec) === undefined,
+      })
+      if (problem) return problem
+    }
     if (role === 'lead' && ['fusion_delegate', 'fusion_delegate_text', 'fusion_explore', 'fusion_rework', 'fusion_takeover'].includes(exec.name) && this.modelControl.waiting(binding, 'worker')
       // A Worker that stopped without its report, looped, or hit an unclassified error can be redirected by the
       // Lead with a new instruction (bounded); quota and credential stops still need the user.
@@ -1413,16 +1617,14 @@ export class FusionCoordinator {
       && !(exec.name !== 'fusion_takeover' && this.modelControl.leadRecover(binding, 'worker'))) {
       return 'Sidekick is unavailable; preserve its task and use the local Fusion controls to continue or replace its model. Do not retry delegation or take over automatically.'
     }
-    // A bridge route (Antigravity's agy) reports each step it ran inside its own
-    // loop through its transport (`agy_tool`), which only replays the recorded
-    // output. It carries no authority of its own: the real call was dispatched
-    // inside the bridge, where the agent-scope guard applied first. So it must
-    // not be refused as an unconfigured tool, counted as a read-only violation
-    // or a stale-brief action, or made to hold the write lease — every role and
-    // mode that reports back (a Lead delegating, a Worker exploring or
-    // implementing) needs it, and losing it silently degrades the turn to prose
-    // (WORKER_TOOLS_UNREACHABLE).
-    if (isRouteTransportName(exec.name) && this.#routeTransport(binding, role) === exec.name) return undefined
+    // A bridge route reports each step through its transport (`agy_tool`), which only
+    // replays the recorded output. It carries no authority of its own: the real call was
+    // dispatched inside the bridge, where the agent-scope guard applied first. So it must
+    // not be refused as an unconfigured tool, counted as a read-only violation or a
+    // stale-brief action, or made to hold the write lease — every role and mode that
+    // reports back (a Lead delegating, a Worker exploring or implementing) needs it, and
+    // losing it silently degrades the turn to prose (WORKER_TOOLS_UNREACHABLE).
+    if (replayed) return undefined
     if (role === 'worker' && !isRead(exec)) {
       const problem = workerToolBriefProblem(this.store, binding.taskId, exec, this.#runtime(binding.taskId).briefRevision ?? 0,
         this.#routeTransport(binding, role))
@@ -1681,7 +1883,7 @@ export class FusionCoordinator {
     const pending = (async () => {
       try {
         const state = this.state(binding.taskId)
-        if (state.control.mode === 'running') this.append(binding.taskId, 'task/paused', { reason: 'Lead turn stopped during a background handoff' })
+        if (state.control.mode === 'running') this.append(binding.taskId, 'task/paused', { reason: BACKGROUND_HANDOFF_PAUSE })
         const childId = state.acceptedChild ?? state.reservedChild
         const child = childId && this.ctx.agents.get(NativeSessionId(childId))
         if (child) { await this.#stopJobs(binding.taskId, () => this.transport.stop(agent, child.id)) }

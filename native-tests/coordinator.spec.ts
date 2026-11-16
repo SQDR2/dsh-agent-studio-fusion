@@ -116,6 +116,11 @@ async function setup(script: Script, workerScript?: Script, options: {
   bridgeTransport?: boolean
   foreman?: { route?: PhysicalRoute; maxOutputTokens?: number; timeoutMs?: number; policy?: ForemanPolicy } | boolean
   planReview?: (agent: Agent, binding: SessionBinding) => PlanReviewModule
+  /**
+   * After a bridge dispatch settles, also dispatch the transport's own replay of that step,
+   * the way the session's next native card does. Used to prove a replay is never refused.
+   */
+  bridgeReplayProbe?: boolean
 } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'fusion-coordinator-'))
   const workspace = join(root, 'project')
@@ -213,7 +218,15 @@ async function setup(script: Script, workerScript?: Script, options: {
       const result = await executeSingleTool(ctx.tools as unknown as ScopedToolService, {
         name: step.tool, callId: `agy-mcp-${++bridgeSeq}`,
         arguments: step.input ?? {}, signal: exec.signal, agent: exec.agent })
-      return result.content.map(block => block.type === 'text' ? block.text : '').join('')
+      const text = result.content.map(block => block.type === 'text' ? block.text : '').join('')
+      if (!options.bridgeReplayProbe) return text
+      // The very next dispatch this session receives is the same step replayed as a native
+      // card. Do it here, in the same tick and on the same Agent, so a gate that refuses
+      // replays is visible as the card's own result instead of only on a live run.
+      const replay = await executeSingleTool(ctx.tools as unknown as ScopedToolService, {
+        name: 'agy_tool', callId: `agy-mcp-replay-${++bridgeSeq}`,
+        arguments: { run: 'run-1', step: 1 }, signal: exec.signal, agent: exec.agent })
+      return text + '\nreplay: ' + replay.content.map(block => block.type === 'text' ? block.text : '').join('')
     } })
   const bridgeDispose = options.bridgeTransport ? ctx.tools.register(bridgeTool) : undefined
   if (bridgeDispose) cleanups.push(async () => { bridgeDispose() })
@@ -1472,6 +1485,42 @@ describe('bridge-route Worker', () => {
   })
 
   /**
+   * The step that submits the report is also the step the transport reports back, so the
+   * two dispatches are adjacent: the bridge's own call lands the report and arms the
+   * post-submit gate, and the replayed card that describes that same step is dispatched
+   * immediately afterwards. That card is presentation only — it re-runs nothing — but the
+   * gate refused it, which ended the Worker turn as `blocked` with no closing message.
+   * DSH then announced "declined the task" to the Lead although the report was persisted
+   * and its checks had passed (session-a1899929), and the Lead explained that phantom
+   * refusal to the user. The gate belongs to the Worker's NEXT request, not to a replay.
+   */
+  it('replays the transport step that reported the submission instead of refusing it', async () => {
+    const { ctx, parent, coordinator, store, taskId } = await setup([
+      delegate(), textResponse('Awaiting the review.'),
+    ], [edit(), toolCallResponse('bridged-submit', 'agy_tool', { run: 'run-1', step: 2, tool: 'fusion_submit_result',
+      input: { summary: 'Corrected add in calc.py.', status: 'completed', unresolved: [] } })],
+    { bridgeTransport: true, bridgeReplayProbe: true })
+    // The Worker's card lives in its own session, and settlement disposes that session, so
+    // record what it published while it was live.
+    const workerResults: unknown[] = []
+    cleanups.push(async () => stop())
+    const stop = ctx.on('session/event', (session, event) => {
+      if (session.header.parentSession === parent.id && event.type === 'tool/result') workerResults.push(event)
+    })
+    parent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Fix addition and verify it.' }] }))
+    await parent.whenIdle()
+    const results = JSON.stringify(workerResults)
+    expect(coordinator.state(taskId), results).toMatchObject({ phase: 'REVIEWING' })
+    expect(store.readDocument(`runtime:${taskId}`)?.value).toMatchObject({ submitted: { status: 'completed' } })
+    // The report landed, and the card describing that same step replayed its recorded output.
+    expect(results).toContain('replay: replayed bridge step')
+    expect(results).not.toContain('Worker report was submitted')
+    // The gate itself is untouched: it is the Worker's NEXT request that stops, which is what
+    // settles the Lead's delegation result.
+    expect(coordinator.state(taskId).phase).toBe('REVIEWING')
+  })
+
+  /**
    * The bridged dispatch carries `agy-mcp-N`, a bridge-local id that appears in
    * no assistant message of this session. Binding the brief gate to that id
    * refused the report itself — `Worker tool requires a complete native model
@@ -2196,6 +2245,49 @@ describe('owned native background commands', () => {
   })
 })
 
+describe('a gated task still answers', () => {
+  /**
+   * An inspection gate has no panel control that lifts it. Refusing the whole turn gave neither an
+   * answer nor a way forward — the model never ran, so the turn ended in milliseconds with nothing
+   * in it (session-6fdb5c73). A turn the user starts after the gate reads what is recorded, answers,
+   * and stops at the first effect it asks for, so a model cannot turn the refusal into a retry loop.
+   */
+  it('lets an inspecting Lead read and answer while effectful tools stay closed', async () => {
+    const lead: Script = [delegate(false), textResponse('Working.')]
+    const { parent, coordinator, adapter, taskId } = await setup(lead, [edit(), report()], { files: true })
+    parent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Fix addition.' }] }))
+    await parent.whenIdle()
+    await waitForNative(() => expect(coordinator.state(taskId).acceptedChild).toBeDefined())
+    // The state a restart arms when the last Host left something to inspect.
+    coordinator.append(taskId, 'recovery/needed', { reason: 'scripted interruption' })
+    expect(coordinator.state(taskId).control.recovering).toBe(true)
+    const before = adapter.requests.length
+    lead.push(
+      toolCallResponse('read-again', 'read', { file_path: 'calc.py' }),
+      toolCallResponse('delegate-blocked', 'fusion_delegate', {
+        block: true, goal: 'Correct addition', brief: 'Fix calc.py add and preserve the test.',
+        constraints: [], allowedPaths: ['calc.py'],
+        checks: [{ id: 'addition', description: 'Existing addition test passes', command: py('python3 -B -m unittest -v test_calc'),
+          kind: 'test', parser: 'unittest', definitionPaths: ['test_calc.py'] }],
+      }),
+      textResponse('I can read; delegation waits for the inspection.'),
+    )
+    parent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'What does it hold?' }] }))
+    await parent.whenIdle()
+    const tail = parent.session.snapshotEvents().slice(-4).map(event => `${event.type} ${JSON.stringify(event.data).slice(0, 240)}`).join('\n')
+    // Two steps — read, then the refused delegation — and the third request is refused, so no
+    // retry storm follows the refusal.
+    expect(adapter.requests.length, tail).toBe(before + 2)
+    const results = toolResults(parent).slice(-3).map(result => JSON.stringify(result.message.content)).join('\n')
+    expect(results).toContain('return a - b')
+    expect(results).toContain('/fusion recover')
+    expect(results).toContain('execution is gated')
+    // Nothing effectful ran and the gate is still closed.
+    expect(coordinator.state(taskId).control.recovering).toBe(true)
+    expect(coordinator.state(taskId).currentWorkOrder?.mode).toBe('implement')
+  })
+})
+
 describe('Sidekick paths in the leased workspace', () => {
   // The lease holds the realpath; models write the session's spelling (macOS /tmp is /private/tmp, a symlinked checkout).
   it('accepts any spelling of the project root and its subdirectories, and refuses directories outside it', async () => {
@@ -2916,9 +3008,11 @@ describe('complete native Fusion workflow', () => {
     // The host records the user's own choice; a 0.2.2 host additionally records the physical
     // route Fusion pinned for the step, because a step's selection is fixed before dispatch.
     const virtual = intent.filter(event => event.data.provider === FUSION_PROVIDER)
-    expect(virtual).toHaveLength(1)
     expect(virtual[0]).toMatchObject({ data: { provider: FUSION_PROVIDER, model: FUSION_MODEL } })
     expect(events.indexOf(virtual[0]!)).toBeLessThan(events.findIndex(event => event.type === 'request/header'))
+    // The pin is given back when the turn settles: the model menu reads `modelSelection.next`,
+    // so the newest recorded selection has to name the combo again, not the pair's Lead.
+    expect(intent.at(-1)).toMatchObject({ data: { provider: FUSION_PROVIDER, model: FUSION_MODEL } })
     // Physical request accounting stays truthful; the native menu retains the
     // separately committed virtual selection even when it was a saved default.
     expect(events.findLast(event => event.type === 'request/header')).toMatchObject({
@@ -4369,6 +4463,39 @@ describe('enforced-v3 role separation', () => {
     // The child is seeded with the Lead's read-only override, then given the user's mode before its first request.
     expect(seen.get(coordinator.state(taskId).acceptedChild!)?.at(-1)).toBe('workspace-write')
     expect(readFileSync(join(workspace, 'calc.py'), 'utf8')).toContain('a + b')
+  })
+
+  /**
+   * A completed task still owes the user its closing explanation, and that explanation may
+   * need one last read to be true. The gate refused every tool once the review was accepted —
+   * although the note on the access gate promises read-only tools stay usable — so the Lead
+   * had to answer "unverified" from memory about a fact one `Get-Item` would have settled
+   * (session-a1899929). Keep the running read-only ceiling: read tools, and a shell the role
+   * sandbox still confines. Close everything that could start or change work.
+   */
+  it('lets the completed Lead verify with read-only tools and closes everything else', async () => {
+    const { ctx, parent, coordinator, taskId, workspace } = await setup([delegateV3(), acceptV3(), textResponse('Verified.')], [edit(), report()], options)
+    parent.followup(createUserMessage({ source: { kind: 'user' },  content: [{ type: 'text', text: 'Correct addition.' }] }))
+    await parent.whenIdle()
+    expect(coordinator.state(taskId), JSON.stringify(toolResults(parent))).toMatchObject({ phase: 'COMPLETED' })
+    const dispatch = async (name: string, args: unknown, suffix: string) => {
+      const outcome = await executeSingleTool(ctx.tools as unknown as ScopedToolService, {
+        name, arguments: args, agent: parent, callId: `after-accept-${suffix}`, signal: new AbortController().signal,
+      })
+      return outcome.content.map(block => (block as { text?: string }).text ?? '').join('')
+    }
+    // One last read, and the read-only command that would have settled the live question.
+    expect(await dispatch('read', { file_path: 'calc.py' }, 'read')).toContain('a + b')
+    const inspected = await dispatch(shellTool, { command: 'ls calc.py', description: 'Confirm the file is still there' }, 'shell')
+    expect(inspected).toContain('calc.py')
+    expect(inspected).not.toContain('This task is completed')
+    // Everything that could start or change work stays closed.
+    expect(await dispatch('write', { file_path: 'note.txt', content: 'x' }, 'write')).toContain('This task is completed')
+    expect(await dispatch('fusion_delegate', {
+      block: true, goal: 'Correct addition', brief: 'Fix calc.py add and preserve the test.',
+      constraints: [], allowedPaths: ['calc.py'], checks: [],
+    }, 'delegate')).toContain('This task is completed')
+    expect(() => readFileSync(join(workspace, 'note.txt'))).toThrow()
   })
 
   it('refuses Lead writes, forged takeover and sandbox escalation, but runs a read-only command', async () => {

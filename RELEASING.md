@@ -112,8 +112,8 @@ under one version heading each. It lists only versions published from this repos
 
 `scripts/build.mjs` no longer version-gates the Host. It builds with whatever checkout `DSHX_HARNESS` names (or with the
 local esbuild pass when none is given), so a release build is reproducible from any checkout of a supported release. The
-supported runtime is declared once, in `engines.dsh` (`>=0.2.1-rc.5 <0.3.0-0`) plus `engines.node` (`>=24.0.0`), and
-checked by `scripts/link-host.mjs` and the peer ranges rather than by the bundler.
+supported runtime is declared once, in `engines.dsh` (`>=0.2.1-rc.5 <0.2.2-0 || >=0.2.2-rc.2 <0.3.0-0`) plus
+`engines.node` (`>=24.0.0`), and checked by `scripts/link-host.mjs` and the peer ranges rather than by the bundler.
 
 CI still checks out an older devkit tag to run `pnpm build`/`pnpm test`. That is a build-time dependency of this
 repository, not a statement about supported runtimes: the published plugin is expected to run on any release in

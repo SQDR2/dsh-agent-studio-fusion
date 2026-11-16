@@ -1,11 +1,9 @@
 /**
  * Runtime detection for the DSH subagent seam.
  * 0.2.1 renamed continuable start/drain and removed `ctx.subagents.start`; the supported
- * baseline is `>=0.2.1-rc.5 <0.3.0-0`, the range this package declares in its own
- * `peerDependencies`. The older names remain as a feature-detection fallback only — callers
- * branch on the function that is actually present, never on a version string. This constant
- * is the product's support promise, so it is not narrowed here to whatever Host happens to be
- * under test: a Host inside the declared range that lacks a seam is reported as such.
+ * baseline is `>=0.2.1-rc.5 <0.2.2-0 || >=0.2.2-rc.2 <0.3.0-0`. The older names remain as a feature-detection
+ * fallback only — callers branch on the function that is actually present, never on a
+ * version string.
  *
  * 0.2.2 removed `drainChildren`/`drainContinuableChildren` entirely and flattened the
  * activation spec in the same release, so one marker answers both questions:
@@ -16,7 +14,7 @@
  *   retains the receipt it received. The surviving `drainDescendants` is not a replacement:
  *   it permanently closes the caller's whole subagent tree.
  */
-export declare const supportedDshVersions = ">=0.2.1-rc.5 <0.3.0-0";
+export declare const supportedDshVersions = ">=0.2.1-rc.5 <0.2.3-0";
 export declare function hasStartActivation(subagents: object): boolean;
 /** Prefer `primary` (the 0.2.1 name) when both exist. */
 export declare function requireSubagentMethod(subagents: object, primary: string, fallback: string): string;
