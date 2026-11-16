@@ -44,10 +44,13 @@ function harness() {
   } as unknown as Agent
   // The session already runs a Fusion task, so the combo is `selected` and a pin is never a
   // "the user switched model" drain.
+  let drained = 0
   const coordinator = {
-    bindings: { read: () => ({ binding: { selected: true, profile: { id: `fusion-${FUSION_MODEL}` } } }) },
+    bindings: { read: () => ({ binding: { selected: true, profile: {
+      id: `fusion-${FUSION_MODEL}`, lead: { provider: 'gz', model: 'gpt-6.1-sol' }, worker: { provider: 'gz', model: 'deepseek-v4.1-flash' },
+    } } }) },
     pause: async () => {},
-    clear: async () => {},
+    clear: async () => { drained += 1 },
     selectBeforeAssembly: () => {},
     pinRoute: () => {},
   }
@@ -73,7 +76,14 @@ function harness() {
     ;(agent as unknown as { status: string }).status = 'running'
     emit('agent/status', { agent, status: 'running' })
   }
-  return { agent, events, session, lastSelection, settle, startTurn, dispose }
+  /** Drive the registered `agent/request` guard the way the Host's waterfall does. */
+  const request = async () => {
+    const guard = handlers.get('agent/request')?.[0]
+    if (guard === undefined) throw new Error('no agent/request guard installed')
+    const config = { provider: 'gz', model: 'gpt-6.1-sol' }
+    return guard({ agent, turn: 1, step: 1, signal: new AbortController().signal }, async () => config)
+  }
+  return { agent, events, session, lastSelection, settle, startTurn, request, drained: () => drained, dispose }
 }
 
 const menuCombo = { provider: FUSION_PROVIDER, model: FUSION_MODEL }
@@ -119,5 +129,34 @@ describe('the model menu after a pinned Fusion turn', () => {
     settle(2)
 
     expect(events.slice(settled).map(event => event.type)).toEqual(['model/selection', 'turn/end', 'model/selection'])
+  })
+})
+
+describe('a pin a restarted Host no longer remembers', () => {
+  // The map that recognises Fusion's own appends lives in the Host process. After a restart
+  // the newest recorded selection is still the pair's Lead, and it is the only trace of a
+  // task the user never left — session-7f326880 turned 3 read that as a model switch, drained
+  // the Fusion task and then refused the turn with "先停止当前 Fusion 任务，再切换模型。"
+  const frozenLead = { provider: 'gz', model: 'gpt-6.1-sol', reasoningEffort: 'high' }
+
+  it('reads the frozen pair route as Fusion, so the turn is allowed and nothing drains', async () => {
+    const { session, request, drained, lastSelection, startTurn } = harness()
+    session.append('model/selection', frozenLead)
+
+    startTurn()
+    await expect(request()).resolves.toBeDefined()
+
+    expect(drained()).toBe(0)
+    // The combo is re-stated at the running reservation, so the menu names it again.
+    expect(lastSelection()).toEqual(menuCombo)
+  })
+
+  it('still drains for a model the pair does not name', async () => {
+    const { session, drained } = harness()
+    session.append('model/selection', { provider: 'gz', model: 'gpt-5.6-sol', reasoningEffort: 'high' })
+    // The drain is asynchronous: pause, clear, then install the next combo.
+    await new Promise(resolve => setTimeout(resolve, 0))
+
+    expect(drained()).toBe(1)
   })
 })
