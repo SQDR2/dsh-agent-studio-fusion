@@ -20,6 +20,32 @@ own tags and releases.
 Entry format: what changed, then what was actually validated. "Not claimed" lines mark what a release did *not* test —
 read them before assuming a platform is covered.
 
+## 1.1.1 — 2026-11-16
+
+### The model menu keeps the combo, not the pair's Lead
+
+- **A pinned turn never gave the user's selection back.** On a 0.2.2 Host, Fusion records the
+  pair's Lead route as the step's `model/selection` before the loop fixes that step, because a
+  proposal that differs from the captured route throws. That pin is also the newest recorded
+  selection, and the composer reads `modelSelection.next` (`pending ?? lastUsed`), so a session
+  opened on a Fusion combo displayed the Lead from its first turn on and never went back:
+  session-7f326880 picked the combo "6.1 --> Gemini 3.8" and the composer showed
+  `gz/gpt-5.6-sol` for the whole task. `restoreNativeIntent` existed for exactly this hand-back
+  but nothing called it, and `consumeNativePin`/`consumedNativePin` were never read. The restore
+  now runs on the Agent's `running` → `idle` transition, and the unused pair is gone.
+- **The hand-back cannot run from `turn/end` itself.** A Session refuses to append while another
+  append is being published (`session append cannot reenter while another append is being
+  published`), so the restore waits for the status transition that ends the turn. A turn that is
+  still running keeps showing the pair's Lead: the Host fixes a step's route before any listener
+  can run, and every step of that turn dispatches with it.
+
+Validated: unit suite 687 passed, including 3 new cases in `tests/route-pin.spec.ts` that are red
+on 1.1.0's source; host suite 303 passed / 1 skipped against a `0.2.2-rc.2` checkout
+(`DSHX_HARNESS=<checkout> pnpm test:host`), including the updated native-selection case that now
+asserts the newest recorded selection names the combo once the turn settles. Not claimed: the
+composer was not driven through a browser in this release; the projection's `next` was verified
+from the recorded events it reads.
+
 ## 1.1.0 — 2026-11-15
 
 ### A stopped task no longer locks the conversation
