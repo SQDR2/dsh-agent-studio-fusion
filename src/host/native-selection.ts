@@ -9,7 +9,7 @@ import { FUSION_MODEL, FUSION_PROVIDER, isCurrentFusionSelection, isFusionModel,
 import { modelOfProfileId } from './pairs.js'
 import type { ResolvedProfile } from '../profile/resolve.js'
 import type { FusionCoordinator } from './coordinator.js'
-import { isNativeRoutePin, recordNativeIntent } from './route-pin.js'
+import { isNativeRoutePin, recordNativeIntent, restoreNativeIntent } from './route-pin.js'
 
 export { FUSION_MODEL, FUSION_PROVIDER, isFusionSelection }
 
@@ -134,7 +134,17 @@ export function installNativeFusionSelection(ctx: Context, input: {
       else if (agent && !selected(agent)) agent.cancel({ kind: 'hook', reason: 'Fusion selection takes effect after this turn settles' }, { keepInbox: true })
     }),
     ctx.on('agent/status', ({ agent, status }) => {
-      if (status !== 'running' || agent.session.header.parentSession) return
+      if (status !== 'running') {
+        // The turn that pinned the pair's Lead has settled, which is exactly when the model
+        // menu has to name the combo again: session-7f326880 opened on the combo
+        // "6.1 --> Gemini 3.8" and the composer showed `gz/gpt-5.6-sol` for the whole task.
+        // `turn/end` is the same moment but publishes an append, and a Session refuses to
+        // append while another append is being published, so the restore waits for the
+        // status transition that ends the turn.
+        restoreNativeIntent(agent)
+        return
+      }
+      if (agent.session.header.parentSession) return
       if (pending.has(agent.id) && selected(agent)) {
         agent.cancel({ kind: 'hook', reason: 'Model switch is draining the previous Fusion task' }, { keepInbox: true })
         return

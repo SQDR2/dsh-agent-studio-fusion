@@ -2987,9 +2987,11 @@ describe('complete native Fusion workflow', () => {
     // The host records the user's own choice; a 0.2.2 host additionally records the physical
     // route Fusion pinned for the step, because a step's selection is fixed before dispatch.
     const virtual = intent.filter(event => event.data.provider === FUSION_PROVIDER)
-    expect(virtual).toHaveLength(1)
     expect(virtual[0]).toMatchObject({ data: { provider: FUSION_PROVIDER, model: FUSION_MODEL } })
     expect(events.indexOf(virtual[0]!)).toBeLessThan(events.findIndex(event => event.type === 'request/header'))
+    // The pin is given back when the turn settles: the model menu reads `modelSelection.next`,
+    // so the newest recorded selection has to name the combo again, not the pair's Lead.
+    expect(intent.at(-1)).toMatchObject({ data: { provider: FUSION_PROVIDER, model: FUSION_MODEL } })
     // Physical request accounting stays truthful; the native menu retains the
     // separately committed virtual selection even when it was a saved default.
     expect(events.findLast(event => event.type === 'request/header')).toMatchObject({

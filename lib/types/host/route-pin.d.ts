@@ -10,13 +10,18 @@
  *
  * Step preparation reads `agent.model.current()` before any waterfall runs, so the last
  * synchronous point that can still influence a step is the turn boundary. Fusion pins the
- * physical route at `turn/start` and gives the user's own selection back at `turn/end`,
+ * physical route there and gives the user's own selection back when the turn settles,
  * which leaves the model menu on the combo the user chose while never touching a step.
+ * {@link restoreNativeIntent} is that second half; leaving the pin as the last recorded
+ * selection would make the menu name the pair's Lead model from then on. A pinned turn
+ * therefore does show the Lead while it runs — the Host fixes a step's route before any
+ * listener can run — and the combo comes back when the Agent goes idle.
  *
  * A pin is an ordinary `model/selection` append, so two readers have to recognise it:
  * the native selection listener (which would otherwise read the pin as "the user picked
  * another model" and drain the task) and the model menu projection (which would otherwise
- * display the pair's Lead model). {@link isNativeRoutePin} answers both.
+ * display the pair's Lead model, which is what the settle-time restore above undoes).
+ * {@link isNativeRoutePin} answers both.
  *
  * The capability is `agent.model`, which 0.2.1 does not have at all: there the route is
  * still applied by the `agent/request` rewrite, and every function here is a no-op.
@@ -56,21 +61,22 @@ export declare function isNativeRoutePin(agent: Agent, selection: Selection): bo
  */
 export declare function pinNativeRoute(agent: Agent, route: PhysicalRoute): boolean;
 /**
- * Give the session's recorded choice back to the user's own intent at `turn/end`.
+ * Give the model menu the user's own selection back once a pinned turn settles.
  *
- * Without this the durable pin would be the last recorded selection, so the model menu
- * would show the pair's Lead model instead of the combo. The next turn pins again, which
- * is correct: a task rollover can change the route, and pinning is skipped when the
- * selection already matches.
+ * Without this the durable pin stays the last recorded selection, so every later `next`
+ * the menu projection reads is the pair's Lead model instead of the combo the user picked:
+ * the composer showed `gz/gpt-5.6-sol` for a session the user opened on a Fusion combo, and
+ * it never went back. The restore is unconditional because a pin is only ever Fusion's own
+ * append, and it is a no-op when the recorded selection already is the user's choice. The
+ * next turn pins again, which is correct: a task rollover can change the route, and pinning
+ * is skipped when the selection already matches.
+ *
+ * The native selection listener calls this from the Agent's `running` → `idle` transition,
+ * which is the same moment as `turn/end` but outside the append that publishes `turn/end`:
+ * a Session refuses to append while another append is being published, so the restore
+ * cannot run from the `turn/end` event itself.
  * @param agent - the Agent to restore.
  * @returns whether a different selection was recorded.
  */
-export declare function consumeNativePin(agent: Agent): void;
-/**
- * Whether a completed turn ran under a pin, so the user's choice has to be restored.
- * @param agent - the Agent whose turn just ended.
- * @returns whether a pin was consumed and has not been restored yet.
- */
-export declare function consumedNativePin(agent: Agent): boolean;
 export declare function restoreNativeIntent(agent: Agent): boolean;
 export {};
