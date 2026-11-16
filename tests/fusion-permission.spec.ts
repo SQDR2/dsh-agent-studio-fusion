@@ -124,3 +124,43 @@ describe('Fusion permission chip registration', () => {
       .toMatchObject({ sessionId: 'session-1', directory: store })
   })
 })
+
+describe('live status shows the Foreman review state', () => {
+  const withReview = (planReview: NonNullable<Task['planReview']>): FusionStatus => ({
+    schemaVersion: 1, sessionId: 's', selected: true, observedAt: '2026-11-06T00:00:00.000Z',
+    task: { ...base, planReview },
+  })
+
+  async function mountStatus(value: FusionStatus) {
+    pinLanguage('zh-CN')
+    const { default: ReactDefault } = await import('react')
+    const { FusionStatus: StatusComponent } = await import('../src/client/FusionStatus.js')
+    const doc = new EventTarget(); Object.assign(doc, { visibilityState: 'visible' }); vi.stubGlobal('document', doc)
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => value })))
+    let root!: ReactTestRenderer
+    await act(async () => { root = create(ReactDefault.createElement(StatusComponent, { sessionId: 's' })) })
+    roots.push(root)
+    return root
+  }
+
+  it('shows reviewing, ready, concerns and unavailable, with the reason and unanswered findings', async () => {
+    const reviewing = await mountStatus(withReview({ status: 'reviewing', round: 1 }))
+    expect(JSON.stringify(reviewing.toJSON())).toContain('审查中')
+    await act(async () => { reviewing.unmount() })
+
+    const concerns = await mountStatus(withReview({ status: 'concerns', round: 1, policy: 'gate',
+      findings: [{ id: 'f-1', category: 'acceptance-gap', severity: 'blocking-concern', message: 'no oracle' }] }))
+    const concernsText = JSON.stringify(concerns.toJSON())
+    expect(concernsText).toContain('有分歧')
+    expect(concernsText).toContain('第 1 轮')
+    expect(concernsText).toContain('no oracle')
+    // The reviewer's prompt must never reach a status poll.
+    expect(concernsText).not.toContain('independent plan auditor')
+    await act(async () => { concerns.unmount() })
+
+    const unavailable = await mountStatus(withReview({ status: 'unavailable', round: 1, unavailableReason: 'provider timed out' }))
+    const unavailableText = JSON.stringify(unavailable.toJSON())
+    expect(unavailableText).toContain('不可用')
+    expect(unavailableText).toContain('provider timed out')
+  })
+})

@@ -2,7 +2,8 @@ import type { Context } from '@deepseek-ai/cordis';
 import type { Agent } from '@deepseek-ai/dsh-agent';
 import type { GenerateOptions } from '@deepseek-ai/dsh-llm';
 import type { ToolExecution, ToolRunContext } from '@deepseek-ai/dsh-tools';
-import type { FusionEvent, Role, TaskId } from '../contracts.js';
+import type { ForemanDisposition, FusionEvent, RequirementCoverage, Role, TaskId } from '../contracts.js';
+import { type PlanReviewModule } from '../plan-review.js';
 import { WorkspaceWriteLease } from '../execution/write-lease.js';
 import type { ResolvedProfile } from '../profile/resolve.js';
 import type { SqliteFusionStore } from '../task/sqlite-store.js';
@@ -19,6 +20,7 @@ import { NativeOnDemandContext } from './native-on-demand-context.js';
 import { NativeTaskContext } from './native-task-context.js';
 import { NativeApprovals } from './native-approvals.js';
 import { NativeEffects } from './native-effects.js';
+import { NativeAuxiliaryRequests } from './native-auxiliary.js';
 import { NativeCacheKeepalive } from './native-keepalive.js';
 import type { KeepaliveClock } from './native-keepalive.js';
 import { NativeWorkerTransport } from './native-worker.js';
@@ -40,6 +42,8 @@ export interface CoordinatorOptions {
     commandMaxSeconds?: number;
     /** Test clock only; production retains the recovered fixed schedule. */
     keepaliveClock?: KeepaliveClock;
+    /** Optional plan review service factory for testing/custom auditor injection. */
+    planReview?: (agent: Agent, binding: SessionBinding) => PlanReviewModule;
     /**
      * The ACP route names this deployment configured. A Worker dispatched on one
      * runs as an agent process whose only Host tools arrive through the ACP bridge;
@@ -115,6 +119,14 @@ interface DelegateInput {
     authority?: readonly string[];
     /** Let the Worker declare a background process that outlives its report (dev server, watcher). */
     preserveRuntime?: boolean;
+    /** Lead-authored explicit decisions for this plan. Non-empty strings. */
+    decisions?: string[];
+    /** Lead-authored unresolved uncertainties or assumptions. Non-empty strings. */
+    uncertainties?: string[];
+    /** Mapping from 0-based requirement indexes to implementation notes and acceptance check IDs. */
+    requirementCoverage?: RequirementCoverage[];
+    /** Dispositions addressing Foreman plan review findings from a previous round. */
+    foremanDispositions?: ForemanDisposition[];
 }
 /** Whitespace-insensitive, otherwise exact: a requirement must be the user's own words. */
 export declare const normalizeQuote: (text: string) => string;
@@ -160,6 +172,7 @@ export declare class FusionCoordinator {
     readonly workflow: NativeWorkflow;
     readonly roleSandbox: NativeRoleSandbox;
     constructor(ctx: Context, store: SqliteFusionStore, options: CoordinatorOptions);
+    get auxiliary(): NativeAuxiliaryRequests;
     state(id: TaskId): TaskState;
     /**
      * Why a task still owns live work in this Host process, or `undefined` when it
@@ -196,6 +209,13 @@ export declare class FusionCoordinator {
      */
     acpWorkerFacts(agent: Agent): AcpWorkerFacts | undefined;
     select(agent: Agent, resolved?: ResolvedProfile): Promise<void>;
+    /**
+     * Re-pin this Agent's frozen physical route after a caller recorded the virtual selection.
+     *
+     * 0.2.2 fixes the route at step preparation, so the physical selection has to be the newest
+     * one recorded before that read. A no-op while no Fusion scope is installed.
+     */
+    pinRoute(agent: Agent): void;
     /** Only at idle selection or native running reservation, before prompt assembly. */
     selectBeforeAssembly(agent: Agent, resolved: ResolvedProfile): void;
     clear(agent: Agent): Promise<void>;

@@ -125,6 +125,134 @@ export interface WorkOrder {
   decisions: readonly { text: string; source: SourceRef }[];
   uncertainties: readonly string[];
   policy: ResourcePolicy;
+  /** Stable digest of the semantic plan-review projection of this order. */
+  candidateDigest?: Digest;
+  /** Requirement-to-implementation and acceptance mapping for each user requirement. */
+  requirementCoverage?: readonly RequirementCoverage[];
+}
+/** One user requirement's implementation notes and the checks that prove it. */
+export interface RequirementCoverage {
+  requirementIndex: number;
+  implementationNotes: readonly string[];
+  acceptanceIds: readonly string[];
+}
+export type PlanReviewCheckKind = 'test' | 'static-check';
+export type PlanReviewCheckParser =
+  | 'unittest'
+  | 'pytest'
+  | 'vitest'
+  | 'jest'
+  | 'mocha'
+  | 'tap'
+  | 'go'
+  | 'cargo'
+  | 'exit-code';
+export type PlanReviewBaseline = 'no-new-failures';
+/** One frozen acceptance command as the plan reviewer sees it. */
+export interface PlanReviewCheckDefinition {
+  id: string;
+  description: string;
+  command: string;
+  kind: PlanReviewCheckKind;
+  parser: PlanReviewCheckParser;
+  definitionPaths: readonly string[];
+  timeoutSeconds?: number;
+  baseline?: PlanReviewBaseline;
+  independent?: boolean;
+  allowedFailures?: readonly string[];
+}
+/** The complete, self-contained input one plan review sees. */
+export interface PlanReviewCandidate {
+  schemaVersion: 1;
+  order: WorkOrder;
+  brief: string;
+  requirementCoverage: readonly RequirementCoverage[];
+  checkDefinitions: readonly PlanReviewCheckDefinition[];
+  /** The user messages this plan answers, verbatim; absent on older records. */
+  userMessages?: readonly string[];
+  /** Bounded summary of collected exploration evidence; absent on older records. */
+  evidenceSummary?: string;
+  /** Read-only JSON Schema of ForemanAssessment, so the reviewer can build conforming output. */
+  assessmentSchema?: Readonly<Record<string, unknown>>;
+}
+export type FailureClass =
+  | 'plan-defect'
+  | 'execution-defect'
+  | 'acceptance-gap'
+  | 'lead-review-miss'
+  | 'environment-failure'
+  | 'missing-user-decision';
+export type ForemanDefectAttribution = 'hit' | 'miss' | 'false-positive' | 'not-applicable';
+/** Durable offline classification of one defect against the review that preceded it. */
+export interface ForemanAttributionRecord {
+  schemaVersion: 1;
+  id: string;
+  taskId: TaskId;
+  workOrderId?: WorkOrderId;
+  candidateDigest?: Digest;
+  failureClass: FailureClass;
+  preventableAtPlanTime: boolean;
+  attribution: ForemanDefectAttribution;
+  confidence: number;
+  evidence: readonly ArtifactRef[];
+  summary?: string;
+}
+/** One semantic gap the independent plan reviewer reports. */
+export interface ForemanFinding {
+  id: string;
+  category:
+    | 'requirement-coverage'
+    | 'acceptance-gap'
+    | 'decision-counterexample'
+    | 'unresolved-assumption'
+    | 'scope-contradiction'
+    | 'material-ambiguity';
+  severity: 'warning' | 'blocking-concern';
+  requirementIndexes: number[];
+  decisionIndexes: number[];
+  message: string;
+  suggestedCorrection: string;
+}
+/** The reviewer's structured output for exactly one candidate digest. */
+export interface ForemanAssessment {
+  schemaVersion: 1;
+  candidateDigest: string;
+  verdict: 'ready' | 'concerns';
+  acceptanceAudit: {
+    uncoveredRequirements: ForemanFinding[];
+    weakOracles: ForemanFinding[];
+    falseGreenScenarios: ForemanFinding[];
+  };
+  decisionChallenges: {
+    unsupportedDecisions: ForemanFinding[];
+    counterexamples: ForemanFinding[];
+    unresolvedCriticalAssumptions: ForemanFinding[];
+  };
+  materialAmbiguities: ForemanFinding[];
+}
+/** The Lead's recorded answer to one finding: accept and revise, or override with a reason. */
+export type ForemanDisposition =
+  | { findingId: string; action: 'accepted'; changeSummary: string }
+  | { findingId: string; action: 'overridden'; reason: string };
+/** How a combo uses the reviewer: shadow, blocking gate, or deterministic risk trigger. */
+export type ForemanPolicy = 'shadow' | 'gate' | 'risk-gated';
+/** One plan review attempt, bound to the candidate digest and round it reviewed. */
+export interface PlanReviewRecord {
+  schemaVersion: 1;
+  taskId: TaskId;
+  workOrderId: WorkOrderId;
+  candidateDigest: Digest;
+  round: number;
+  route: PhysicalRoute;
+  requestedAt: string;
+  completedAt: string;
+  outcome: 'assessment' | 'unavailable';
+  assessment?: ForemanAssessment;
+  unavailableReason?: string;
+  durationMs: number;
+  policy?: ForemanPolicy;
+  triggerDecision?: { triggered: boolean; reasons: readonly string[] };
+  dispositions?: readonly ForemanDisposition[];
 }
 export interface ExplorationSource {
   path: string;
@@ -228,6 +356,8 @@ export interface PairProfile {
   cacheKeepalive?: Readonly<Record<Role, boolean | 'auto'>>;
   /** Optional explicit summary route. Missing means the current role model. */
   compactor?: { readonly route: PhysicalRoute; readonly maxOutputTokens: number };
+  /** Optional independent plan reviewer. Missing means plan review is off. */
+  foreman?: { readonly route: PhysicalRoute; readonly maxOutputTokens: number; readonly timeoutMs: number; readonly policy?: ForemanPolicy };
   dataPolicyId: string;
   evidenceCampaignIds: readonly string[];
 }
@@ -340,7 +470,7 @@ export interface UsageAttempt {
   taskId: TaskId;
   agentId: SessionId;
   role: Role;
-  purpose: 'conversation' | 'compaction' | 'review' | 'routing' | 'other';
+  purpose: 'conversation' | 'compaction' | 'review' | 'routing' | 'foreman' | 'other';
   route: PhysicalRoute;
   epochId: EpochId;
   serviceTier?: string;
@@ -387,9 +517,15 @@ export type FusionEvent =
   | EventEnvelope<'requirements/revised', { reason: string }>
   | EventEnvelope<'profile/frozen', { digest: Digest; profileId: string; version: string }>
   | EventEnvelope<'intent/chosen', { intent: ExecutionIntent }>
+  | EventEnvelope<'plan-review/requested', { workOrderId: WorkOrderId; candidateDigest: Digest; round: number; route: PhysicalRoute; requestedAt?: string; triggerDecision?: { triggered: boolean; reasons: readonly string[] } }>
+  | EventEnvelope<'plan-review/completed', { workOrderId: WorkOrderId; candidateDigest: Digest; round: number; assessment: ForemanAssessment; record: PlanReviewRecord }>
+  | EventEnvelope<'plan-review/resolved', { workOrderId: WorkOrderId; candidateDigest: Digest; round: number; dispositions: readonly ForemanDisposition[]; revisedCandidateDigest?: Digest; resolvedAt?: string }>
+  | EventEnvelope<'plan-review/unavailable', { workOrderId: WorkOrderId; candidateDigest: Digest; round: number; reason: string; record: PlanReviewRecord }>
+  | EventEnvelope<'foreman-attribution/completed', { record: ForemanAttributionRecord }>
   | EventEnvelope<'work-order/prepared', { order: WorkOrder; reservedChild: SessionId }>
   | EventEnvelope<'work-order/acceptance-amended', { workOrderId: WorkOrderId; acceptance: readonly AcceptanceCriterion[]; reason: string }>
   | EventEnvelope<'work-order/scope-expanded', { workOrderId: WorkOrderId; allowedPaths: readonly string[]; added: readonly string[]; reason: string }>
+  | EventEnvelope<'worker/rework-requested', { workOrderId: WorkOrderId; child: SessionId; ordinal: number; briefRevision: number }>
   | EventEnvelope<'child/accepted', { operationId: OperationId; child: SessionId; messageId: string }>
   | EventEnvelope<'child/claimed', { operationId: OperationId; child: SessionId }>
   | EventEnvelope<'exploration/recorded', { report: ExplorationReport }>

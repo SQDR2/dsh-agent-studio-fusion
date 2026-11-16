@@ -1,5 +1,4 @@
 import type { SessionEvent } from '@deepseek-ai/dsh-session/types'
-import type {} from '@deepseek-ai/dsh-tools/types'
 import { isRouteTransportName } from './host/route-transport.js'
 
 /** Plugin-owned presentation record; never appended to a native Session. */

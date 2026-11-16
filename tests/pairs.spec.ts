@@ -82,4 +82,32 @@ describe('saved combos', () => {
     expect(modelProfileFromChoice(choice('deepseek-v4', 'deepseek-v4-mini'), 'fusion-pair-a1b2c3d4'))
       .toMatchObject({ id: 'fusion-pair-a1b2c3d4', interactionMode: 'model-like', workflowPolicy: 'enforced-v3' })
   })
+
+  // Every optional role has to survive the read that follows a save: a combo is
+  // re-read from storage before the page shows it again, so a role the reader
+  // drops looks like the toggle that was just switched never took effect.
+  it('keeps the optional foreman and compactor through a save and re-read', () => {
+    const store = memory()
+    const pair: PairChoice = {
+      ...choice('deepseek-v4', 'deepseek-v4-mini'),
+      compactor: { route: { provider: 'llm-deepseek', model: 'deepseek-v4-mini' }, maxOutputTokens: 8192 },
+      foreman: { route: { provider: 'pi-anthropic', model: 'claude-opus-5' }, maxOutputTokens: 2048, timeoutMs: 15000, policy: 'gate' },
+    }
+    writePairs(store, 0, validatePairs([{ name: '审', pair }], catalog, []))
+    expect(readPairs(store).pairs[0]!.pair).toMatchObject({ compactor: pair.compactor, foreman: pair.foreman })
+  })
+
+  it('drops a foreman that is structurally unreadable instead of the whole combo', () => {
+    const store = memory()
+    writePairs(store, 0, validatePairs([{ name: '审', pair: choice('deepseek-v4', 'deepseek-v4-mini') }], catalog, []))
+    const broken = store.readDocument(PAIRS_DOCUMENT)!.value as { pairs: { pair: Record<string, unknown> }[] }
+    // A timeout outside 1000–120000 ms cannot describe a usable review call.
+    broken.pairs[0]!.pair.foreman = { route: { provider: 'pi-anthropic', model: 'claude-opus-5' }, maxOutputTokens: 2048, timeoutMs: 1 }
+    const document = store.readDocument(PAIRS_DOCUMENT)!
+    store.writeDocuments([{ id: PAIRS_DOCUMENT, expectedRevision: document.revision, value: broken }])
+    const [saved] = readPairs(store).pairs
+    expect(saved).toBeDefined()
+    expect(saved!.pair).not.toHaveProperty('foreman')
+    expect(saved!.pair.lead).toEqual({ provider: 'llm-deepseek', model: 'deepseek-v4' })
+  })
 })

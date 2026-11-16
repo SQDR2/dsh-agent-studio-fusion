@@ -21,6 +21,6 @@ export function compactorChoice(value: unknown): PairProfile['compactor'] {
 }
 
 /** All physical routes in a frozen configuration share the same explicit spending authorization. */
-export function profileRoutes(profile: Pick<PairProfile, 'lead' | 'worker' | 'compactor'>): PhysicalRoute[] {
-  return [profile.lead, profile.worker, ...(profile.compactor ? [profile.compactor.route] : [])]
+export function profileRoutes(profile: Pick<PairProfile, 'lead' | 'worker'> & Partial<Pick<PairProfile, 'compactor' | 'foreman'>>): PhysicalRoute[] {
+  return [profile.lead, profile.worker, ...(profile.compactor ? [profile.compactor.route] : []), ...(profile.foreman ? [profile.foreman.route] : [])]
 }

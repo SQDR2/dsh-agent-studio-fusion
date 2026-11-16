@@ -144,6 +144,124 @@ export interface WorkOrder {
     }[];
     uncertainties: readonly string[];
     policy: ResourcePolicy;
+    candidateDigest?: Digest;
+    requirementCoverage?: readonly RequirementCoverage[];
+}
+export interface RequirementCoverage {
+    requirementIndex: number;
+    implementationNotes: readonly string[];
+    acceptanceIds: readonly string[];
+}
+export type PlanReviewCheckKind = 'test' | 'static-check';
+export type PlanReviewCheckParser = 'unittest' | 'pytest' | 'vitest' | 'jest' | 'mocha' | 'tap' | 'go' | 'cargo' | 'exit-code';
+export type PlanReviewBaseline = 'no-new-failures';
+export interface PlanReviewCheckDefinition {
+    id: string;
+    description: string;
+    command: string;
+    kind: PlanReviewCheckKind;
+    parser: PlanReviewCheckParser;
+    definitionPaths: readonly string[];
+    timeoutSeconds?: number;
+    baseline?: PlanReviewBaseline;
+    independent?: boolean;
+    allowedFailures?: readonly string[];
+}
+export interface PlanReviewCandidate {
+    schemaVersion: 1;
+    order: WorkOrder;
+    brief: string;
+    requirementCoverage: readonly RequirementCoverage[];
+    checkDefinitions: readonly PlanReviewCheckDefinition[];
+    /**
+     * The user messages this plan answers, verbatim. Optional so a candidate recorded before
+     * this field existed still parses; when present it is part of the semantic digest, because
+     * a reviewer asked to judge coverage of a request has to see the request itself.
+     */
+    userMessages?: readonly string[];
+    /**
+     * A bounded summary of the exploration evidence the Lead actually collected. Optional for
+     * the same compatibility reason. This is fresh evidence, never the Lead's hidden reasoning:
+     * the reviewer sees what was found, not how the Lead felt about it.
+     */
+    evidenceSummary?: string;
+    /**
+     * Read-only JSON Schema of the expected `ForemanAssessment` output, attached so the reviewer
+     * can build a conforming object instead of guessing a shape it was only told the name of.
+     * It describes the output contract only: it carries no scoring rule, rubric or instruction,
+     * and it is not part of the semantic digest because it is derived, not Lead-authored.
+     */
+    assessmentSchema?: Readonly<Record<string, unknown>>;
+}
+export type FailureClass = 'plan-defect' | 'execution-defect' | 'acceptance-gap' | 'lead-review-miss' | 'environment-failure' | 'missing-user-decision';
+export type ForemanDefectAttribution = 'hit' | 'miss' | 'false-positive' | 'not-applicable';
+export interface ForemanAttributionRecord {
+    schemaVersion: 1;
+    id: string;
+    taskId: TaskId;
+    workOrderId?: WorkOrderId;
+    candidateDigest?: Digest;
+    failureClass: FailureClass;
+    preventableAtPlanTime: boolean;
+    attribution: ForemanDefectAttribution;
+    confidence: number;
+    evidence: readonly ArtifactRef[];
+    summary?: string;
+}
+export interface ForemanAssessment {
+    schemaVersion: 1;
+    candidateDigest: string;
+    verdict: 'ready' | 'concerns';
+    acceptanceAudit: {
+        uncoveredRequirements: ForemanFinding[];
+        weakOracles: ForemanFinding[];
+        falseGreenScenarios: ForemanFinding[];
+    };
+    decisionChallenges: {
+        unsupportedDecisions: ForemanFinding[];
+        counterexamples: ForemanFinding[];
+        unresolvedCriticalAssumptions: ForemanFinding[];
+    };
+    materialAmbiguities: ForemanFinding[];
+}
+export interface ForemanFinding {
+    id: string;
+    category: 'requirement-coverage' | 'acceptance-gap' | 'decision-counterexample' | 'unresolved-assumption' | 'scope-contradiction' | 'material-ambiguity';
+    severity: 'warning' | 'blocking-concern';
+    requirementIndexes: number[];
+    decisionIndexes: number[];
+    message: string;
+    suggestedCorrection: string;
+}
+export type ForemanDisposition = {
+    findingId: string;
+    action: 'accepted';
+    changeSummary: string;
+} | {
+    findingId: string;
+    action: 'overridden';
+    reason: string;
+};
+export type ForemanPolicy = 'shadow' | 'gate' | 'risk-gated';
+export interface PlanReviewRecord {
+    schemaVersion: 1;
+    taskId: TaskId;
+    workOrderId: WorkOrderId;
+    candidateDigest: Digest;
+    round: number;
+    route: PhysicalRoute;
+    requestedAt: string;
+    completedAt: string;
+    outcome: 'assessment' | 'unavailable';
+    assessment?: ForemanAssessment;
+    unavailableReason?: string;
+    durationMs: number;
+    policy?: ForemanPolicy;
+    triggerDecision?: {
+        triggered: boolean;
+        reasons: readonly string[];
+    };
+    dispositions?: readonly ForemanDisposition[];
 }
 export interface ExplorationSource {
     path: string;
@@ -255,6 +373,13 @@ export interface PairProfile {
         readonly route: PhysicalRoute;
         readonly maxOutputTokens: number;
     };
+    /** Optional explicit shadow plan auditor route; absence preserves old frozen profile digests. */
+    foreman?: {
+        readonly route: PhysicalRoute;
+        readonly maxOutputTokens: number;
+        readonly timeoutMs: number;
+        readonly policy?: ForemanPolicy;
+    };
     dataPolicyId: string;
     evidenceCampaignIds: readonly string[];
 }
@@ -318,7 +443,7 @@ export interface UsageAttempt {
     taskId: TaskId;
     agentId: SessionId;
     role: Role;
-    purpose: 'conversation' | 'compaction' | 'review' | 'routing' | 'other';
+    purpose: 'conversation' | 'compaction' | 'review' | 'routing' | 'foreman' | 'other';
     route: PhysicalRoute;
     epochId: EpochId;
     serviceTier?: string;
@@ -405,6 +530,37 @@ export type FusionEvent = EventEnvelope<'task/created', {
     version: string;
 }> | EventEnvelope<'intent/chosen', {
     intent: ExecutionIntent;
+}> | EventEnvelope<'plan-review/requested', {
+    workOrderId: WorkOrderId;
+    candidateDigest: Digest;
+    round: number;
+    route: PhysicalRoute;
+    requestedAt?: string;
+    triggerDecision?: {
+        triggered: boolean;
+        reasons: readonly string[];
+    };
+}> | EventEnvelope<'plan-review/completed', {
+    workOrderId: WorkOrderId;
+    candidateDigest: Digest;
+    round: number;
+    assessment: ForemanAssessment;
+    record: PlanReviewRecord;
+}> | EventEnvelope<'plan-review/resolved', {
+    workOrderId: WorkOrderId;
+    candidateDigest: Digest;
+    round: number;
+    dispositions: readonly ForemanDisposition[];
+    revisedCandidateDigest?: Digest;
+    resolvedAt?: string;
+}> | EventEnvelope<'plan-review/unavailable', {
+    workOrderId: WorkOrderId;
+    candidateDigest: Digest;
+    round: number;
+    reason: string;
+    record: PlanReviewRecord;
+}> | EventEnvelope<'foreman-attribution/completed', {
+    record: ForemanAttributionRecord;
 }> | EventEnvelope<'work-order/prepared', {
     order: WorkOrder;
     reservedChild: SessionId;
@@ -417,6 +573,11 @@ export type FusionEvent = EventEnvelope<'task/created', {
     allowedPaths: readonly string[];
     added: readonly string[];
     reason: string;
+}> | EventEnvelope<'worker/rework-requested', {
+    workOrderId: WorkOrderId;
+    child: SessionId;
+    ordinal: number;
+    briefRevision: number;
 }> | EventEnvelope<'child/accepted', {
     operationId: OperationId;
     child: SessionId;

@@ -45,9 +45,25 @@ const takeoverReason = (lang: Lang, reason: string) => ({
 const tokens = (lang: Lang, field: HistoryTotals['input'], calls: number) => !calls ? '—' : !field.reported ? tr(lang, '未提供', 'not reported')
   : `${formatCompact(field.known)} (${field.known.toLocaleString()})${field.reported < calls ? tr(lang, `（${field.reported}/${calls} 次有报告）`, ` (${field.reported}/${calls} reported)`) : ''}`
 const purpose = (lang: Lang, value: string) => ({ conversation: tr(lang, '任务', 'task'), compaction: tr(lang, '压缩', 'compaction'),
-  'cache-keepalive': tr(lang, '保活', 'keepalive'), 'session-title': tr(lang, '标题', 'title') } as Record<string, string>)[value] ?? value
+  'cache-keepalive': tr(lang, '保活', 'keepalive'), 'session-title': tr(lang, '标题', 'title'),
+  foreman: tr(lang, '工长审查', 'Foreman review') } as Record<string, string>)[value] ?? value
 /** A dollar figure, or a dash when it could not be computed. */
 export const money = (value: string | null): string => value === null ? '—' : `$${Number(value).toFixed(2)}`
+
+/**
+ * The Foreman cost figure with its coverage.
+ *
+ * A subtotal over priced calls is not the total: when only some reviewer calls could be priced,
+ * the row says so instead of presenting a partial sum as the whole bill. With nothing priced it
+ * reports an unknown amount rather than "$0.00".
+ */
+function foremanCostText(lang: Lang, foreman: { calls: number; costUsd: string | null
+  priced: number; unpriced: number; incomplete: number; unknown: number }): string {
+  if (foreman.costUsd === null) return tr(lang, '费用未知', 'cost unknown')
+  if (foreman.priced >= foreman.calls) return tr(lang, `· 约 ${money(foreman.costUsd)}`, `· about ${money(foreman.costUsd)}`)
+  return tr(lang, `· 约 ${money(foreman.costUsd)}（仅 ${foreman.priced}/${foreman.calls} 次可定价）`,
+    `· about ${money(foreman.costUsd)} (${foreman.priced}/${foreman.calls} calls priced)`)
+}
 /** What still holds the task, so a refusal says why instead of only that it refused. */
 const blockerText = (lang: Lang, blocker?: string) => ({
   agent: tr(lang, 'Lead 或 Sidekick 仍在运行', 'its Lead or Sidekick is still running'),
@@ -157,7 +173,7 @@ export function FusionHistory() {
         <h3>{tr(lang, '用量统计', 'Usage statistics')}</h3>
         <p>{tr(lang, `${page.totalTasks} 项任务 · ${page.totals.calls} 次原生请求 · ${page.totals.final} 次用量定稿 · ${page.totals.provisional} 次暂报 · ${page.totals.unreported} 次未提供`,
           `${page.totalTasks} tasks · ${page.totals.calls} native requests · ${page.totals.final} final usage · ${page.totals.provisional} provisional · ${page.totals.unreported} unreported`)}</p>
-        <p>{tr(lang, '未缓存输入', 'Uncached input')} {tokens(lang, page.totals.input, page.totals.calls)} · {tr(lang, '缓存读取', 'cache read')} {tokens(lang, page.totals.cacheRead, page.totals.calls)} · {tr(lang, '总输出', 'Total output')} {outputTokens(lang, page.totals, page.totals.calls)} Token</p>
+        <p>{tr(lang, '未缓存输入', 'Uncached input')} {tokens(lang, page.totals.input, page.totals.calls)} · {tr(lang, '缓存读取', 'cache read')} {tokens(lang, page.totals.cacheRead, page.totals.calls)} · {tr(lang, '总输出', 'Total output')} {outputTokens(lang, page.totals, page.totals.calls)} Token{page.totals.foremanCalls ? tr(lang, ` · 工长审查 ${page.totals.foremanCalls} 次`, ` · Foreman reviews: ${page.totals.foremanCalls}`) : ''}</p>
         {page.cost && <p>{tr(lang, `本页按价目表估算 ${money(page.cost.apiEquivalentUsd)}，覆盖 ${page.cost.priced} 次请求`,
           `This page estimates ${money(page.cost.apiEquivalentUsd)} at list prices, covering ${page.cost.priced} requests`)}
           {page.cost.savedUsd !== null ? tr(lang, `；比同样的 token 全交给 Lead 省下 ${money(page.cost.savedUsd)}（${page.cost.basis} 次请求可比）`,
@@ -174,7 +190,7 @@ export function FusionHistory() {
           <table><caption>{tr(lang, '按角色、实际模型和请求用途', 'By role, actual model and purpose')}</caption><thead><tr>
             <th scope="col">{tr(lang, '角色 / 模型', 'Role / model')}</th><th scope="col">{tr(lang, '用途', 'Purpose')}</th><th scope="col">{tr(lang, '请求', 'Requests')}</th><th scope="col">{tr(lang, '总输出 Token（可见 / 推理）', 'Total output tokens (visible / reasoning)')}</th></tr></thead>
             <tbody>{page.groups.map(group => <tr key={JSON.stringify([group.role, group.provider, group.model, group.purpose])}>
-              <th scope="row">{group.role === 'lead' ? 'Lead' : 'Sidekick'} · {group.model}<small>{group.provider}</small></th>
+              <th scope="row">{group.role === 'lead' ? 'Lead' : group.role === 'foreman' ? 'Foreman' : 'Sidekick'} · {group.model}<small>{group.provider}</small></th>
               <td>{purpose(lang, group.purpose)}</td><td>{group.calls}</td><td>{outputTokens(lang, group, group.calls)}</td>
             </tr>)}</tbody>
           </table>
@@ -204,6 +220,33 @@ export function FusionHistory() {
                 <strong>{task.title}</strong>
                 <small>
                   {new Date(task.createdAt).toLocaleString()} · {task.mode === 'completed' ? tr(lang, '已结束', 'finished') : task.phase} · {tr(lang, `${task.usage.calls} 次请求`, `${task.usage.calls} requests`)}{task.takeovers ? tr(lang, ` · Lead 接手 ${task.takeovers} 次`, ` · ${task.takeovers} Lead takeovers`) : ''}
+                  {task.planReview ? (
+                    <span>
+                      {' · '}
+                      <strong>
+                        {task.planReview.status === 'ready'
+                          ? tr(lang, '工长审查：就绪', 'Foreman: ready')
+                          : task.planReview.status === 'concerns'
+                          ? tr(lang, '工长审查：有分歧', 'Foreman: concerns')
+                          : tr(lang, '工长审查：不可用', 'Foreman: unavailable')}
+                      </strong>
+                      {` (${task.planReview.round} 轮`}
+                      {task.planReview.dispositionsCount
+                        ? tr(
+                            lang,
+                            `，接受 ${task.planReview.dispositionsCount.accepted}，覆盖 ${task.planReview.dispositionsCount.overridden}`,
+                            `, ${task.planReview.dispositionsCount.accepted} accepted, ${task.planReview.dispositionsCount.overridden} overridden`,
+                          )
+                        : ''}
+                      {')'}
+                    </span>
+                  ) : ''}
+                  {task.planReview?.unavailableReason
+                    ? tr(lang, ` · 原因：${task.planReview.unavailableReason}`, ` · reason: ${task.planReview.unavailableReason}`) : ''}
+                  {task.planReview?.foreman
+                    ? tr(lang, ` · 工长 ${task.planReview.foreman.calls} 次 · ${task.planReview.foreman.inputReported ? `${task.planReview.foreman.input + task.planReview.foreman.output} Token` : 'Token 未报告'} ${foremanCostText(lang, task.planReview.foreman)}${task.planReview.foreman.durationMs ? ` · ${Math.round(task.planReview.foreman.durationMs / 100) / 10}s` : ''}`,
+                        ` · Foreman ${task.planReview.foreman.calls} calls · ${task.planReview.foreman.inputReported ? `${task.planReview.foreman.input + task.planReview.foreman.output} tokens` : 'tokens not reported'} ${foremanCostText(lang, task.planReview.foreman)}${task.planReview.foreman.durationMs ? ` · ${Math.round(task.planReview.foreman.durationMs / 100) / 10}s` : ''}`)
+                    : task.usage.foremanCalls ? tr(lang, ` · 工长调用 ${task.usage.foremanCalls} 次`, ` · ${task.usage.foremanCalls} Foreman calls`) : ''}
                   {task.cost?.priced ? tr(lang, ` · 约 ${money(task.cost.apiEquivalentUsd)}`, ` · about ${money(task.cost.apiEquivalentUsd)}`) : ''}
                   {task.cost?.savedUsd !== null && task.cost?.savedUsd !== undefined ? tr(lang, `（省 ${money(task.cost.savedUsd)}）`, ` (saved ${money(task.cost.savedUsd)})`) : ''}
                 </small>
@@ -245,6 +288,20 @@ export function FusionHistory() {
                 {rowError.message}
               </p>
             )}
+            {task.planReview?.findings?.length ? (
+              <details className="fusion-history-plan-review">
+                <summary>{tr(lang, `工长提出的 ${task.planReview.findings.length} 条意见`, `${task.planReview.findings.length} Foreman findings`)}</summary>
+                <ul>{task.planReview.findings.map(finding => <li key={finding.id}>
+                  {finding.id} · {finding.category} · {finding.severity}
+                  <small>{finding.message}</small>
+                  {finding.disposition
+                    ? <small>{finding.disposition.action === 'accepted'
+                      ? tr(lang, `已接受并修订：${finding.disposition.note}`, `accepted and revised: ${finding.disposition.note}`)
+                      : tr(lang, `已覆盖：${finding.disposition.note}`, `overridden: ${finding.disposition.note}`)}</small>
+                    : <small>{tr(lang, '尚未处理', 'not answered')}</small>}
+                </li>)}</ul>
+              </details>
+            ) : null}
             <details><summary>{tr(lang, '记录详情', 'Details')}</summary><p>{tr(lang, '任务', 'Task')}: {task.id}</p><p>{tr(lang, '会话', 'Session')}: {task.sessionId}</p>
               <p>{tr(lang, `验证状态：${task.verification}。历史运行状态不代表当前仍在执行。`, `Verification: ${task.verification}. A recorded state does not mean it is still running.`)}</p>
               <p>{tr(lang, '输入', 'Input')} {tokens(lang, task.usage.input, task.usage.calls)} · {tr(lang, '缓存读取', 'cache read')} {tokens(lang, task.usage.cacheRead, task.usage.calls)} · {tr(lang, '总输出', 'Total output')} {outputTokens(lang, task.usage, task.usage.calls)} Token</p>

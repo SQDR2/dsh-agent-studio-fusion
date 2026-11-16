@@ -1,5 +1,5 @@
 import type { ControlView } from './host/native-model-control.js';
-import type { PhysicalRoute, Role, SandboxMode, TokenMeasurement, UsdDecimal, VerificationLevel } from './contracts.js';
+import type { FusionEvent, PhysicalRoute, Role, SandboxMode, TokenMeasurement, UsdDecimal, VerificationLevel } from './contracts.js';
 /** Bounded, read-only UI projection. No prompts, tool arguments or credentials. */
 export interface FusionStatus {
     schemaVersion: 1;
@@ -46,6 +46,7 @@ export interface FusionStatus {
             unreportedCalls: number;
             compactionCalls: number;
             keepaliveCalls: number;
+            foremanCalls?: number;
             /** Known subtotals only; missing request fields never become zero totals. */
             input: UsageSubtotal;
             cacheRead: UsageSubtotal;
@@ -54,6 +55,9 @@ export interface FusionStatus {
             upstreamHttpCalls: null;
             /** Where the tokens went: the point of Fusion is that most land on the cheaper Worker. */
             byRole: Record<Role, RoleUsage>;
+            byPurpose?: {
+                foreman?: RoleUsage;
+            };
         };
         /** Checks frozen on the current work order; 0 means the Lead review was the only verification. */
         automatedChecks: number | null;
@@ -98,6 +102,13 @@ export interface FusionStatus {
         /** True while a human inspection is required before continue, model switch, or leaving Fusion. */
         recovering?: boolean;
         outcomeUnknown?: boolean;
+        /**
+         * Bounded plan-review state for the live status component. Carries the verdict, the
+         * round, and the finding identifiers and categories the Lead must answer — never the
+         * prompt, the candidate order or the model's raw text, so nothing a user should not see
+         * can leak through a status poll.
+         */
+        planReview?: PlanReviewStatus;
     };
 }
 export interface RoleUsage {
@@ -143,3 +154,39 @@ export interface TaskCost {
     /** When the seeded rates were last checked. */
     checked: string;
 }
+/** Component-facing plan review state; prompts and raw model output never appear here. */
+export interface PlanReviewStatus {
+    /** `reviewing` is a request in flight, the rest are the last recorded outcome. */
+    status: 'reviewing' | 'ready' | 'concerns' | 'unavailable';
+    round: number | null;
+    policy?: 'shadow' | 'gate' | 'risk-gated';
+    /** Why the reviewer was not available; bounded text, no prompt material. */
+    unavailableReason?: string;
+    /** Findings the Lead still has to answer, by id and category only. */
+    findings?: readonly {
+        id: string;
+        category: string;
+        severity: string;
+        message: string;
+    }[];
+    accepted?: number;
+    overridden?: number;
+}
+export interface PlanReviewMetrics {
+    reviews: number;
+    concerns: number;
+    ready: number;
+    unavailable: number;
+    overrides: number;
+    acceptedDispositions: number;
+    /** Worker implementation rounds after the first. Plan review is counted separately. */
+    reworkRounds: number;
+    /** Times the reviewer ran a second time because the Lead revised the candidate. */
+    planReviewRevisions: number;
+    /** Accepts recorded over a protocol-invalid binding. Unverified completion is not an error. */
+    errorAccepts: number;
+}
+/**
+ * Derives machine-readable plan review metrics from a sequence of task events.
+ */
+export declare function projectPlanReviewMetrics(events: readonly FusionEvent[]): PlanReviewMetrics;

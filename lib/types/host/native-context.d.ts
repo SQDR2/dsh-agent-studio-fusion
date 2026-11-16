@@ -14,7 +14,7 @@ interface ContextCheck {
     route: PhysicalRoute;
     measurement: TokenMeasurement;
     budget: number;
-    purpose: GenerateOptions['purpose'] | 'conversation' | 'cache-keepalive';
+    purpose: GenerateOptions['purpose'] | 'conversation' | 'cache-keepalive' | 'foreman';
     logRevision: number;
     nativeBaseline: string;
     minimumRetainedInputTokens: number;

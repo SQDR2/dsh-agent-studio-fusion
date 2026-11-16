@@ -18,6 +18,7 @@ import type {
 } from '../contracts.js'
 import { TERMINAL_PHASES } from '../contracts.js'
 import { digestOf } from '../digest.js'
+import { collectForemanFindings } from '../plan-review.js'
 import { assertCurrentSubject, reportSubject, reviewReadinessReceipt, sameSubject } from '../review/ticket.js'
 import type { TaskState } from './state.js'
 
@@ -115,6 +116,264 @@ function applyPayload(state: TaskState | undefined, event: FusionEvent): TaskSta
         intent: event.payload.intent,
         phase: event.payload.intent === 'DIRECT' ? 'DIRECT' : 'PLANNING',
       }
+    case 'plan-review/requested': {
+      const next = need(state, event)
+      if (event.payload.round !== 1 && event.payload.round !== 2) {
+        throw new FusionError(EVENT_CONFLICT, `Plan review round must be 1 or 2, got ${String(event.payload.round)}`)
+      }
+      if (next.pendingPlanReview) {
+        throw new FusionError(EVENT_CONFLICT, 'A plan review is already pending; complete or fail it before requesting another')
+      }
+      const duplicateRound = next.planReviews?.some(
+        r => r.candidateDigest === event.payload.candidateDigest && r.round === event.payload.round,
+      )
+      if (duplicateRound) {
+        throw new FusionError(EVENT_CONFLICT, `Duplicate plan review round ${event.payload.round} for candidate digest ${event.payload.candidateDigest}`)
+      }
+      return {
+        ...next,
+        pendingPlanReview: {
+          workOrderId: event.payload.workOrderId,
+          candidateDigest: event.payload.candidateDigest,
+          round: event.payload.round,
+          route: event.payload.route,
+          requestedAt: event.payload.requestedAt ?? event.createdAt,
+        },
+      }
+    }
+    case 'plan-review/completed': {
+      const next = need(state, event)
+      const pending = next.pendingPlanReview
+      if (!pending) {
+        throw new FusionError(EVENT_CONFLICT, 'Cannot complete plan review without a pending plan review request')
+      }
+      if (
+        pending.workOrderId !== event.payload.workOrderId ||
+        pending.candidateDigest !== event.payload.candidateDigest ||
+        pending.round !== event.payload.round
+      ) {
+        throw new FusionError(EVENT_CONFLICT, 'Pending plan review does not match completed payload')
+      }
+      const duplicateRound = next.planReviews?.some(
+        r => r.candidateDigest === event.payload.candidateDigest && r.round === event.payload.round,
+      )
+      if (duplicateRound) {
+        throw new FusionError(EVENT_CONFLICT, `Duplicate plan review round ${event.payload.round} for candidate digest ${event.payload.candidateDigest}`)
+      }
+      const record = event.payload.record
+      if (!record.completedAt || typeof record.completedAt !== 'string') {
+        throw new FusionError(EVENT_CONFLICT, 'PlanReviewRecord completedAt is required for completed review')
+      }
+      if (
+        record.taskId !== event.taskId ||
+        record.workOrderId !== event.payload.workOrderId ||
+        record.candidateDigest !== event.payload.candidateDigest ||
+        record.round !== event.payload.round ||
+        record.outcome !== 'assessment' ||
+        record.route.provider !== pending.route.provider ||
+        record.route.model !== pending.route.model ||
+        record.requestedAt !== pending.requestedAt ||
+        !record.assessment ||
+        record.assessment.verdict !== event.payload.assessment.verdict
+      ) {
+        throw new FusionError(EVENT_CONFLICT, 'Completed review record is inconsistent with event payload')
+      }
+      // The payload assessment and the persisted record must be the same review, not two
+      // reports that merely agree on a verdict: a caller could otherwise keep a favourable
+      // verdict while recording findings the Lead never saw and never has to answer.
+      if (digestOf(record.assessment) !== digestOf(event.payload.assessment)) {
+        throw new FusionError(EVENT_CONFLICT, 'Completed assessment does not match the recorded assessment')
+      }
+      // The route the review actually ran on is part of its cost attribution: a record
+      // whose provider, model or reasoning effort differs from the requested route would
+      // bill one model and claim another.
+      if (
+        record.route.provider !== pending.route.provider ||
+        record.route.model !== pending.route.model ||
+        record.route.reasoningEffort !== pending.route.reasoningEffort
+      ) {
+        throw new FusionError(EVENT_CONFLICT, 'Completed review route does not fully match the requested route')
+      }
+      // A reviewer that reports on a candidate it was not given cannot be trusted to have
+      // reviewed this plan; the assessment's own digest has to name the requested candidate.
+      if (event.payload.assessment.candidateDigest !== event.payload.candidateDigest) {
+        throw new FusionError(EVENT_CONFLICT, 'Assessment candidateDigest does not match the requested candidate')
+      }
+      const reviews = [...(next.planReviews ?? []), record]
+      return {
+        ...next,
+        pendingPlanReview: undefined,
+        planReviews: reviews,
+        latestPlanReview: record,
+      }
+    }
+    case 'plan-review/resolved': {
+      const next = need(state, event)
+      const { workOrderId, candidateDigest, round, dispositions, resolvedAt } = event.payload
+      const targetRecord = (next.planReviews ?? []).find(
+        r => r.candidateDigest === candidateDigest && r.round === round && r.workOrderId === workOrderId,
+      )
+      if (!targetRecord) {
+        throw new FusionError(EVENT_CONFLICT, 'Cannot resolve plan review without matching review record')
+      }
+      if (targetRecord.outcome !== 'assessment' || targetRecord.assessment?.verdict !== 'concerns') {
+        throw new FusionError(EVENT_CONFLICT, 'Cannot resolve a plan review that is not concerns')
+      }
+      if (
+        targetRecord.dispositions ||
+        next.planReviewResolutions?.some(r => r.candidateDigest === candidateDigest && r.round === round && r.workOrderId === workOrderId)
+      ) {
+        throw new FusionError(EVENT_CONFLICT, 'Plan review has already been resolved')
+      }
+
+      if (round !== 1 && round !== 2) {
+        throw new FusionError(EVENT_CONFLICT, `Plan review round must be 1 or 2, got ${String(round)}`)
+      }
+      // Only a concerns review can be resolved: a ready review asks nothing of the Lead,
+      // and an unavailable one produced no findings to answer, so neither can carry a
+      // disposition that later reads as an override the Lead made.
+      if (targetRecord.assessment.verdict !== 'concerns') {
+        throw new FusionError(EVENT_CONFLICT, 'Only a concerns plan review can be resolved')
+      }
+      const findings = collectForemanFindings(targetRecord.assessment)
+      if (findings.length === 0) {
+        throw new FusionError(EVENT_CONFLICT, 'A concerns review must carry at least one finding to resolve')
+      }
+      if (dispositions.length !== findings.length) {
+        throw new FusionError(EVENT_CONFLICT, `Dispositions count (${dispositions.length}) does not match findings count (${findings.length})`)
+      }
+      const findingIds = new Set(findings.map(f => f.id))
+      const seenIds = new Set<string>()
+      for (const d of dispositions) {
+        if (!findingIds.has(d.findingId)) {
+          throw new FusionError(EVENT_CONFLICT, `Unknown findingId "${d.findingId}" in dispositions`)
+        }
+        if (seenIds.has(d.findingId)) {
+          throw new FusionError(EVENT_CONFLICT, `Duplicate disposition for findingId "${d.findingId}"`)
+        }
+        seenIds.add(d.findingId)
+        if (d.action === 'overridden') {
+          if (typeof d.reason !== 'string' || !d.reason.trim()) {
+            throw new FusionError(EVENT_CONFLICT, `Disposition for finding "${d.findingId}" has action "overridden" but missing non-empty reason`)
+          }
+        } else if (d.action === 'accepted') {
+          if (typeof d.changeSummary !== 'string' || !d.changeSummary.trim()) {
+            throw new FusionError(EVENT_CONFLICT, `Disposition for finding "${d.findingId}" has action "accepted" but missing non-empty changeSummary`)
+          }
+        } else {
+          throw new FusionError(EVENT_CONFLICT, 'Invalid disposition action')
+        }
+      }
+
+      // An accepted finding asserts that the candidate changed in response. Recording the
+      // revised digest is what lets a restarted gate tell "the Lead already answered this
+      // finding and revised the plan" from "a different candidate arrived": only the former
+      // may proceed to round 2 without answering the same finding twice.
+      const accepted = dispositions.some(d => d.action === 'accepted')
+      if (accepted && event.payload.revisedCandidateDigest === undefined) {
+        throw new FusionError(EVENT_CONFLICT, 'An accepted disposition must record the revised candidate digest')
+      }
+      if (event.payload.revisedCandidateDigest !== undefined) {
+        if (event.payload.revisedCandidateDigest === candidateDigest) {
+          throw new FusionError(EVENT_CONFLICT, 'A revised candidate digest must differ from the reviewed digest')
+        }
+        if (!accepted) {
+          throw new FusionError(EVENT_CONFLICT, 'A revision was recorded for a resolution with no accepted finding')
+        }
+      }
+      const resolution = {
+        workOrderId,
+        candidateDigest,
+        round,
+        dispositions,
+        ...(event.payload.revisedCandidateDigest === undefined ? {} : { revisedCandidateDigest: event.payload.revisedCandidateDigest }),
+        resolvedAt: resolvedAt ?? event.createdAt,
+      }
+      const updatedReviews = (next.planReviews ?? []).map(r => {
+        if (r.candidateDigest === candidateDigest && r.round === round) {
+          return { ...r, dispositions }
+        }
+        return r
+      })
+      const updatedLatest = next.latestPlanReview && next.latestPlanReview.candidateDigest === candidateDigest && next.latestPlanReview.round === round
+        ? { ...next.latestPlanReview, dispositions }
+        : next.latestPlanReview
+      return {
+        ...next,
+        planReviews: updatedReviews,
+        latestPlanReview: updatedLatest,
+        planReviewResolutions: [...(next.planReviewResolutions ?? []), resolution],
+      }
+    }
+    case 'plan-review/unavailable': {
+      const next = need(state, event)
+      const pending = next.pendingPlanReview
+      if (!pending) {
+        throw new FusionError(EVENT_CONFLICT, 'Cannot mark plan review unavailable without a pending plan review request')
+      }
+      if (
+        pending.workOrderId !== event.payload.workOrderId ||
+        pending.candidateDigest !== event.payload.candidateDigest ||
+        pending.round !== event.payload.round
+      ) {
+        throw new FusionError(EVENT_CONFLICT, 'Pending plan review does not match unavailable payload')
+      }
+      const duplicateRound = next.planReviews?.some(
+        r => r.candidateDigest === event.payload.candidateDigest && r.round === event.payload.round,
+      )
+      if (duplicateRound) {
+        throw new FusionError(EVENT_CONFLICT, `Duplicate plan review round ${event.payload.round} for candidate digest ${event.payload.candidateDigest}`)
+      }
+      const record = event.payload.record
+      if (!record.completedAt || typeof record.completedAt !== 'string') {
+        throw new FusionError(EVENT_CONFLICT, 'PlanReviewRecord completedAt is required for unavailable review')
+      }
+      if (
+        record.taskId !== event.taskId ||
+        record.workOrderId !== event.payload.workOrderId ||
+        record.candidateDigest !== event.payload.candidateDigest ||
+        record.round !== event.payload.round ||
+        record.outcome !== 'unavailable' ||
+        record.route.provider !== pending.route.provider ||
+        record.route.model !== pending.route.model ||
+        record.requestedAt !== pending.requestedAt ||
+        record.unavailableReason !== event.payload.reason
+      ) {
+        throw new FusionError(EVENT_CONFLICT, 'Unavailable review record is inconsistent with event payload')
+      }
+      const reviews = [...(next.planReviews ?? []), record]
+      return {
+        ...next,
+        pendingPlanReview: undefined,
+        planReviews: reviews,
+        latestPlanReview: record,
+      }
+    }
+    case 'foreman-attribution/completed': {
+      const next = need(state, event)
+      const { record } = event.payload
+      const existing = (next.foremanAttributions ?? []).find(a => a.id === record.id)
+      if (existing) {
+        if (JSON.stringify(existing) === JSON.stringify(record)) {
+          return next // idempotent
+        }
+        throw new FusionError(EVENT_CONFLICT, `Foreman attribution record conflict for id "${record.id}"`)
+      }
+      return {
+        ...next,
+        foremanAttributions: [...(next.foremanAttributions ?? []), record],
+      }
+    }
+    case 'worker/rework-requested': {
+      const next = need(state, event)
+      // One durable, ordered record per Lead-authored rework. It is separate from the report
+      // revision because a WorkOrder's revision tracks user requirements, not how many times
+      // the Worker was sent back: those two numbers diverge on almost every real rework.
+      return { ...next, workerReworks: [...(next.workerReworks ?? []), {
+        workOrderId: event.payload.workOrderId, child: event.payload.child, ordinal: event.payload.ordinal,
+        briefRevision: event.payload.briefRevision, requestedAt: event.createdAt,
+      }] }
+    }
     case 'work-order/prepared':
       return applyWorkOrderPrepared(state, event)
     case 'work-order/acceptance-amended': {

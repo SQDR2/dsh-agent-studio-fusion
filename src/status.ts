@@ -1,5 +1,5 @@
 import type { ControlView } from './host/native-model-control.js'
-import type { PhysicalRoute, Role, SandboxMode, TokenMeasurement, UsdDecimal, VerificationLevel } from './contracts.js'
+import type { FusionEvent, PhysicalRoute, Role, SandboxMode, TokenMeasurement, UsdDecimal, VerificationLevel } from './contracts.js'
 
 /** Bounded, read-only UI projection. No prompts, tool arguments or credentials. */
 export interface FusionStatus {
@@ -43,6 +43,7 @@ export interface FusionStatus {
       unreportedCalls: number
       compactionCalls: number
       keepaliveCalls: number
+      foremanCalls?: number
       /** Known subtotals only; missing request fields never become zero totals. */
       input: UsageSubtotal
       cacheRead: UsageSubtotal
@@ -51,6 +52,9 @@ export interface FusionStatus {
       upstreamHttpCalls: null
       /** Where the tokens went: the point of Fusion is that most land on the cheaper Worker. */
       byRole: Record<Role, RoleUsage>
+      byPurpose?: {
+        foreman?: RoleUsage
+      }
     }
     /** Checks frozen on the current work order; 0 means the Lead review was the only verification. */
     automatedChecks: number | null
@@ -73,6 +77,13 @@ export interface FusionStatus {
     /** True while a human inspection is required before continue, model switch, or leaving Fusion. */
     recovering?: boolean
     outcomeUnknown?: boolean
+    /**
+     * Bounded plan-review state for the live status component. Carries the verdict, the
+     * round, and the finding identifiers and categories the Lead must answer — never the
+     * prompt, the candidate order or the model's raw text, so nothing a user should not see
+     * can leak through a status poll.
+     */
+    planReview?: PlanReviewStatus
   }
 }
 
@@ -110,4 +121,114 @@ export interface TaskCost {
   unpricedModels: readonly string[]
   /** When the seeded rates were last checked. */
   checked: string
+}
+
+/** Component-facing plan review state; prompts and raw model output never appear here. */
+export interface PlanReviewStatus {
+  /** `reviewing` is a request in flight, the rest are the last recorded outcome. */
+  status: 'reviewing' | 'ready' | 'concerns' | 'unavailable'
+  round: number | null
+  policy?: 'shadow' | 'gate' | 'risk-gated'
+  /** Why the reviewer was not available; bounded text, no prompt material. */
+  unavailableReason?: string
+  /** Findings the Lead still has to answer, by id and category only. */
+  findings?: readonly { id: string; category: string; severity: string; message: string }[]
+  accepted?: number
+  overridden?: number
+}
+
+export interface PlanReviewMetrics {
+  reviews: number
+  concerns: number
+  ready: number
+  unavailable: number
+  overrides: number
+  acceptedDispositions: number
+  /** Worker implementation rounds after the first. Plan review is counted separately. */
+  reworkRounds: number
+  /** Times the reviewer ran a second time because the Lead revised the candidate. */
+  planReviewRevisions: number
+  /** Accepts recorded over a protocol-invalid binding. Unverified completion is not an error. */
+  errorAccepts: number
+}
+
+/**
+ * Derives machine-readable plan review metrics from a sequence of task events.
+ */
+export function projectPlanReviewMetrics(events: readonly FusionEvent[]): PlanReviewMetrics {
+  let reviews = 0
+  let concerns = 0
+  let ready = 0
+  let unavailable = 0
+  let overrides = 0
+  let acceptedDispositions = 0
+  let reworkRounds = 0
+  let planReviewRevisions = 0
+  let errorAccepts = 0
+
+  // A plan-review revision is the reviewer's own round 2, and only a candidate the Lead
+  // actually revised earns one. It is deliberately NOT a rework round: rework measures the
+  // Worker repeating implementation work, and counting reviewer iterations there would make
+  // Foreman look like it caused the rework it exists to prevent (plan §8.2).
+  let pendingAcceptedRevision = false
+  // An error accept is an accept recorded over a protocol-invalid binding, or one whose
+  // report left requirements unresolved. A completed-but-unverified report is not an error:
+  // the task explicitly settled without verification, which the task's own verification
+  // level already reports. Counting it as an error inflated the metric with every
+  // legitimate unverified completion.
+
+  for (const event of events) {
+    if (event.type === 'plan-review/completed') {
+      reviews++
+      if (event.payload.assessment.verdict === 'concerns') {
+        concerns++
+      } else if (event.payload.assessment.verdict === 'ready') {
+        ready++
+      }
+      // Arriving at a second review means the Lead revised the candidate in response to the
+      // findings; an interrupted round-2 that never completed is not a revision.
+      if (event.payload.round === 2 && pendingAcceptedRevision) {
+        planReviewRevisions++
+        pendingAcceptedRevision = false
+      }
+    } else if (event.type === 'plan-review/unavailable') {
+      reviews++
+      unavailable++
+    } else if (event.type === 'plan-review/resolved') {
+      let hasAccepted = false
+      for (const d of event.payload.dispositions) {
+        if (d.action === 'overridden') {
+          overrides++
+        } else if (d.action === 'accepted') {
+          acceptedDispositions++
+          hasAccepted = true
+        }
+      }
+      if (hasAccepted) {
+        pendingAcceptedRevision = true
+      }
+    } else if (event.type === 'worker/rework-requested') {
+      // A rework round is a Lead handoff that sends the Worker back to implementation work.
+      // It cannot be read off a report revision: a WorkOrder's revision tracks the user's
+      // requirements, so a Worker sent back three times still reports revision 1.
+      reworkRounds++
+    } else if (event.type === 'review/completed') {
+      const binding = event.payload.binding
+      // Only a review the protocol itself rejects is an error accept. An unverified completion
+      // is a recorded outcome, not necessarily a mistake, so it never counts here.
+      if (event.payload.decision === 'accept' && binding && !binding.protocolValid) errorAccepts++
+    }
+  }
+
+  return {
+    reviews,
+    concerns,
+    ready,
+    unavailable,
+    overrides,
+    acceptedDispositions,
+    reworkRounds,
+    planReviewRevisions,
+    errorAccepts,
+  }
 }

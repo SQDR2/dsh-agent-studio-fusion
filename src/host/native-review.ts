@@ -4,6 +4,7 @@ import type { ReviewTicket, TaskId } from '../contracts.js'
 import { digestOf } from '../digest.js'
 import { captureTicket } from '../review/ticket.js'
 import type { SqliteFusionStore } from '../task/sqlite-store.js'
+import { rootCallIdOf } from './tool-seam.js'
 
 /** Capture before the Lead request starts; later tool callbacks cannot bind to a newer report. */
 export function captureNativeReviewRequest(store: SqliteFusionStore, agent: Agent, turn: number, step: number, ticket: ReviewTicket): void {
@@ -24,13 +25,13 @@ export function nativeReviewProof(store: SqliteFusionStore, taskId: TaskId, exec
   if (!agent || exec.signal.aborted) throw new Error('Review requires a live, uncancelled Lead tool execution')
   const events = agent.session.snapshotEvents()
   const message = events.findLast(event => event.type === 'assistant/message'
-    && event.data.message.content.some(block => block.type === 'tool-call' && block.id === exec.rootCallId))
+    && event.data.message.content.some(block => block.type === 'tool-call' && block.id === rootCallIdOf(exec)))
   if (!message || message.type !== 'assistant/message' || message.data.interrupted) throw new Error('Review has no complete native assistant message')
   const terminals = message.data.stream.filter(record => record.type === 'chunk' && record.chunk.type === 'finish')
   const terminal = terminals.at(-1)
   if (terminals.length !== 1 || terminal?.type !== 'chunk' || terminal.chunk.type !== 'finish'
     || !['stop', 'tool-calls'].includes(terminal.chunk.reason.kind)) throw new Error('Review assistant stream did not terminate successfully')
-  const sourceCall = message.data.message.content.find(block => block.type === 'tool-call' && block.id === exec.rootCallId)
+  const sourceCall = message.data.message.content.find(block => block.type === 'tool-call' && block.id === rootCallIdOf(exec))
   if (!sourceCall || sourceCall.type !== 'tool-call') throw new Error('Native review tool call missing')
   if (!exec.parent && (sourceCall.name !== exec.name || digestOf(JSON.parse(sourceCall.arguments)) !== digestOf(exec.arguments))) {
     throw new Error('Review arguments differ from the native model call')
@@ -42,7 +43,7 @@ export function nativeReviewProof(store: SqliteFusionStore, taskId: TaskId, exec
     || row.step !== message.data.step || row.ticket?.subject.taskId !== taskId) throw new Error('No captured review ticket for this native request')
   const ticket = captureTicket(row.ticket)
   const evidence = store.putArtifact(taskId, Buffer.from(JSON.stringify({
-    schemaVersion: 1, sessionId: agent.id, eventSeq: message.seq, nativeRootCallId: exec.rootCallId,
+    schemaVersion: 1, sessionId: agent.id, eventSeq: message.seq, nativeRootCallId: rootCallIdOf(exec),
     nativeCallId: exec.callId, arguments: exec.arguments, assistantCall: sourceCall,
     terminal, ticket,
   })), 'application/vnd.dsh-fusion.native-review+json')

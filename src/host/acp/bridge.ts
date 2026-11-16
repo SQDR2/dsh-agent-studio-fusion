@@ -29,8 +29,8 @@
  *   listed; Fusion's `fusion_*` internals and route transports are never exposed. An
  *   `explore` order is the intersection of `workerTools` with the read-only tools, so it
  *   can only ever narrow the configured ceiling.
- * - Calls dispatch through `ctx.tools.execute` with the exact live Agent and a branded
- *   `ToolCallId`, so DSH guards, approvals, sandbox policy and Fusion's coordinator
+ * - Calls dispatch through the tool seam (`executeSingleTool`) with the exact live Agent and
+ *   a branded `ToolCallId`, so DSH guards, approvals, sandbox policy and Fusion's coordinator
  *   checks stay authoritative. No tool implementation is called directly.
  * - An AbortController per call is abandoned when the HTTP request closes, the ACP turn
  *   aborts or times out, the ACP session closes or is replaced, the grant is revoked, or
@@ -39,8 +39,8 @@
 
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import type { ToolExecutionResult } from '@deepseek-ai/dsh-tools'
 import type { ToolSchema } from '@deepseek-ai/dsh-llm'
+import type { ToolExecutionOutcome } from '../tool-seam.js'
 import type { AcpMcpServerHttp } from './types.js'
 import { randomBytes, randomUUID } from 'node:crypto'
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
@@ -70,6 +70,20 @@ export interface AcpWorkerFacts {
   readonly route: { readonly provider: string; readonly model: string }
 }
 
+/** The failure identity both releases attach to an error result; the seam's structural view omits it. */
+interface FailureIdentity {
+  readonly message?: unknown
+  readonly code?: unknown
+}
+
+/**
+ * One settled call as this bridge reads it: the seam's release-agnostic outcome plus the
+ * failure identity `failureText` falls back to.
+ */
+export interface BridgeOutcome extends ToolExecutionOutcome {
+  readonly error?: FailureIdentity
+}
+
 /** The Fusion side of the bridge: all of it reads live state, never a cached snapshot. */
 export interface AcpBridgeAuthority {
   /** The live Agent this Host still holds for one DSH session, if any. */
@@ -78,14 +92,19 @@ export interface AcpBridgeAuthority {
   workerFacts(agent: Agent): AcpWorkerFacts | undefined
   /** Tool schemas visible in this Agent's own scope. */
   schemasOf(agent: Agent): readonly ToolSchema[]
-  /** Dispatch through DSH's guarded pipeline (`ctx.tools.execute`). */
+  /**
+   * Dispatch through DSH's guarded pipeline.
+   *
+   * Only the seam knows the release difference: 0.2.1 runs one `ToolExecutionInput`, 0.2.2
+   * a one-call raw batch. This bridge is written against the call, not either transport.
+   */
   execute(input: {
     agent: Agent
     name: string
     arguments: unknown
     callId: ToolCallId
     signal: AbortSignal
-  }): Promise<ToolExecutionResult>
+  }): Promise<BridgeOutcome>
 }
 
 export interface AcpBridgeOptions {
@@ -213,11 +232,11 @@ function textContent(content: readonly unknown[] | undefined): { type: 'text'; t
   return out
 }
 
-function failureText(result: ToolExecutionResult): string {
+function failureText(result: BridgeOutcome): string {
   if (result.isError !== true) return ''
   const content = textContent(result.content).map(block => block.text).join('\n').trim()
   if (content.length > 0) return content
-  const error = result.error as { message?: unknown; code?: unknown } | undefined
+  const error = result.error
   return typeof error?.message === 'string' ? error.message : String(error?.code ?? 'tool failed')
 }
 

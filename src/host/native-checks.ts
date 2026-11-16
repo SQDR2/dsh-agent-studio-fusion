@@ -6,6 +6,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
+import type { UserMessage } from '@deepseek-ai/dsh-llm'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import { ArtifactId, OperationId, SessionId } from '../contracts.js'
 import type { ToolEvidence, WorkOrder, WorkerReport } from '../contracts.js'
@@ -17,6 +18,8 @@ import type { SqliteFusionStore } from '../task/sqlite-store.js'
 import { snapshotWorkspace, workspacePath } from './workspace.js'
 import type { WorkspaceSnapshot } from './workspace.js'
 import { nativeShellTool, probeEnvironmentDrop, probeShells } from './shell.js'
+import { executeSingleTool } from './tool-seam.js'
+import type { ScopedToolService, ToolExecutionOutcome } from './tool-seam.js'
 
 export interface CheckDefinition {
   id: string
@@ -392,12 +395,17 @@ async function invokeCheck(input: CheckInput, check: FrozenCheck, before: Worksp
   const key = `check-invocation:${order.taskId}:${callId}`
   store.writeDocument(key, 0, { check, evidence: started })
   const remove = input.authorizeNested(callId)
-  let result
+  let result: ToolExecutionOutcome
   try {
-    result = await ctx.tools.execute({ callId, rootCallId: exec.rootCallId, parent: exec.token,
+    // One call through the release seam: 0.2.1 takes the single input below, 0.2.2 derives a
+    // one-call raw batch from it. `rootCallId`/`parent` are the 0.2.1 nested-dispatch
+    // correlation — the enclosing tool token is what keeps PTC mode from collapsing this call.
+    result = await executeSingleTool(ctx.tools as unknown as ScopedToolService, {
+      callId, rootCallId: exec.rootCallId, parent: exec.token,
       name: nativeShellTool, arguments: { command: check.definition.command, description: check.definition.description,
         workdir: root, ...(input.nativeTimeout && check.definition.timeoutSeconds === undefined ? {} : { timeoutMs: (check.definition.timeoutSeconds ?? order.policy.commandMaxSeconds) * 1000 }), run_in_background: false },
-      agent: exec.agent, signal: exec.signal })
+      agent: exec.agent, signal: exec.signal,
+    })
   } catch (error) {
     const evidence: ToolEvidence = { ...started, state: 'outcome-unknown', endedAt: new Date().toISOString(),
       stderr: store.putArtifact(order.taskId, Buffer.from(String(error)), 'text/plain') }
@@ -405,8 +413,11 @@ async function invokeCheck(input: CheckInput, check: FrozenCheck, before: Worksp
     input.uncertain?.(evidence)
     throw error
   } finally { remove() }
-  for (const context of result.additionalContexts ?? []) exec.deferContext(context)
+  // Both releases type deferred context as `UserMessage`; the seam keeps the outcome
+  // structural so it can describe either shape.
+  for (const context of result.additionalContexts ?? []) exec.deferContext(context as UserMessage)
   const raw = record(result.value)
+
   const stdout = record(raw?.stdout), stderr = record(raw?.stderr)
   const nativeForeground = !result.isError && raw?.kind === 'foreground'
   const completed = nativeForeground && raw.aborted === false && raw.timedOut === false

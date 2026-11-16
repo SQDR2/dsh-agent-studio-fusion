@@ -23,6 +23,8 @@ import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from '
 import { basename, dirname, join } from 'node:path'
 import { randomBytes, timingSafeEqual } from 'node:crypto'
 import { readJsonBody } from './read-json-body.js'
+import { executeSingleTool } from '../tool-seam.js'
+import type { ScopedToolService } from '../tool-seam.js'
 import { homedir } from 'node:os'
 
 const MCP_SERVER_KEY = 'dsh-tools'
@@ -39,7 +41,7 @@ const MCP_SERVER_KEY = 'dsh-tools'
 const INTERNAL_TOOL_NAMES = new Set(['run_code', 'agy_ask', 'agy_tool'])
 
 /** Minimal structural view of the DSH tool registry we need. */
-export interface ToolsServiceLike {
+export interface ToolsServiceLike extends ScopedToolService {
   /**
    * Visible tool schemas for one scope. `scope` is the viewing agent (its
    * `ctx` is the registration scope): omitting it yields the GLOBAL view only,
@@ -49,18 +51,6 @@ export interface ToolsServiceLike {
    * tools bridgeable at all.
    */
   schemas(scope?: unknown): Array<{ name: string; description: string; parameters: Record<string, unknown> }>
-  execute(input: {
-    callId: string
-    name: string
-    arguments: unknown
-    agent?: unknown
-    /**
-     * Caller-owned cancellation, required by DSH's `ToolExecutionInput`. Tools
-     * read `exec.signal` before/while they settle, so a call without one throws
-     * `Cannot read properties of undefined (reading 'aborted')`.
-     */
-    signal: AbortSignal
-  }): Promise<unknown>
 }
 
 /** MCP tool names are [a-zA-Z0-9_-]; DSH names may contain dots. */
@@ -264,12 +254,14 @@ export function startMcpBridge(opts: {
           res.once('close', () => {
             if (!res.writableEnded) controller.abort()
           })
-          const result = await svc.execute({
+          // One call through the release seam: 0.2.1 runs the single input, 0.2.2 derives a
+          // one-call raw batch from it, so this bridge never spells either transport.
+          const result = await executeSingleTool(svc, {
             callId: 'agy-mcp-' + callSeq,
             name: dshName,
             arguments: parsed.arguments ?? {},
             signal: controller.signal,
-            ...(agent === undefined ? {} : { agent }),
+            agent,
           })
           audit('ok caller=' + (agent === undefined ? 'none' : 'agent'))
           sendJson(res, 200, { ok: true, text: resultText(result) })

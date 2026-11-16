@@ -2,6 +2,49 @@ import type { SqliteFusionStore } from '../task/sqlite-store.js';
 import type { TaskState } from '../task/state.js';
 import type { NativeUsageRecord } from './native-usage.js';
 import { type Count } from '../usage/ledger.js';
+export interface TaskPlanReviewSummary {
+    status: 'ready' | 'concerns' | 'unavailable';
+    round: number;
+    policy?: 'shadow' | 'gate' | 'risk-gated';
+    /** Present for an unavailable review so the history row can say why it did not happen. */
+    unavailableReason?: string;
+    /**
+     * Foreman tokens, cost and time for this task, kept out of the Lead/Sidekick columns.
+     *
+     * `costUsd` is a subtotal over the calls that could be priced, and the counts next to it say
+     * how much of the bill it covers: `priced + unpriced + incomplete + unknown` describes every
+     * call. Showing a subtotal as if it were the total understates the reviewer's cost, which is
+     * exactly the number a decision to keep or drop the reviewer depends on.
+     */
+    foreman?: {
+        calls: number;
+        input: number;
+        inputReported: number;
+        output: number;
+        outputReported: number;
+        durationMs: number;
+        costUsd: string | null;
+        priced: number;
+        unpriced: number;
+        incomplete: number;
+        unknown: number;
+    };
+    /** Findings the reviewer raised, each with the Lead's recorded answer when there is one. */
+    findings?: readonly {
+        id: string;
+        category: string;
+        severity: string;
+        message: string;
+        disposition?: {
+            action: 'accepted' | 'overridden';
+            note: string;
+        };
+    }[];
+    dispositionsCount?: {
+        accepted: number;
+        overridden: number;
+    };
+}
 export interface TaskSummary {
     id: string;
     sessionId: string;
@@ -12,6 +55,7 @@ export interface TaskSummary {
     phase: string;
     verification: string;
     mode: string;
+    planReview?: TaskPlanReviewSummary;
 }
 export declare function taskSummary(state: TaskState, createdAt: string, updatedAt: string): TaskSummary;
 export interface UsageSummary {
@@ -38,6 +82,7 @@ export interface HistoryTotals {
     final: number;
     provisional: number;
     unreported: number;
+    foremanCalls?: number;
     input: {
         known: number;
         reported: number;

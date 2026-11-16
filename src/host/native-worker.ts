@@ -5,7 +5,7 @@ import type { MessageId } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-subagent'
 import type { PhysicalRoute } from '../contracts.js'
-import { requireSubagentMethod } from './subagent-seam.js'
+import { requireSubagentMethod, requiresNestedActivationRequest, supportedDshVersions } from './subagent-seam.js'
 
 export interface NativeWorkerRequest {
   readonly childId: string
@@ -36,23 +36,48 @@ interface WorkerStartRequest {
 interface StartedWorker {
   readonly childId: string
   readonly messageId?: MessageId
+  /**
+   * 0.2.1 and later return the exact-activation receipt. It is optional because the
+   * published 0.2.0 declaration only promises the start fields; only `dispose` is used.
+   */
+  dispose?(): Promise<void>
 }
 
-/** Structural view of the two DSH subagent seams. Only the branch that exists is called. */
+/** One start's task options, flattened for 0.2.2 and nested under `request` for 0.2.1. */
+interface ActivationTaskOptions {
+  readonly parent: Agent
+  readonly prompt: readonly { readonly type: 'text'; readonly text: string }[]
+  readonly agentOptions: WorkerStartRequest['agentOptions']
+  readonly maxDepth: number
+  readonly persona?: string
+  readonly toolFilter?: { readonly allow: readonly string[] }
+}
+
+/** Structural view of the three DSH subagent seams. Only the branch that exists is called. */
 interface SubagentSeam {
   startActivation?(spec: {
     readonly provider: string
     readonly label: string
     readonly childId: ReturnType<typeof SessionId>
     readonly delivery: 'parent'
-    readonly request: WorkerStartRequest
+    readonly request: ActivationTaskOptions
+    readonly signal: AbortSignal
+  } | {
+    readonly provider: string
+    readonly label: string
+    readonly childId: ReturnType<typeof SessionId>
+    readonly delivery: 'parent'
+    readonly parent: Agent
+    readonly prompt: readonly { readonly type: 'text'; readonly text: string }[]
+    readonly agentOptions: WorkerStartRequest['agentOptions']
+    readonly maxDepth: number
     readonly signal: AbortSignal
   }): Promise<StartedWorker>
   startContinuable?(spec: {
     readonly provider: string
     readonly label: string
     readonly childId: ReturnType<typeof SessionId>
-    readonly request: WorkerStartRequest
+    readonly request: ActivationTaskOptions
     readonly signal: AbortSignal
   }): Promise<StartedWorker>
   drainChildren?(parent: Agent, childIds: readonly ReturnType<typeof SessionId>[]): Promise<void>
@@ -60,9 +85,25 @@ interface SubagentSeam {
 }
 
 /** Version-pinned public API adapter. It never calls an LLM adapter or runs a shell itself. */
+/**
+ * Child id → the `dispose` of the receipt that started it.
+ *
+ * 0.2.2 has no release-by-id service method, so this retained receipt is the only way to
+ * release exactly one child. It lives on the plugin's own context rather than on one
+ * transport instance: a coordinator replacement constructs a fresh transport over the SAME
+ * Host, and the child that has to be released is the one it started. A per-instance map
+ * would strand that child — and the Host would then have no way to release it at all.
+ */
+const receiptsByContext = new WeakMap<Context, Map<string, () => Promise<void>>>()
+
 export class NativeWorkerTransport {
   readonly #flushed = new WeakMap<Agent, number>()
-  constructor(private readonly ctx: Context, private readonly provider = 'spawn') {}
+  readonly #receipts: Map<string, () => Promise<void>>
+  constructor(private readonly ctx: Context, private readonly provider = 'spawn') {
+    let receipts = receiptsByContext.get(ctx)
+    if (receipts === undefined) { receipts = new Map(); receiptsByContext.set(ctx, receipts) }
+    this.#receipts = receipts
+  }
 
   assertAvailable(): void {
     const provider = this.ctx.subagents.getProvider(this.provider)
@@ -93,15 +134,25 @@ export class NativeWorkerTransport {
     const subagents = this.ctx.subagents as SubagentSeam
     const start = requireSubagentMethod(subagents, 'startActivation', 'startContinuable')
     const accepted = start === 'startActivation'
-      ? await subagents.startActivation!({
-        provider: this.provider, label: request.label, childId, delivery: 'parent',
-        request: { parent, prompt, agentOptions, maxDepth }, signal,
-      })
+      // 0.2.2 moved these task options out of `request` to the top level; the
+      // nested marker decides which object this Host accepts.
+      ? requiresNestedActivationRequest(subagents)
+        ? await subagents.startActivation!({
+          provider: this.provider, label: request.label, childId, delivery: 'parent',
+          request: { parent, prompt, agentOptions, maxDepth }, signal,
+        })
+        : await subagents.startActivation!({
+          provider: this.provider, label: request.label, childId, delivery: 'parent',
+          parent, prompt, agentOptions, maxDepth, signal,
+        })
       : await subagents.startContinuable!({
         provider: this.provider, label: request.label, childId,
         request: { parent, prompt, persona: request.persona, agentOptions, toolFilter: { allow: [...request.allowedTools] }, maxDepth },
         signal,
       })
+    // Retain the receipt first: a later identity or message rejection still
+    // leaves a resident activation that only this receipt can release.
+    if (typeof accepted.dispose === 'function') this.#receipts.set(accepted.childId, accepted.dispose.bind(accepted))
     if (accepted.childId !== request.childId) throw new Error('Native Worker identity changed during creation')
     if (!accepted.messageId) throw new Error('Native Worker start did not accept an initial message')
     return { childId: accepted.childId, messageId: accepted.messageId }
@@ -192,16 +243,46 @@ export class NativeWorkerTransport {
     this.#flushed.set(child, child.session.snapshotEvents().at(-1)?.seq ?? 0)
   }
 
-  /** Native release owns quiescence, persistence and handle disposal across HMR. */
+  /**
+   * Native release owns quiescence, persistence and handle disposal across HMR.
+   *
+   * 0.2.1 and 0.2.0 release a named child through the service; 0.2.2 removed both
+   * drains and documents the activation receipt as the replacement. A receipt
+   * addresses exactly the execution that this transport started, so it is used
+   * first and the drain calls remain only for Hosts that still declare them.
+   */
   async release(parent: Agent, childId: string): Promise<void> {
     const child = this.ctx.agents.get(SessionId(childId))
     if (child && child.session.header.parentSession !== parent.id) throw new Error('Cannot release another Lead’s child')
-    // 0.2.1 calls this `drainChildren`. 0.2.0 calls it `drainContinuableChildren`.
-    const subagents = this.ctx.subagents as SubagentSeam
-    const drain = requireSubagentMethod(subagents, 'drainChildren', 'drainContinuableChildren')
-    const ids = [SessionId(childId)]
-    if (drain === 'drainChildren') await subagents.drainChildren!(parent, ids)
-    else await subagents.drainContinuableChildren!(parent, ids)
+    const receipt = this.#receipts.get(childId)
+    if (receipt) {
+      // 0.2.2's receipt dispose releases the activation it was issued for, but the manager's
+      // own settlement watcher may already have closed that activation when the child went
+      // idle — in which case `dispose()` is a resolved no-op and the Agent stays registered.
+      // Cancelling and waiting for quiescence is what actually retires the child: the
+      // watcher owns that transition and disposes the handle once it observes it.
+      if (child && child.status !== 'idle') this.ctx.subagents.interrupt(child.id, { kind: 'ancestor', agent: parent })
+      await child?.whenIdle()
+      await receipt()
+      for (let tick = 0; tick < 1000 && this.ctx.agents.get(SessionId(childId)) !== undefined; tick++) {
+        await new Promise(resolve => setTimeout(resolve, 1))
+      }
+    } else {
+      const subagents = this.ctx.subagents as SubagentSeam
+      const ids = [SessionId(childId)]
+      // 0.2.1 calls this `drainChildren`. 0.2.0 calls it `drainContinuableChildren`.
+      if (typeof subagents.drainChildren === 'function') await subagents.drainChildren(parent, ids)
+      else if (typeof subagents.drainContinuableChildren === 'function') await subagents.drainContinuableChildren(parent, ids)
+      // This Host has no release-by-id left and this transport holds no receipt
+      // for the child, which means another transport instance started it (an HMR
+      // or process restart). `drainDescendants([parent])` is NOT a substitute: it
+      // permanently records the Lead as a closing subagent-tree root, and every
+      // later delegation from that Lead is refused as draining for the rest of
+      // the process. Its whole-tree scope would also stop unrelated siblings.
+      // There is therefore no safe path here; name the limitation instead of
+      // silently poisoning the Lead or reporting a release that never happened.
+      else throw new Error(`Cannot release native Worker ${childId}: this DeepSeek Assistant Host removed subagents.drainChildren and this transport holds no activation receipt for it (it was started before an HMR reload or process restart). DeepSeek Assistant ${supportedDshVersions} has no release-by-id replacement, and subagents.drainDescendants would permanently close this Lead's whole subagent tree. Restart the Host process to drop the resident activation, then reconcile the persisted child.`)
+    }
     if (this.ctx.agents.get(SessionId(childId))) throw new Error('Native Worker release did not prove absence')
   }
 

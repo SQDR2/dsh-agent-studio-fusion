@@ -21,6 +21,9 @@ describe('a saved route the catalog dropped', () => {
     // The compactor is edited from the same row, so it is named too.
     expect(() => validatePairChoice({ ...pair, compactor: { route: { provider: 'gone', model: 'summary' }, maxOutputTokens: 2048 } }, catalog))
       .toThrow('gone/summary')
+    // The optional foreman is equally explicit when stale.
+    expect(() => validatePairChoice({ ...pair, foreman: { route: { provider: 'gone', model: 'foreman-audit' }, maxOutputTokens: 2048, timeoutMs: 10000 } }, catalog))
+      .toThrow('gone/foreman-audit')
     // A retired model in an otherwise valid provider is equally explicit.
     expect(() => validatePairChoice({ ...pair, worker: { provider: 'physical', model: 'retired' } }, catalog)).toThrow('physical/retired')
   })
@@ -44,6 +47,9 @@ describe('a saved route the catalog dropped', () => {
     // The compactor is optional, so only a present one can be stale.
     expect(missingRoutes({ ...pair, compactor: { route: { provider: 'gone', model: 'summary' }, maxOutputTokens: 2048 } }, catalog))
       .toEqual([{ role: 'compactor', route: { provider: 'gone', model: 'summary' } }])
+    // The foreman is optional, so only a present one can be stale.
+    expect(missingRoutes({ ...pair, foreman: { route: { provider: 'gone', model: 'foreman-audit' }, maxOutputTokens: 2048, timeoutMs: 10000 } }, catalog))
+      .toEqual([{ role: 'foreman', route: { provider: 'gone', model: 'foreman-audit' } }])
     expect(missingRoutes(undefined, catalog)).toEqual([])
     expect(missingRoutes({}, catalog)).toEqual([])
     // A route that is merely half-chosen is not stale: the page checks that first.

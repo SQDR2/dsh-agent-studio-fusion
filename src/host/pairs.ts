@@ -3,6 +3,7 @@ import { bi } from '../bilingual.js'
 import { FUSION_MODEL, isFusionModel } from '../identity.js'
 import { keepaliveChoice } from '../profile/keepalive.js'
 import { compactorChoice } from '../profile/compactor.js'
+import { foremanChoice } from '../profile/foreman.js'
 import type { SqliteFusionStore } from '../task/sqlite-store.js'
 import type { PairChoice, SettingsCatalog } from './settings.js'
 import { modelProfileFromChoice, validatePairChoice } from './settings.js'
@@ -77,7 +78,12 @@ function structuralPair(value: unknown): PairChoice | undefined {
   try { cacheKeepalive = keepaliveChoice(raw.cacheKeepalive) } catch { cacheKeepalive = undefined }
   let compactor: PairChoice['compactor']
   try { compactor = compactorRoute ? compactorChoice({ route: compactorRoute, maxOutputTokens }) : undefined } catch { compactor = undefined }
-  return { lead, worker, ...(compactor === undefined ? {} : { compactor }), ...(cacheKeepalive === undefined ? {} : { cacheKeepalive }) }
+  // The Foreman is the other optional role, and it travels with the pair the same
+  // way: read it back or the next save silently drops what the user enabled.
+  let foreman: PairChoice['foreman']
+  try { foreman = foremanChoice(raw.foreman) } catch { foreman = undefined }
+  return { lead, worker, ...(compactor === undefined ? {} : { compactor }), ...(foreman === undefined ? {} : { foreman }),
+    ...(cacheKeepalive === undefined ? {} : { cacheKeepalive }) }
 }
 
 /** A pre-combo profile document as the choice it was saved from. */

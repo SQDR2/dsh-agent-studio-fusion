@@ -1,7 +1,7 @@
 import { FusionRecovery } from './FusionRecovery.js'
 import { Fragment, useState } from 'react'
 import { useFusionStatus } from './status-polling.js'
-import type { TaskCost, UsageSubtotal } from '../status.js'
+import type { PlanReviewStatus, TaskCost, UsageSubtotal } from '../status.js'
 import { tr, useLang, type Lang } from './i18n.js'
 
 const styles = `
@@ -76,6 +76,7 @@ export function FusionStatus({ sessionId, attentionOnly = false }: { sessionId: 
         <dt>{tr(lang, '缓存读取', 'Cache read')}</dt><dd>{count(usage.cacheRead)}</dd>
         <dt>{tr(lang, '输出 Token', 'Output tokens')}</dt><dd>{count(usage.output)}</dd>
       </dl>
+      {task.planReview && <PlanReviewBlock lang={lang} review={task.planReview} />}
       {task.cost && <CostBlock lang={lang} cost={task.cost} />}
       <h3>{tr(lang, '按角色', 'By role')}</h3>
       <dl>
@@ -103,7 +104,27 @@ export function FusionStatus({ sessionId, attentionOnly = false }: { sessionId: 
 }
 
 /** Money for the current task, with its coverage and what it is not. */
-export function CostBlock({ lang, cost }: { lang: Lang; cost: TaskCost }) {
+export function PlanReviewBlock({ lang, review }: { lang: Lang; review: PlanReviewStatus }) {
+  const label = review.status === 'reviewing' ? tr(lang, '审查中', 'reviewing')
+    : review.status === 'ready' ? tr(lang, '就绪', 'ready')
+      : review.status === 'concerns' ? tr(lang, '有分歧', 'concerns') : tr(lang, '不可用', 'unavailable')
+  return <>
+    <h3>{tr(lang, '工长审查', 'Foreman review')}</h3>
+    <dl>
+      <dt>{tr(lang, '状态', 'Status')}</dt>
+      <dd>{label}{review.round ? <small>{tr(lang, `第 ${review.round} 轮`, `round ${review.round}`)}{review.policy ? ` · ${review.policy}` : ''}</small> : null}</dd>
+      {review.unavailableReason && <><dt>{tr(lang, '原因', 'Reason')}</dt><dd>{review.unavailableReason}</dd></>}
+      {review.accepted !== undefined || review.overridden !== undefined
+        ? <><dt>{tr(lang, '处理结果', 'Dispositions')}</dt>
+          <dd>{tr(lang, `接受 ${review.accepted ?? 0} · 覆盖 ${review.overridden ?? 0}`, `${review.accepted ?? 0} accepted · ${review.overridden ?? 0} overridden`)}</dd></> : null}
+    </dl>
+    {review.findings?.length ? <ul>{review.findings.map(finding => <li key={finding.id}>
+      {finding.id} · {finding.category} · {finding.severity}<small>{finding.message}</small>
+    </li>)}</ul> : null}
+  </>
+}
+
+function CostBlock({ lang, cost }: { lang: Lang; cost: TaskCost }) {
   const usd = (value: string | null) => value === null ? null : `$${Number(value).toFixed(2)}`
   const saved = cost.savedUsd === null ? null : Number(cost.savedUsd)
   const omitted = cost.unpriced + cost.incomplete + cost.unknown

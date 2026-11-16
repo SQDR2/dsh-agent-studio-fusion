@@ -23,7 +23,7 @@ export interface NativeUsageRecord {
     taskId: TaskId;
     sessionId: string;
     role: Role;
-    purpose: 'conversation' | 'compaction' | 'session-title' | 'cache-keepalive';
+    purpose: 'conversation' | 'compaction' | 'session-title' | 'cache-keepalive' | 'foreman';
     /** Effective request envelope; Host compaction markers can retain their pre-routing cap. */
     maxOutputTokens: number | null;
     reasoningEffort?: string;

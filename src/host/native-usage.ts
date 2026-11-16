@@ -41,7 +41,7 @@ export interface NativeUsageRecord {
   taskId: TaskId
   sessionId: string
   role: Role
-  purpose: 'conversation' | 'compaction' | 'session-title' | 'cache-keepalive'
+  purpose: 'conversation' | 'compaction' | 'session-title' | 'cache-keepalive' | 'foreman'
   /** Effective request envelope; Host compaction markers can retain their pre-routing cap. */
   maxOutputTokens: number | null
   reasoningEffort?: string
@@ -79,7 +79,7 @@ export function observeNativeUsage(
       schemaVersion: 1, taskId: owner.taskId, sessionId: agent.id, role: owner.role, purpose: extra?.purpose ?? options.purpose ?? 'conversation', nativeInvocationId: id,
       maxOutputTokens: options.maxTokens ?? null,
       ...(options.reasoningEffort === undefined ? {} : { reasoningEffort: options.reasoningEffort }),
-      ...(extra ? { auxiliary: { seriesId: extra.seriesId, iteration: extra.iteration } } : {}),
+      ...(extra && extra.purpose === 'cache-keepalive' ? { auxiliary: { seriesId: extra.seriesId, iteration: extra.iteration } } : {}),
       startedAt: new Date().toISOString(), endedAt: null, nativeStreamInvocations: 1, upstreamHttpCalls: null,
       outcome: 'entered', ledger, actualSubscriptionChargeUsd: null, apiEquivalentCostUsd: null,
     }

@@ -123,4 +123,18 @@ describe('native usage boundary', () => {
     const enUnavail = outputTokens('en', unknownReasoningTotals, 2)
     expect(enUnavail).toBe('at least 50K, reasoning unavailable (1/2 reported)')
   })
+
+  it('preserves foreman usage purpose on native record and computes summary correctly', () => {
+    const bill = billFromNativeUsage({ inputTokens: 120, outputTokens: 80, reasoningTokens: 200 })
+    const record: NativeUsageRecord = {
+      ...makeRecord(bill),
+      role: 'lead',
+      purpose: 'foreman',
+    }
+    expect(record.purpose).toBe('foreman')
+    const summary = usageSummary(record)
+    expect(summary.output).toEqual({ state: 'known', tokens: 80 })
+    expect(summary.reasoning).toEqual({ state: 'known', tokens: 200 })
+    expect(summary.totalOutput).toEqual({ state: 'known', tokens: 280 })
+  })
 })

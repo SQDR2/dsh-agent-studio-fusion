@@ -17,7 +17,6 @@ export interface NativeWorkerAcceptance {
     readonly childId: string;
     readonly messageId: MessageId;
 }
-/** Version-pinned public API adapter. It never calls an LLM adapter or runs a shell itself. */
 export declare class NativeWorkerTransport {
     #private;
     private readonly ctx;
@@ -39,6 +38,13 @@ export declare class NativeWorkerTransport {
     /** Yield a blocking tool to native user steering without canceling or releasing the Worker. */
     settle(parent: Agent, childId: string, signal: AbortSignal, yieldToSteering: true): Promise<Agent | undefined>;
     stop(parent: Agent, childId: string): Promise<Agent>;
-    /** Native release owns quiescence, persistence and handle disposal across HMR. */
+    /**
+     * Native release owns quiescence, persistence and handle disposal across HMR.
+     *
+     * 0.2.1 and 0.2.0 release a named child through the service; 0.2.2 removed both
+     * drains and documents the activation receipt as the replacement. A receipt
+     * addresses exactly the execution that this transport started, so it is used
+     * first and the drain calls remain only for Hosts that still declare them.
+     */
     release(parent: Agent, childId: string): Promise<void>;
 }

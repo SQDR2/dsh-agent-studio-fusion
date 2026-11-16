@@ -1,10 +1,45 @@
 import type { Context } from '@deepseek-ai/cordis';
 import { SessionId } from '@deepseek-ai/dsh-session';
-import { TaskId } from '../contracts.js';
+import { TaskId, type Digest, type PairProfile, type PhysicalRoute, type Role } from '../contracts.js';
 import { NativeRequestBudget } from '../host/native-budget.js';
 import type { NativeUsageRecord } from '../host/native-usage.js';
+import type { AuxiliaryRequest } from '../host/native-auxiliary.js';
 import type { ResolvedProfile } from '../profile/resolve.js';
 import { type BenchmarkOutputLimits } from './output-limits.js';
+export type ForemanManifest = {
+    condition: 'off';
+} | {
+    condition: 'shadow' | 'gate' | 'risk-gated';
+    route: PhysicalRoute;
+    maxOutputTokens: number;
+    timeoutMs: number;
+};
+/**
+ * The Foreman condition one benchmark variant actually ran under.
+ *
+ * Only the `fusion` variant mounts a coordinator, and therefore only it can ever call the
+ * reviewer: a solo Lead, solo Worker, self-review or naive variant has no plan-review seam at
+ * all. Reporting the profile's reviewer settings there would claim an experiment arm that was
+ * never run, so those variants record `off` regardless of what the profile holds. The other
+ * three conditions (shadow, gate, risk-gated) remain independently selectable for `fusion`.
+ */
+export declare function projectForemanManifest(profile: PairProfile, variant?: 'lead_only' | 'worker_only' | 'worker_selfreview' | 'naive' | 'fusion'): ForemanManifest;
+export interface ForemanGuardOwner {
+    readonly binding: {
+        readonly taskId: TaskId;
+        readonly sessionId: string;
+        readonly profile: {
+            readonly digest: Digest;
+        };
+    };
+    readonly role: Role;
+}
+export declare function validateForemanGuardRequest(request: {
+    provider?: string;
+    model?: string;
+    maxTokens?: number;
+    tools?: unknown[];
+}, profile: PairProfile, tag?: AuxiliaryRequest, owner?: ForemanGuardOwner): void;
 export interface NativeBenchmarkOptions {
     runId: string;
     variant: 'lead_only' | 'worker_only' | 'worker_selfreview' | 'naive' | 'fusion';

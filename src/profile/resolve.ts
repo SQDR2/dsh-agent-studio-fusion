@@ -4,6 +4,7 @@ import { digestOf, sha256Hex } from '../digest.js'
 import { FusionError, PROFILE_UNAVAILABLE } from '../errors.js'
 import { keepaliveChoice } from './keepalive.js'
 import { compactorChoice, profileRoutes } from './compactor.js'
+import { foremanChoice } from './foreman.js'
 
 const PLACEHOLDERS = new Set(['__AUTHORIZED_PROVIDER__', '__EXACT_MODEL_ID__', '__EXACT_WORKER_ID__', '__EXISTING_PROJECT_POLICY__'])
 
@@ -83,6 +84,7 @@ export function completeProfile(raw: Record<string, unknown>, prompts: PromptBun
   const promptHash = promptDigests(prompts)
   const cacheKeepalive = keepaliveChoice(raw.cacheKeepalive)
   const compactor = compactorChoice(raw.compactor)
+  const foreman = foremanChoice(raw.foreman)
   if (raw.interactionMode !== undefined && raw.interactionMode !== 'model-like') throw new Error('Unknown Fusion interaction mode')
   if (raw.workflowPolicy !== undefined && (!['enforced-v1', 'enforced-v2', 'enforced-v3'].includes(String(raw.workflowPolicy)) || raw.interactionMode !== 'model-like')) throw new Error('Unknown Fusion workflow policy')
   const profile: PairProfile = {
@@ -106,6 +108,7 @@ export function completeProfile(raw: Record<string, unknown>, prompts: PromptBun
     evidenceCampaignIds: (raw.evidenceCampaignIds as string[]) ?? [],
     ...(cacheKeepalive === undefined ? {} : { cacheKeepalive }),
     ...(compactor === undefined ? {} : { compactor }),
+    ...(foreman === undefined ? {} : { foreman }),
   }
   return { ...profile, digest: digestOf(profile) }
 }

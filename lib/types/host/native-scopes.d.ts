@@ -57,6 +57,14 @@ export declare class NativeFusionScopes {
     } | undefined;
     assertReady(agent: Agent): void;
     install(agent: Agent, binding: SessionBinding, role: Role): void;
+    /**
+     * Re-pin a live scope's frozen route.
+     *
+     * A caller that appends the session's virtual selection during the running reservation
+     * leaves that append as the newest one, and the step about to be prepared would then read
+     * a route no adapter can answer. Every such caller re-pins after it has finished.
+     */
+    pinRoute(agent: Agent): void;
     /** Refresh at the persisted state transition, before native prompt providers run. */
     refreshTools(agent: Agent): void;
     /**

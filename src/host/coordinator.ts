@@ -10,8 +10,10 @@ import { NativeWorkerNotices } from './native-worker-notices.js'
 import { SessionId as NativeSessionId } from '@deepseek-ai/dsh-session'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ToolExecution, ToolRunContext } from '@deepseek-ai/dsh-tools'
-import type { AuthorityAction, ExplorationReport, FusionEvent, Role, RuntimeHandle, TaskId, WorkerReport, WorkOrder } from '../contracts.js'
+import type { AuthorityAction, Digest, ExplorationReport, ForemanAssessment, ForemanDisposition, ForemanFinding, ForemanPolicy, FusionEvent, PlanReviewCandidate, PlanReviewCheckDefinition, PlanReviewRecord, RequirementCoverage, Role, RuntimeHandle, TaskId, WorkerReport, WorkOrder } from '../contracts.js'
 import { EpochId, OperationId, SessionId, SnapshotId, TaskId as asTaskId, WorkOrderId } from '../contracts.js'
+import { candidateDigest, semanticCandidateProjection, assertValidPlanReviewCandidate, lintPlanReviewCandidate, collectForemanFindings, foremanAssessmentSchema, planReviewGateDecision, planReviewRisk, type PlanReviewRiskReason, type PlanReviewModule, type PlanReviewOutcome } from '../plan-review.js'
+import { NativePlanReviewService } from './plan-review.js'
 import { digestOf } from '../digest.js'
 import { WorkspaceWriteLease } from '../execution/write-lease.js'
 import type { LeaseRecord } from '../execution/write-lease.js'
@@ -65,6 +67,38 @@ import type { AcpWorkerFacts } from './acp/bridge.js'
 import { isRead, READ_TOOLS } from './read-tools.js'
 import { AUTHORITY_ACTIONS, workerAuthorityProblem } from './authority.js'
 
+/**
+ * A bounded, factual rendering of the exploration the Lead collected: what was read, the
+ * line ranges, and what the excerpts say. It deliberately carries no Lead commentary — the
+ * reviewer is meant to judge the plan against fresh evidence, not to inherit the Lead's
+ * framing of it.
+ */
+function describeExploration(report: ExplorationReport, limit = 4_000): string {
+  const lines = [`Exploration summary: ${report.summary}`, `Workspace snapshot: ${report.snapshot}`]
+  for (const source of report.sources) {
+    lines.push(`- ${source.path}:${source.startLine}-${source.endLine} (file ${source.fileDigest.slice(0, 12)})`)
+  }
+  if (report.unresolved.length) lines.push(`Unresolved during exploration: ${report.unresolved.join('; ')}`)
+  const text = lines.join('\n')
+  return text.length <= limit ? text : `${text.slice(0, limit)}\n[truncated]`
+}
+
+function formatForemanConcerns(assessment: ForemanAssessment, round: number): string {
+  const findings = collectForemanFindings(assessment)
+  const lines: string[] = [
+    `Foreman plan review raised concerns on candidate work order (round ${round}). The Worker was NOT dispatched.`,
+    `Address each finding by re-invoking fusion_delegate with updated candidate fields (if accepting) and foremanDispositions for every finding ID:`,
+    '',
+  ]
+  for (const f of findings) {
+    lines.push(`- [${f.id}] (${f.category}, ${f.severity}): ${f.message}`)
+    if (f.suggestedCorrection) {
+      lines.push(`  Suggested correction: ${f.suggestedCorrection}`)
+    }
+  }
+  return lines.join('\n')
+}
+
 const textOutput = { schema: { type: 'string' as const }, render: (_args: unknown, text: string) => [{ type: 'text' as const, text }] }
 const stringList = { type: 'array' as const, items: { type: 'string' as const }, required: true as const }
 const optionalStringList = { type: 'array' as const, items: { type: 'string' as const } }
@@ -84,6 +118,8 @@ export interface CoordinatorOptions {
   commandMaxSeconds?: number
   /** Test clock only; production retains the recovered fixed schedule. */
   keepaliveClock?: KeepaliveClock
+  /** Optional plan review service factory for testing/custom auditor injection. */
+  planReview?: (agent: Agent, binding: SessionBinding) => PlanReviewModule
   /**
    * The ACP route names this deployment configured. A Worker dispatched on one
    * runs as an agent process whose only Host tools arrive through the ACP bridge;
@@ -254,6 +290,14 @@ interface DelegateInput {
   authority?: readonly string[]
   /** Let the Worker declare a background process that outlives its report (dev server, watcher). */
   preserveRuntime?: boolean
+  /** Lead-authored explicit decisions for this plan. Non-empty strings. */
+  decisions?: string[]
+  /** Lead-authored unresolved uncertainties or assumptions. Non-empty strings. */
+  uncertainties?: string[]
+  /** Mapping from 0-based requirement indexes to implementation notes and acceptance check IDs. */
+  requirementCoverage?: RequirementCoverage[]
+  /** Dispositions addressing Foreman plan review findings from a previous round. */
+  foremanDispositions?: ForemanDisposition[]
 }
 
 /** Whitespace-insensitive, otherwise exact: a requirement must be the user's own words. */
@@ -327,6 +371,20 @@ export class FusionCoordinator {
   readonly #auxiliary = new NativeAuxiliaryRequests()
   readonly #dispose: (() => void)[] = []
   readonly #nestedChecks = new Map<string, { agent: Agent; parent: symbol }>()
+  /**
+   * Whether one call is a frozen acceptance check Fusion dispatched itself.
+   *
+   * 0.2.1 tags it with the enclosing call's opaque `parent` token, and that is what these
+   * gates compare. 0.2.2 dispatches through a raw batch, which carries no such token, so the
+   * call arrives looking exactly like a model-direct one. The registration is keyed by the
+   * exact call id Fusion generated, which only Fusion can produce, so identity of the call is
+   * the durable part of the proof and the token is the part that is version-dependent.
+   */
+  #isNestedCheck(exec: Readonly<ToolExecution>): boolean {
+    const nested = this.#nestedChecks.get(exec.callId)
+    if (nested === undefined || nested.agent !== exec.agent) return false
+    return nested.parent === exec.parent || exec.parent === undefined
+  }
   readonly #reads = new Map<string, number>()
   readonly #held = new Map<TaskId, LeaseRecord>()
   readonly #installErrors = new Map<string, string>()
@@ -598,6 +656,30 @@ export class FusionCoordinator {
     // no old prepared outbox is blindly dispatched again.
     for (const binding of this.bindings.selected()) {
       const state = this.state(binding.taskId)
+      if (state.pendingPlanReview) {
+        const pending = state.pendingPlanReview
+        const record: PlanReviewRecord = {
+          schemaVersion: 1,
+          taskId: binding.taskId,
+          workOrderId: pending.workOrderId,
+          candidateDigest: pending.candidateDigest,
+          round: pending.round,
+          policy: binding.profile.foreman?.policy ?? 'shadow',
+          route: pending.route,
+          requestedAt: pending.requestedAt,
+          completedAt: new Date().toISOString(),
+          outcome: 'unavailable',
+          unavailableReason: 'interrupted plan review',
+          durationMs: 0,
+        }
+        this.append(binding.taskId, 'plan-review/unavailable', {
+          workOrderId: pending.workOrderId,
+          candidateDigest: pending.candidateDigest,
+          round: pending.round,
+          reason: 'interrupted plan review',
+          record,
+        })
+      }
       const pendingDispatch = this.store.outbox(binding.taskId).some(row => row.kind === 'native-worker'
         && ['prepared', 'dispatched', 'accepted'].includes(row.state))
       const uncertainCheck = this.store.listDocumentIds(`check-invocation:${binding.taskId}:`).some(id => {
@@ -621,6 +703,10 @@ export class FusionCoordinator {
       }
     }
     for (const agent of ctx.agents.list()) this.#attachKnown(agent)
+  }
+
+  get auxiliary(): NativeAuxiliaryRequests {
+    return this.#auxiliary
   }
 
   state(id: TaskId): TaskState {
@@ -730,6 +816,16 @@ export class FusionCoordinator {
     await agent.runMaintenance(async () => {
       this.selectBeforeAssembly(agent, resolved)
     })
+  }
+
+  /**
+   * Re-pin this Agent's frozen physical route after a caller recorded the virtual selection.
+   *
+   * 0.2.2 fixes the route at step preparation, so the physical selection has to be the newest
+   * one recorded before that read. A no-op while no Fusion scope is installed.
+   */
+  pinRoute(agent: Agent): void {
+    this.scopes.pinRoute(agent)
   }
 
   /** Only at idle selection or native running reservation, before prompt assembly. */
@@ -1352,8 +1448,7 @@ export class FusionCoordinator {
     }
     if (enforcedWorkflow(binding) && role === 'lead' && !isRead(exec) && !FUSION_TOOLS.has(exec.name)
       && (!adaptiveWorkflow(binding) || state.currentWorkOrder)) {
-      const nested = this.#nestedChecks.get(exec.callId)
-      const check = isShellTool(exec.name) && nested?.agent === exec.agent && nested.parent === exec.parent
+      const check = isShellTool(exec.name) && this.#isNestedCheck(exec)
       const takeover = state.currentWorkOrder && this.#runtime(binding.taskId).takeover
       if (!check && !takeover) return this.workflow.denyEffect(binding)
     }
@@ -1399,9 +1494,8 @@ export class FusionCoordinator {
         if (dir === undefined) return `Shell commands run inside the project root ${lease.workspaceId}; workdir ${JSON.stringify(args.workdir)} is outside it. Omit workdir or pass a directory inside the project.`
         try { if (dir) workspacePath(lease.workspaceId, dir) } catch (error) { return String(error) }
       }
-      const nested = this.#nestedChecks.get(exec.callId)
       if (role === 'lead' && state.intent === 'DELEGATE' && !this.#runtime(binding.taskId).takeover
-        && (!nested || nested.agent !== exec.agent || nested.parent !== exec.parent)) {
+        && !this.#isNestedCheck(exec)) {
         return 'Lead is reviewing; use the native acceptance checks or request takeover'
       }
     }
@@ -1487,8 +1581,7 @@ export class FusionCoordinator {
       return 'FUSION_LEAD_READ_ONLY: in this Fusion mode the Lead never writes. Send corrections to the same Sidekick with fusion_rework.'
     }
     if (isRead(exec) || FUSION_TOOLS.has(exec.name)) return false
-    const nested = this.#nestedChecks.get(exec.callId)
-    if (isShellTool(exec.name) && nested && nested.agent === exec.agent && nested.parent === exec.parent) return false
+    if (isShellTool(exec.name) && this.#isNestedCheck(exec)) return false
     if (isShellTool(exec.name) && (exec.arguments as { run_in_background?: unknown }).run_in_background === true) {
       this.workflow.denyEffect(binding)
       return 'FUSION_LEAD_READ_ONLY: the Lead runs only short foreground inspection commands. Test runs and long commands belong to the Sidekick: delegate them.'
@@ -1821,7 +1914,11 @@ export class FusionCoordinator {
       forbiddenActions: [...(mode === 'explore' ? ['Write files or run commands during read-only exploration'] : []), 'Change unrelated paths', 'Weaken frozen acceptance checks', 'Bypass native tool permissions',
         ...(mode === 'implement' && !authority.length ? ['Commit, push, tag, publish, release, open a pull request or trigger CI; report the action instead'] : [])],
       ...(authority.length ? { authority } : {}), ...(args.preserveRuntime ? { preserveRuntime: true as const } : {}), baseSnapshot: base.id,
-      evidence: explored ? priorState.exploration!.sources.map(source => source.excerpt) : [], decisions: [], uncertainties: [], policy: {
+      evidence: explored ? priorState.exploration!.sources.map(source => source.excerpt) : [],
+      decisions: (args.decisions ?? []).map(text => ({ text, source: { sessionId: SessionId(agent.id), eventSeq: source.seq, messageId: source.data.id } })),
+      uncertainties: [...(args.uncertainties ?? [])],
+      requirementCoverage: args.requirementCoverage ? structuredClone(args.requirementCoverage) : (mode === 'implement' && requirements.length === 0 ? [] : undefined),
+      policy: {
         maxWorkerSteps: this.options.maxWorkerSteps ?? DEFAULT_POLICY.maxWorkerSteps, maxReworkRounds: this.options.maxReworkRounds ?? DEFAULT_POLICY.maxReworkRounds,
         maxCapabilityUpgrades: 0, commandMaxSeconds: this.options.commandMaxSeconds ?? DEFAULT_POLICY.commandMaxSeconds,
       },
@@ -1832,6 +1929,184 @@ export class FusionCoordinator {
     if (checks.some(check => check.definition.baseline)) checks = await this.#baseline(agent, binding, base.root, order, checks, exec, directHandoff)
     order.acceptance = checks.map(check => ({ id: check.definition.id, description: check.definition.description,
       mandatory: true, verificationKind: check.plan.kind, planId: check.plan.id, planDigest: digestOf(check.plan) }))
+    const candidate: PlanReviewCandidate = {
+      schemaVersion: 1,
+      order,
+      brief: args.brief,
+      requirementCoverage: order.requirementCoverage ?? [],
+      // The reviewer has to read the request it is assessing, and the evidence the Lead
+      // actually collected rather than a summary of the Lead's own reasoning.
+      ...(userTexts.length ? { userMessages: [...userTexts] } : {}),
+      ...(explored ? { evidenceSummary: describeExploration(priorState.exploration!) } : {}),
+      assessmentSchema: foremanAssessmentSchema(),
+      checkDefinitions: checks.map(check => ({
+        id: check.definition.id,
+        description: check.definition.description,
+        command: check.definition.command,
+        kind: check.plan.kind as 'test' | 'static-check',
+        parser: check.definition.parser,
+        definitionPaths: check.definition.definitionPaths ?? [],
+        ...(check.definition.timeoutSeconds !== undefined ? { timeoutSeconds: check.definition.timeoutSeconds } : {}),
+        ...(check.definition.baseline !== undefined ? { baseline: check.definition.baseline } : {}),
+        ...(check.definition.independent !== undefined ? { independent: check.definition.independent } : {}),
+        ...(check.plan.allowedFailures !== undefined ? { allowedFailures: check.plan.allowedFailures } : {}),
+      })),
+    }
+    order.candidateDigest = candidateDigest(candidate)
+    assertValidPlanReviewCandidate(candidate)
+
+    if (priorState.pendingPlanReview) {
+      const pending = priorState.pendingPlanReview
+      const record: PlanReviewRecord = {
+        schemaVersion: 1,
+        taskId: binding.taskId,
+        workOrderId: pending.workOrderId,
+        candidateDigest: pending.candidateDigest,
+        round: pending.round,
+        policy: binding.profile.foreman?.policy ?? 'shadow',
+        route: pending.route,
+        requestedAt: pending.requestedAt,
+        completedAt: new Date().toISOString(),
+        outcome: 'unavailable',
+        unavailableReason: 'interrupted plan review',
+        durationMs: 0,
+      }
+      this.append(binding.taskId, 'plan-review/unavailable', {
+        workOrderId: pending.workOrderId,
+        candidateDigest: pending.candidateDigest,
+        round: pending.round,
+        reason: 'interrupted plan review',
+        record,
+      })
+    }
+
+    if (binding.profile.foreman) {
+      const policy: ForemanPolicy = binding.profile.foreman.policy ?? 'shadow'
+      const currentState = this.state(binding.taskId)
+      const reviews = currentState.planReviews ?? []
+      const resolutions = currentState.planReviewResolutions ?? []
+
+      if (policy === 'shadow') {
+        if (args.foremanDispositions && args.foremanDispositions.length > 0) {
+          throw new Error('Unexpected foremanDispositions: Foreman is running in shadow mode.')
+        }
+        await this.#runPlanReview(agent, binding, candidate, 1, policy, exec.signal)
+      } else {
+        // Whether this exact candidate may be dispatched without another model call.
+        //
+        // Approval is bound to the digest that was actually reviewed. A round-1 `accepted`
+        // disposition is NOT an approval of whatever candidate arrives later: it says the
+        // Lead claims to have revised the plan, and the revised plan still owes a round-2
+        // review. Treating any new digest as approved is exactly the bypass that lets a
+        // reworded order skip the second review.
+        const decision = planReviewGateDecision({ candidateDigest: order.candidateDigest!, reviews,
+          resolutions: resolutions.map(item => ({ candidateDigest: item.candidateDigest, round: item.round,
+            dispositions: item.dispositions, ...(item.revisedCandidateDigest === undefined ? {} : { revisedCandidateDigest: item.revisedCandidateDigest }) })) })
+
+        if (decision.approved) {
+          // Already approved across round 1 or round 2 (ready, unavailable, or overridden).
+          // Allow replay/retry without re-calling Foreman.
+        } else {
+          const unresolvedReview = [...reviews].reverse().find(r => {
+            if (r.policy === 'shadow') return false
+            if (r.outcome !== 'assessment' || r.assessment?.verdict !== 'concerns') return false
+            const isResolved = Boolean(r.dispositions && r.dispositions.length > 0) ||
+              resolutions.some(res => res.candidateDigest === r.candidateDigest && res.round === r.round)
+            return !isResolved
+          })
+
+          if (unresolvedReview) {
+            if (!args.foremanDispositions || !Array.isArray(args.foremanDispositions) || args.foremanDispositions.length === 0) {
+              throw new Error(formatForemanConcerns(unresolvedReview.assessment!, unresolvedReview.round))
+            }
+            const findings = collectForemanFindings(unresolvedReview.assessment!)
+            const findingIds = new Set(findings.map(f => f.id))
+            const seenIds = new Set<string>()
+            for (const d of args.foremanDispositions) {
+              if (!findingIds.has(d.findingId)) {
+                throw new Error(`Unknown findingId "${d.findingId}" in dispositions`)
+              }
+              if (seenIds.has(d.findingId)) {
+                throw new Error(`Duplicate disposition for findingId "${d.findingId}"`)
+              }
+              seenIds.add(d.findingId)
+              if (d.action === 'overridden') {
+                if (typeof d.reason !== 'string' || !d.reason.trim()) {
+                  throw new Error(`Disposition for finding "${d.findingId}" has action "overridden" but is missing a non-empty reason.`)
+                }
+              } else if (d.action === 'accepted') {
+                if (typeof d.changeSummary !== 'string' || !d.changeSummary.trim()) {
+                  throw new Error(`Disposition for finding "${d.findingId}" has action "accepted" but is missing a non-empty changeSummary.`)
+                }
+                if (order.candidateDigest === unresolvedReview.candidateDigest) {
+                  throw new Error(`Disposition for finding "${d.findingId}" was accepted, but candidate work order was not changed (digest is identical to round ${unresolvedReview.round}). Accepted findings require candidate changes.`)
+                }
+                if (unresolvedReview.round >= 2) {
+                  throw new Error('Foreman plan review reached the maximum of 2 review rounds. Accepted findings are not permitted in post-round-2; you must override all findings with reasons, ask the user for guidance, or abort the task.')
+                }
+              } else {
+                throw new Error(`Invalid disposition action "${String((d as { action?: unknown }).action)}"`)
+              }
+            }
+
+            if (seenIds.size !== findings.length) {
+              throw new Error(`Foreman dispositions count (${seenIds.size}) does not match findings count (${findings.length}). All findings must be addressed.`)
+            }
+
+            const hasAccepted = args.foremanDispositions.some(d => d.action === 'accepted')
+            // An override is an answer about the plan that was actually reviewed. If the Lead
+            // also changed the brief, allowed paths or checks in the same call, those changes
+            // were never reviewed: appending the resolution would record an "override" for a
+            // candidate the reviewer never saw and then dispatch it. A revision must go through
+            // an `accepted` disposition and its own round-2 review instead.
+            if (!hasAccepted && order.candidateDigest !== unresolvedReview.candidateDigest) {
+              throw new Error('An override applies only to the reviewed candidate. Keep the candidate unchanged, or accept a finding and submit the revision for round 2.')
+            }
+            this.append(binding.taskId, 'plan-review/resolved', {
+              workOrderId: unresolvedReview.workOrderId,
+              candidateDigest: unresolvedReview.candidateDigest,
+              round: unresolvedReview.round,
+              dispositions: args.foremanDispositions,
+              ...(hasAccepted ? { revisedCandidateDigest: order.candidateDigest! } : {}),
+            })
+
+            if (hasAccepted) {
+              const round2Outcome = await this.#runPlanReview(agent, binding, candidate, 2, policy, exec.signal)
+              if (round2Outcome.kind === 'concerns') {
+                return formatForemanConcerns(round2Outcome.assessment, 2)
+              }
+            }
+          } else {
+            if (args.foremanDispositions && args.foremanDispositions.length > 0) {
+              throw new Error('Unexpected foremanDispositions: no unresolved Foreman concerns exist for this task.')
+            }
+
+            let shouldReview = true
+            let riskReasons: readonly string[] | undefined
+            if (policy === 'risk-gated') {
+              const risk = planReviewRisk(candidate)
+              shouldReview = risk.triggered
+              riskReasons = risk.reasons
+            }
+
+            // `decision.round` is 2 exactly when an accepted round-1 resolution revised the
+            // plan into this candidate and the process stopped before requesting round 2.
+            // Re-running round 1 would ask the answered findings again and spend a third
+            // model call on a two-call budget.
+            const round = decision.round
+            if (shouldReview || decision.reason === 'interrupted-round-2') {
+              const outcome = await this.#runPlanReview(agent, binding, candidate, round, policy, exec.signal,
+                decision.reason === 'interrupted-round-2' && riskReasons === undefined ? ['round-2-continuation'] : riskReasons)
+              if (outcome.kind === 'concerns') {
+                return formatForemanConcerns(outcome.assessment, round)
+              }
+            }
+          }
+        }
+      }
+    } else if (args.foremanDispositions && args.foremanDispositions.length > 0) {
+      throw new Error('Unexpected foremanDispositions: Foreman is not configured.')
+    }
     this.#assertWorkerCapacity(binding.taskId, order.policy.maxWorkerSteps)
     const childId = SessionId(binding.workerId ?? `fusion-worker-${randomUUID()}`)
     const priorChild = this.store.readDocument(`child:${childId}`)
@@ -1948,6 +2223,105 @@ export class FusionCoordinator {
       throw new Error(`requirements must be exact quotes of the user's words; not found verbatim: ${JSON.stringify(missing.slice(0, 3))}. Copy the text exactly (whitespace may differ, nothing else); put your own interpretation in the brief or constraints.`)
     }
     return list
+  }
+
+  async #runPlanReview(
+    agent: Agent,
+    binding: SessionBinding,
+    candidate: PlanReviewCandidate,
+    round: number,
+    policy: ForemanPolicy,
+    signal?: AbortSignal,
+    riskReasons?: readonly string[],
+  ): Promise<PlanReviewOutcome> {
+    const currentState = this.state(binding.taskId)
+    const priorReview = currentState.planReviews?.find(
+      r => r.candidateDigest === candidate.order.candidateDigest && r.round === round,
+    )
+    if (priorReview) {
+      if (priorReview.outcome === 'assessment' && priorReview.assessment) {
+        return { kind: priorReview.assessment.verdict, assessment: priorReview.assessment }
+      }
+      return { kind: 'unavailable', reason: priorReview.unavailableReason ?? 'prior unavailable review' }
+    }
+
+    const requestedAt = new Date().toISOString()
+    const triggerDecision = {
+      triggered: policy === 'risk-gated' ? Boolean(riskReasons?.length) : true,
+      reasons: riskReasons ?? (policy === 'gate' ? ['policy-gate'] : ['shadow']),
+    }
+    this.append(binding.taskId, 'plan-review/requested', {
+      workOrderId: candidate.order.id,
+      candidateDigest: candidate.order.candidateDigest!,
+      round,
+      route: binding.profile.foreman!.route,
+      requestedAt,
+      triggerDecision,
+    })
+
+    let outcome: PlanReviewOutcome
+    const startTime = Date.now()
+    try {
+      const service = this.options.planReview
+        ? this.options.planReview(agent, binding)
+        : new NativePlanReviewService(this.ctx, agent, binding, this.#auxiliary)
+      outcome = await service.review(candidate, signal)
+    } catch (error) {
+      outcome = {
+        kind: 'unavailable',
+        reason: `Foreman review failed: ${error instanceof Error ? error.message : String(error)}`,
+      }
+    }
+    const durationMs = Date.now() - startTime
+    const completedAt = new Date().toISOString()
+    if (outcome.kind === 'ready' || outcome.kind === 'concerns') {
+      const record: PlanReviewRecord = {
+        schemaVersion: 1,
+        taskId: binding.taskId,
+        workOrderId: candidate.order.id,
+        candidateDigest: candidate.order.candidateDigest!,
+        round,
+        policy,
+        route: binding.profile.foreman!.route,
+        requestedAt,
+        completedAt,
+        outcome: 'assessment',
+        assessment: outcome.assessment,
+        durationMs,
+        triggerDecision,
+      }
+      this.append(binding.taskId, 'plan-review/completed', {
+        workOrderId: candidate.order.id,
+        candidateDigest: candidate.order.candidateDigest!,
+        round,
+        assessment: outcome.assessment,
+        record,
+      })
+    } else {
+      const record: PlanReviewRecord = {
+        schemaVersion: 1,
+        taskId: binding.taskId,
+        workOrderId: candidate.order.id,
+        candidateDigest: candidate.order.candidateDigest!,
+        round,
+        policy,
+        route: binding.profile.foreman!.route,
+        requestedAt,
+        completedAt,
+        outcome: 'unavailable',
+        unavailableReason: outcome.reason,
+        durationMs,
+        triggerDecision,
+      }
+      this.append(binding.taskId, 'plan-review/unavailable', {
+        workOrderId: candidate.order.id,
+        candidateDigest: candidate.order.candidateDigest!,
+        round,
+        reason: outcome.reason,
+        record,
+      })
+    }
+    return outcome
   }
 
   async #baseline(agent: Agent, binding: SessionBinding, root: string, order: WorkOrder, checks: readonly FrozenCheck[], exec: ToolRunContext, leadHolds: boolean): Promise<FrozenCheck[]> {
@@ -2098,10 +2472,18 @@ export class FusionCoordinator {
       const payload = this.store.putArtifact(binding.taskId, Buffer.from(message), 'text/plain')
       this.store.writeDocument(deliveryId, 0, { schemaVersion: 1, taskId: binding.taskId, childId: state.acceptedChild,
         workOrderId: state.currentWorkOrder.id, state: 'prepared', briefRevision, delivery, feedbackKind, payloadRef: payload.id, causeId: exec.callId })
+      const reworkOrdinal = runtime.reworkRounds + (feedbackKind === 'rework' ? 1 : 0)
       this.#saveRuntime({ ...runtime, briefRevision, background: !block, takeover: false,
         submitted: undefined, textReport: undefined, explorationSubmitted: undefined, verification: undefined, verificationReasons: undefined, workerFailure: undefined,
-        reworkRounds: runtime.reworkRounds + (feedbackKind === 'rework' ? 1 : 0),
+        reworkRounds: reworkOrdinal,
         continuationRounds: continuationRounds + (feedbackKind === 'continuation' ? 1 : 0) })
+      // Record the same decision durably, in the task log rather than only in the runtime
+      // document: the runtime is ephemeral per Host generation, while a rework round is a
+      // fact about the task that offline calibration and the status index both read.
+      if (feedbackKind === 'rework' && state.currentWorkOrder) {
+        this.append(binding.taskId, 'worker/rework-requested', { workOrderId: state.currentWorkOrder.id,
+          child: SessionId(state.acceptedChild), ordinal: reworkOrdinal, briefRevision })
+      }
       this.activity.link(agent.session, childId, binding.taskId, exec.callId)
       const accepted = delivery === 'interrupt-generation'
         ? await this.transport.interruptAndContinue(agent, state.acceptedChild, message, exec.signal)
@@ -2609,6 +2991,17 @@ export class FusionCoordinator {
       baseline: { type: 'string', enum: ['no-new-failures'], description: `For a broad regression suite (${BASELINE_PARSERS.join(', ')}) that may already have unrelated failing tests: the Host runs it once on the untouched workspace and then requires no new failures. Omit for the tests this task must make pass.` },
       independent: { type: 'boolean', description: 'True only when this command shares no state with the other checks, so the Host may run it beside one of them (faster). A linter or type check over an ignored build cache is usually safe; two runs of the same test framework are usually not, because they share a cache directory and can corrupt each other. Default false: run alone.' },
     } } as const
+    const requirementCoverageItem = { type: 'object', additionalProperties: false, properties: {
+      requirementIndex: { type: 'integer', required: true, description: '0-based index of the requirement in requirements' },
+      implementationNotes: { type: 'array', required: true, items: { type: 'string' }, description: 'Notes on how this requirement will be implemented (at least one non-empty note)' },
+      acceptanceIds: { type: 'array', required: true, items: { type: 'string' }, description: 'Check IDs proving this requirement (at least one check ID matching checks)' },
+    } } as const
+    const foremanDispositionItem = { type: 'object', additionalProperties: false, properties: {
+      findingId: { type: 'string', required: true, description: 'ID of the Foreman finding' },
+      action: { type: 'string', required: true, enum: ['accepted', 'overridden'], description: 'Action for this finding: "accepted" or "overridden"' },
+      changeSummary: { type: 'string', description: 'Summary of candidate changes made when action is "accepted"' },
+      reason: { type: 'string', description: 'Rationale when action is "overridden"' },
+    } } as const
     dispose.push(scope.tools.register(defineTool({ name: 'fusion_delegate', description: 'Delegate a bounded implementation to an independent persistent Worker. After direct Lead preparation, validated delegation transfers the quiescent write lease without completing the task. By default wait for its report and native checks; block=false returns while the Worker runs.',
       parameters: { goal: { type: 'string', description: 'The complete implementation outcome, including all planned stages.', required: true },
         brief: { type: 'string', description: 'The current stage plan. Put temporary deferrals and sequencing here; later feedback may advance this stage.', required: true },
@@ -2619,8 +3012,24 @@ export class FusionCoordinator {
         requirements: { ...optionalStringList, description: 'The user\'s hard requirements as exact quotes of their messages (required behaviour, names, strings, formats, acceptance criteria), 1-20 items. The Host verifies each quote against the user\'s words, freezes them for the Sidekick, and your accept must give one verdict per item.' },
         authority: { type: 'array', items: { type: 'string', enum: [...AUTHORITY_ACTIONS] },
           description: 'Default none. Authority actions you grant for this work order: commit, push, tag, publish, release, pr, ci. The write lease covers files inside allowedPaths, not what leaves the workspace or rewrites it: without a grant the Host refuses these on the Sidekick\'s shell. Grant only what the user actually asked for, and keep the user-facing consequences (PR text, release notes, CI results) yours.' },
-        preserveRuntime: { type: 'boolean', description: 'Default false: the Worker must settle every command before it can submit. True lets it declare one running background process with fusion_declare_runtime instead of killing it first, and records it for the next handoff. The process still ends with the handoff: the native jobs runtime stops a Worker\'s jobs when its Agent scope is disposed, so this removes a needless stop-and-restart inside one handoff and makes the next brief explicit about what was running; it does not keep a server up across handoffs.' } }, output: textOutput,
-      execute: (args, exec) => this.delegate(agent, { ...args, constraints: args.constraints ?? [], checks: normalizeChecks(args.checks), requirements: args.requirements ?? [], authority: args.authority ?? [], preserveRuntime: args.preserveRuntime === true }, exec) })))
+        preserveRuntime: { type: 'boolean', description: 'Default false: the Worker must settle every command before it can submit. True lets it declare one running background process with fusion_declare_runtime instead of killing it first, and records it for the next handoff. The process still ends with the handoff: the native jobs runtime stops a Worker\'s jobs when its Agent scope is disposed, so this removes a needless stop-and-restart inside one handoff and makes the next brief explicit about what was running; it does not keep a server up across handoffs.' },
+        decisions: { ...optionalStringList, description: 'Lead-authored explicit decisions for this plan. Non-empty strings.' },
+        uncertainties: { ...optionalStringList, description: 'Lead-authored unresolved uncertainties or assumptions. Non-empty strings.' },
+        requirementCoverage: { type: 'array', items: requirementCoverageItem, description: 'Mapping from 0-based requirement indexes to implementation notes and acceptance check IDs. Required for implementation orders with user requirements.' },
+        foremanDispositions: { type: 'array', items: foremanDispositionItem, description: 'Dispositions for Foreman review findings from the previous round.' },
+      }, output: textOutput,
+      execute: (args, exec) => this.delegate(agent, {
+        ...args,
+        constraints: args.constraints ?? [],
+        checks: normalizeChecks(args.checks),
+        requirements: args.requirements ?? [],
+        authority: args.authority ?? [],
+        preserveRuntime: args.preserveRuntime === true,
+        decisions: args.decisions ?? [],
+        uncertainties: args.uncertainties ?? [],
+        requirementCoverage: args.requirementCoverage as RequirementCoverage[] | undefined,
+        foremanDispositions: args.foremanDispositions as ForemanDisposition[] | undefined,
+      }, exec) })))
     dispose.push(scope.tools.register(defineTool({ name: 'fusion_rework', description: 'Send specific Lead-authored feedback to the same persistent Worker, including advancing a planned implementation stage. Before a report this continues unfinished work within the Worker-step budget; after a report it consumes a rework round. Active generation and native job waits can be replaced without restarting a tracked job; an active foreground tool finishes before the new brief. Keep durable requirements unchanged. Do not suggest files outside the frozen allowed paths unless you add them with addAllowedPaths.',
       // Orchestration includes human approval waits; leaf tools retain their
       // resource deadlines, but the wait itself must not expire.

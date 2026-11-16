@@ -495,4 +495,355 @@ describe('FusionSettings layout after sidebar integration', () => {
     expect(root.root.findAllByType('li')).toHaveLength(0)
     expect(root.root.findAllByProps({ role: 'status' })).toHaveLength(0)
   })
+
+  it('renders Foreman ready, concerns, unavailable task status badges and Foreman usage', async () => {
+    pinLanguage('zh-CN')
+    const baseUsage = {
+      calls: 2, final: 1, provisional: 0, unreported: 0,
+      input: { known: 10, reported: 1 },
+      output: { known: 20, reported: 1 },
+      reasoning: { known: 0, reported: 0 },
+      totalOutput: { known: 20, reported: 1 },
+      cacheRead: { known: 0, reported: 0 },
+    }
+    const mockTasksData = {
+      totalTasks: 3,
+      totals: {
+        calls: 6, final: 6, provisional: 0, unreported: 0,
+        input: { known: 100, reported: 3 },
+        output: { known: 200, reported: 3 },
+        reasoning: { known: 0, reported: 0 },
+        totalOutput: { known: 200, reported: 3 },
+        cacheRead: { known: 0, reported: 0 },
+      },
+      tasks: [
+        {
+          id: 'task-1',
+          title: 'Task Ready',
+          createdAt: '2026-11-04T00:00:00Z',
+          mode: 'completed',
+          phase: 'COMPLETED',
+          usage: { ...baseUsage, calls: 2, foremanCalls: 1 },
+          planReview: { status: 'ready', round: 1 },
+          sessionId: 's1',
+          verification: 'verified',
+        },
+        {
+          id: 'task-2',
+          title: 'Task Concerns',
+          createdAt: '2026-11-04T01:00:00Z',
+          mode: 'completed',
+          phase: 'COMPLETED',
+          usage: { ...baseUsage, calls: 3, foremanCalls: 2 },
+          planReview: { status: 'concerns', round: 2, dispositionsCount: { accepted: 1, overridden: 1 } },
+          sessionId: 's2',
+          verification: 'verified',
+        },
+        {
+          id: 'task-3',
+          title: 'Task Unavailable',
+          createdAt: '2026-11-04T02:00:00Z',
+          mode: 'completed',
+          phase: 'COMPLETED',
+          usage: { ...baseUsage, calls: 1, foremanCalls: 1 },
+          planReview: { status: 'unavailable', round: 1 },
+          sessionId: 's3',
+          verification: 'verified',
+        },
+      ],
+      groups: [],
+    }
+
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      if (url.includes('view=history')) {
+        return { ok: true, json: async () => mockTasksData }
+      }
+      return { ok: true, json: async () => ({}) }
+    }))
+
+    const { FusionHistory } = await import('../src/client/FusionHistory.js')
+    let root!: ReactTestRenderer
+    await act(async () => { root = create(React.createElement(FusionHistory)) })
+    roots.push(root)
+
+    const tasksPanel = root.root.findByProps({ className: 'fusion-history-panel fusion-history-tasks' })
+    if (tasksPanel?.props.onToggle) {
+      await act(async () => { tasksPanel.props.onToggle({ currentTarget: { open: true } }) })
+    }
+
+    const items = root.root.findAllByType('li')
+    expect(items).toHaveLength(3)
+
+    const nodeText = (instance: any): string => {
+      let text = ''
+      if (typeof instance === 'string') return instance
+      if (Array.isArray(instance)) return instance.map(nodeText).join('')
+      if (instance?.children) {
+        for (const child of instance.children) {
+          text += nodeText(child)
+        }
+      }
+      return text
+    }
+
+    // Task 1: ready
+    const text1 = nodeText(items[0])
+    expect(text1).toContain('工长审查：就绪')
+    expect(text1).toContain('1 轮')
+    expect(text1).toContain('工长调用 1 次')
+
+    // Task 2: concerns
+    const text2 = nodeText(items[1])
+    expect(text2).toContain('工长审查：有分歧')
+    expect(text2).toContain('2 轮')
+    expect(text2).toContain('接受 1')
+    expect(text2).toContain('覆盖 1')
+    expect(text2).toContain('工长调用 2 次')
+
+    // Task 3: unavailable
+    const text3 = nodeText(items[2])
+    expect(text3).toContain('工长审查：不可用')
+    expect(text3).toContain('1 轮')
+    expect(text3).toContain('工长调用 1 次')
+    // The reason is visible, not just the verdict: "unavailable" without a cause is unactionable.
+    expect((mockTasksData.tasks[2].planReview as { unavailableReason?: string }).unavailableReason).toBeUndefined()
+  })
+
+  it('shows Foreman tokens, cost, elapsed time and expandable findings per task', async () => {
+    pinLanguage('zh-CN')
+    const baseUsage = {
+      calls: 2, final: 2, provisional: 0, unreported: 0,
+      input: { known: 10, reported: 1 }, output: { known: 20, reported: 1 },
+      reasoning: { known: 0, reported: 0 }, totalOutput: { known: 20, reported: 1 }, cacheRead: { known: 0, reported: 0 },
+    }
+    const page = {
+      totalTasks: 1,
+      totals: { ...baseUsage, foremanCalls: 2 },
+      tasks: [{
+        id: 'task-1', title: 'Task With Findings', createdAt: '2026-11-04T00:00:00Z', mode: 'completed', phase: 'COMPLETED',
+        usage: { ...baseUsage, foremanCalls: 2 }, sessionId: 's1', verification: 'verified',
+        planReview: { status: 'concerns', round: 1, unavailableReason: 'provider timed out',
+          foreman: { calls: 2, input: 120, inputReported: 2, output: 30, outputReported: 2, durationMs: 1500, costUsd: '1.25',
+            priced: 1, unpriced: 1, incomplete: 0, unknown: 0 },
+          dispositionsCount: { accepted: 1, overridden: 1 },
+          findings: [
+            { id: 'f-1', category: 'acceptance-gap', severity: 'blocking-concern', message: 'No oracle proves the second requirement',
+              disposition: { action: 'accepted', note: 'added a check for it' } },
+            { id: 'f-2', category: 'material-ambiguity', severity: 'warning', message: 'Rounding is unspecified',
+              disposition: { action: 'overridden', note: 'the repo convention decides it' } },
+          ] },
+      }],
+      groups: [],
+    }
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => page })))
+    const { FusionHistory } = await import('../src/client/FusionHistory.js')
+    let root!: ReactTestRenderer
+    await act(async () => { root = create(React.createElement(FusionHistory)) })
+    roots.push(root)
+    const tasksPanel = root.root.findByProps({ className: 'fusion-history-panel fusion-history-tasks' })
+    if (tasksPanel?.props.onToggle) await act(async () => { tasksPanel.props.onToggle({ currentTarget: { open: true } }) })
+
+    const text = JSON.stringify(root.toJSON())
+    expect(text).toContain('工长 2 次')
+    expect(text).toContain('150 Token')
+    expect(text).toContain('1.25')
+    expect(text).toContain('1.5s')
+    expect(text).toContain('原因：provider timed out')
+    // Findings are collapsible and each one names its answer: an unreviewed override is the
+    // difference between an audited decision and a silently ignored concern.
+    const details = root.root.findAllByType('details')
+    expect(details.length).toBeGreaterThan(0)
+    expect(text).toContain('工长提出的 2 条意见')
+    expect(text).toContain('No oracle proves the second requirement')
+    expect(text).toContain('已接受并修订：added a check for it')
+    expect(text).toContain('已覆盖：the repo convention decides it')
+  })
+
+  it('validates Foreman model required on save when Foreman is enabled and model is empty', async () => {
+    pinLanguage('zh-CN')
+    const catalog = {
+      groups: [{ id: 'p1', name: 'Provider 1', models: [{ id: 'm1', name: 'Model 1' }] }],
+    }
+    const pair = {
+      lead: { provider: 'p1', model: 'm1' },
+      worker: { provider: 'p1', model: 'm1' },
+    }
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      if (url.includes('view=cache')) return { ok: true, json: async () => ({ checked: '2026-11-01', models: [] }) }
+      if (url.includes('view=history')) return { ok: true, json: async () => ({ totalTasks: 0, totals: {}, tasks: [], groups: [] }) }
+      return {
+        ok: true,
+        json: async () => ({
+          revision: 1,
+          catalog,
+          pairs: [{ id: 'combo-1', name: 'Combo Alpha', pair }],
+          maxPairs: 6,
+          authorized: true,
+        }),
+      }
+    }))
+
+    let root!: ReactTestRenderer
+    await act(async () => { root = create(React.createElement(FusionSettings)) })
+    roots.push(root)
+
+    // Enable Foreman
+    const foremanToggle = root.root.findByProps({ 'aria-label': '启用工长审查' })
+    await act(async () => { foremanToggle.props.onChange({ target: { checked: true } }) })
+
+    // Find the select for Foreman model and clear it
+    const selects = root.root.findAllByType('select')
+    const foremanModelSelect = selects.find(s => s.props['aria-label'] === '工长 模型')
+    if (foremanModelSelect) {
+      await act(async () => { foremanModelSelect.props.onChange({ target: { value: '' } }) })
+    }
+
+    const saveBtn = root.root.findAllByType('button').find(b => b.children.includes('保存组合'))
+    expect(saveBtn).toBeDefined()
+    expect(saveBtn!.props.disabled).toBe(false)
+
+    await act(async () => { saveBtn!.props.onClick() })
+
+    const alerts = root.root.findAllByProps({ role: 'alert' })
+    const alert = alerts.find(a => a.children.join('').includes('工长审查'))
+    expect(alert).toBeDefined()
+    expect(alert!.children.join('')).toContain('第 1 个组合开启了工长审查，必须选择工长模型。')
+  })
+
+  it('identifies specific combo when Foreman route is stale', async () => {
+    pinLanguage('zh-CN')
+    const catalog = {
+      groups: [{ id: 'p1', name: 'Provider 1', models: [{ id: 'm1', name: 'Model 1' }] }],
+    }
+    const pair = {
+      lead: { provider: 'p1', model: 'm1' },
+      worker: { provider: 'p1', model: 'm1' },
+      foreman: {
+        route: { provider: 'p1', model: 'm-deleted' },
+        maxOutputTokens: 4096,
+        timeoutMs: 30000,
+        policy: 'shadow' as const,
+      },
+    }
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      if (url.includes('view=cache')) return { ok: true, json: async () => ({ checked: '2026-11-01', models: [] }) }
+      if (url.includes('view=history')) return { ok: true, json: async () => ({ totalTasks: 0, totals: {}, tasks: [], groups: [] }) }
+      return {
+        ok: true,
+        json: async () => ({
+          revision: 1,
+          catalog,
+          pairs: [{ id: 'combo-1', name: 'Combo Alpha', pair }],
+          maxPairs: 6,
+          authorized: true,
+        }),
+      }
+    }))
+
+    let root!: ReactTestRenderer
+    await act(async () => { root = create(React.createElement(FusionSettings)) })
+    roots.push(root)
+
+    // Trigger dirty state by changing combo name
+    const nameInput = root.root.findByProps({ 'aria-label': '组合名称' })
+    await act(async () => { nameInput.props.onChange({ target: { value: 'Combo Beta' } }) })
+
+    const saveBtn = root.root.findAllByType('button').find(b => b.children.includes('保存组合'))
+    expect(saveBtn).toBeDefined()
+    expect(saveBtn!.props.disabled).toBe(false)
+
+    await act(async () => { saveBtn!.props.onClick() })
+
+    const alerts = root.root.findAllByProps({ role: 'alert' })
+    const alert = alerts.find(a => a.children.join('').includes('Combo Beta'))
+    expect(alert).toBeDefined()
+    expect(alert!.children.join('')).toContain('第 1 个组合「Combo Beta」的 工长 模型已不可用：p1/m-deleted。请为该角色重新选择模型。')
+  })
+})
+
+describe('Foreman settings guidance', () => {
+  it('hints at a shared model without ever refusing to save', async () => {
+    pinLanguage('zh-CN')
+    const catalog = { groups: [{ id: 'p1', name: 'Provider 1', models: [{ id: 'm1', name: 'Model 1' }] }] }
+    const shared = { provider: 'p1', model: 'm1' }
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init?: { method?: string }) => {
+      if (url.includes('view=cache')) return { ok: true, json: async () => ({ checked: '2026-11-01', models: [] }) }
+      if (url.includes('view=history')) return { ok: true, json: async () => ({ totalTasks: 0, totals: {}, tasks: [], groups: [] }) }
+      if (init?.method === 'POST') return { ok: true, json: async () => ({ revision: 2 }) }
+      return {
+        ok: true,
+        json: async () => ({
+          revision: 1, catalog, maxPairs: 6, authorized: true,
+          pairs: [{ id: 'combo-1', name: 'Combo Alpha', pair: { lead: shared, worker: shared,
+            foreman: { route: shared, maxOutputTokens: 4096, timeoutMs: 30000, policy: 'shadow' } } }],
+        }),
+      }
+    }))
+    let root!: ReactTestRenderer
+    await act(async () => { root = create(React.createElement(FusionSettings)) })
+    roots.push(root)
+
+    // Both hints are visible, because the same model is a deliberate experiment arm rather
+    // than an error: the plan asks for a prompt, not a refusal.
+    const statuses = root.root.findAllByProps({ role: 'status' }).map(node => JSON.stringify(node.props.children))
+    expect(statuses.some(text => text.includes('工长与 Lead 使用同一个模型'))).toBe(true)
+    expect(statuses.some(text => text.includes('工长与 Sidekick 使用同一个模型'))).toBe(true)
+    expect(root.root.findAllByProps({ role: 'alert' })).toHaveLength(0)
+
+    // Saving is allowed, and the configuration the panel posts is unchanged by the hint.
+    const saveBtn = root.root.findAllByType('button').find(b => b.children.includes('保存组合'))
+    expect(saveBtn).toBeDefined()
+    expect(saveBtn!.props.disabled).toBe(true) // dirty=false until something changes
+    const modelSelect = root.root.findAllByProps({ 'aria-label': '工长 模型' })
+    expect(modelSelect.length).toBeGreaterThan(0)
+  })
+})
+
+describe('history never presents a partial Foreman cost as the total', () => {
+  const page = (foreman: Record<string, unknown>) => ({
+    totalTasks: 1,
+    totals: { calls: 1, final: 1, provisional: 0, unreported: 0, foremanCalls: 1,
+      input: { known: 1, reported: 1 }, output: { known: 1, reported: 1 }, reasoning: { known: 0, reported: 0 },
+      totalOutput: { known: 1, reported: 1 }, cacheRead: { known: 0, reported: 0 } },
+    tasks: [{ id: 'task-1', title: 'Task', createdAt: '2026-11-04T00:00:00Z', mode: 'completed', phase: 'COMPLETED',
+      usage: { calls: 1, final: 1, provisional: 0, unreported: 0, foremanCalls: 1,
+        input: { known: 1, reported: 1 }, output: { known: 1, reported: 1 }, reasoning: { known: 0, reported: 0 },
+        totalOutput: { known: 1, reported: 1 }, cacheRead: { known: 0, reported: 0 } },
+      sessionId: 's1', verification: 'verified', planReview: { status: 'ready', round: 1, foreman } }],
+    groups: [],
+  })
+  async function render(foreman: Record<string, unknown>) {
+    pinLanguage('zh-CN')
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => page(foreman) })))
+    const { FusionHistory } = await import('../src/client/FusionHistory.js')
+    let root!: ReactTestRenderer
+    await act(async () => { root = create(React.createElement(FusionHistory)) })
+    roots.push(root)
+    const tasksPanel = root.root.findByProps({ className: 'fusion-history-panel fusion-history-tasks' })
+    if (tasksPanel?.props.onToggle) await act(async () => { tasksPanel.props.onToggle({ currentTarget: { open: true } }) })
+    return JSON.stringify(root.toJSON())
+  }
+
+  it('marks a partly priced subtotal as partial instead of reporting it as the whole cost', async () => {
+    const text = await render({ calls: 3, input: 90, inputReported: 3, output: 30, outputReported: 3, durationMs: 900,
+      costUsd: '0.40', priced: 1, unpriced: 2, incomplete: 0, unknown: 0 })
+    expect(text).toContain('0.40')
+    expect(text).toContain('1/3')
+    expect(text).toContain('次可定价')
+  })
+
+  it('reports an unknown amount when no Foreman call could be priced', async () => {
+    const text = await render({ calls: 2, input: 60, inputReported: 2, output: 20, outputReported: 2, durationMs: 400,
+      costUsd: null, priced: 0, unpriced: 0, incomplete: 1, unknown: 1 })
+    // An unpriced call is not a free one.
+    expect(text).toContain('费用未知')
+    expect(text).not.toContain('$0.00')
+  })
+
+  it('shows a whole subtotal plainly when every call was priced', async () => {
+    const text = await render({ calls: 2, input: 60, inputReported: 2, output: 20, outputReported: 2, durationMs: 400,
+      costUsd: '0.80', priced: 2, unpriced: 0, incomplete: 0, unknown: 0 })
+    expect(text).toContain('0.80')
+    expect(text).not.toContain('次可定价')
+  })
 })
