@@ -242,7 +242,6 @@ export type ForemanDisposition = {
     action: 'overridden';
     reason: string;
 };
-export type ForemanPolicy = 'shadow' | 'gate' | 'risk-gated';
 export interface PlanReviewRecord {
     schemaVersion: 1;
     taskId: TaskId;
@@ -256,11 +255,6 @@ export interface PlanReviewRecord {
     assessment?: ForemanAssessment;
     unavailableReason?: string;
     durationMs: number;
-    policy?: ForemanPolicy;
-    triggerDecision?: {
-        triggered: boolean;
-        reasons: readonly string[];
-    };
     dispositions?: readonly ForemanDisposition[];
 }
 export interface ExplorationSource {
@@ -373,12 +367,11 @@ export interface PairProfile {
         readonly route: PhysicalRoute;
         readonly maxOutputTokens: number;
     };
-    /** Optional explicit shadow plan auditor route; absence preserves old frozen profile digests. */
+    /** Optional independent plan auditor; when set, every candidate plan is audited. */
     foreman?: {
         readonly route: PhysicalRoute;
         readonly maxOutputTokens: number;
         readonly timeoutMs: number;
-        readonly policy?: ForemanPolicy;
     };
     dataPolicyId: string;
     evidenceCampaignIds: readonly string[];
@@ -536,10 +529,6 @@ export type FusionEvent = EventEnvelope<'task/created', {
     round: number;
     route: PhysicalRoute;
     requestedAt?: string;
-    triggerDecision?: {
-        triggered: boolean;
-        reasons: readonly string[];
-    };
 }> | EventEnvelope<'plan-review/completed', {
     workOrderId: WorkOrderId;
     candidateDigest: Digest;

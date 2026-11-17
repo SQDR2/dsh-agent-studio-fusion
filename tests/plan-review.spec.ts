@@ -4,7 +4,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
 import type { PlanReviewCandidate, PlanReviewCheckDefinition, PlanReviewRecord, RequirementCoverage, WorkOrder } from '../src/contracts.js'
 import { OperationId, SessionId, SnapshotId, TaskId, WorkOrderId } from '../src/contracts.js'
-import { assertValidPlanReviewCandidate, candidateDigest, collectForemanFindings, FOREMAN_MAX_FINDINGS, FOREMAN_SYSTEM_PROMPT, foremanAssessmentSchema, lintPlanReviewCandidate, parseForemanAssessment, planReviewGateDecision, planReviewRisk, semanticCandidateProjection } from '../src/plan-review.js'
+import { assertValidPlanReviewCandidate, candidateDigest, collectForemanFindings, FOREMAN_MAX_FINDINGS, FOREMAN_SYSTEM_PROMPT, foremanAssessmentSchema, lintPlanReviewCandidate, parseForemanAssessment, planReviewGateDecision, semanticCandidateProjection } from '../src/plan-review.js'
 import { NativePlanReviewService } from '../src/host/plan-review.js'
 import { NativeAuxiliaryRequests } from '../src/host/native-auxiliary.js'
 import type { SessionBinding } from '../src/host/bindings.js'
@@ -517,122 +517,6 @@ describe('lintPlanReviewCandidate', () => {
   })
 })
 
-describe('planReviewRisk deterministic risk evaluation', () => {
-  it('does not trigger for single-requirement, single-path, non-authoritative candidate without uncertainties', () => {
-    const lowRiskCandidate = makeCandidate({
-      order: {
-        constraints: [
-          { id: 'c-0', text: 'Inferred', mandatory: true, provenance: 'inferred', source: { sessionId: SessionId('s'), eventSeq: 1 } },
-          { id: 'r-0', text: 'User req', mandatory: true, provenance: 'user', source: { sessionId: SessionId('s'), eventSeq: 1 } },
-        ],
-        allowedPaths: ['src/feature.ts'],
-        uncertainties: [],
-      },
-      requirementCoverage: [
-        { requirementIndex: 0, implementationNotes: ['note'], acceptanceIds: ['check-x'] },
-      ],
-    })
-    const risk = planReviewRisk(lowRiskCandidate)
-    expect(risk.triggered).toBe(false)
-    expect(risk.reasons).toEqual([])
-  })
-
-  it('triggers on multiple user requirements (> 1)', () => {
-    const candidate = makeCandidate() // has 2 user requirements
-    const risk = planReviewRisk(candidate)
-    expect(risk.triggered).toBe(true)
-    expect(risk.reasons).toContain('user-requirements-count')
-  })
-
-  it('triggers on multiple allowed paths (> 1)', () => {
-    const candidate = makeCandidate({
-      order: {
-        constraints: [
-          { id: 'r-0', text: 'User req', mandatory: true, provenance: 'user', source: { sessionId: SessionId('s'), eventSeq: 1 } },
-        ],
-        allowedPaths: ['src/a.ts', 'src/b.ts'],
-        uncertainties: [],
-      },
-      requirementCoverage: [
-        { requirementIndex: 0, implementationNotes: ['note'], acceptanceIds: ['check-x'] },
-      ],
-    })
-    const risk = planReviewRisk(candidate)
-    expect(risk.triggered).toBe(true)
-    expect(risk.reasons).toEqual(['multiple-allowed-paths'])
-  })
-
-  it('triggers when authority is granted', () => {
-    const candidate = makeCandidate({
-      order: {
-        constraints: [
-          { id: 'r-0', text: 'User req', mandatory: true, provenance: 'user', source: { sessionId: SessionId('s'), eventSeq: 1 } },
-        ],
-        allowedPaths: ['src/a.ts'],
-        authority: ['commit'],
-        uncertainties: [],
-      },
-      requirementCoverage: [
-        { requirementIndex: 0, implementationNotes: ['note'], acceptanceIds: ['check-x'] },
-      ],
-    })
-    const risk = planReviewRisk(candidate)
-    expect(risk.triggered).toBe(true)
-    expect(risk.reasons).toEqual(['authority-granted'])
-  })
-
-  it('triggers when acceptance checks are empty', () => {
-    const candidate = makeCandidate({
-      order: {
-        constraints: [
-          { id: 'r-0', text: 'User req', mandatory: true, provenance: 'user', source: { sessionId: SessionId('s'), eventSeq: 1 } },
-        ],
-        allowedPaths: ['src/a.ts'],
-        acceptance: [],
-        uncertainties: [],
-      },
-      checkDefinitions: [],
-      requirementCoverage: [],
-    })
-    const risk = planReviewRisk(candidate)
-    expect(risk.triggered).toBe(true)
-    expect(risk.reasons).toEqual(['empty-acceptance'])
-  })
-
-  it('triggers when Lead explicitly lists uncertainties', () => {
-    const candidate = makeCandidate({
-      order: {
-        constraints: [
-          { id: 'r-0', text: 'User req', mandatory: true, provenance: 'user', source: { sessionId: SessionId('s'), eventSeq: 1 } },
-        ],
-        allowedPaths: ['src/a.ts'],
-        uncertainties: ['Edge case with huge files'],
-      },
-      requirementCoverage: [
-        { requirementIndex: 0, implementationNotes: ['note'], acceptanceIds: ['check-x'] },
-      ],
-    })
-    const risk = planReviewRisk(candidate)
-    expect(risk.triggered).toBe(true)
-    expect(risk.reasons).toEqual(['unresolved-uncertainties'])
-  })
-
-  it('collects all triggered reasons when multiple risk conditions are present', () => {
-    const candidate = makeCandidate({
-      order: {
-        authority: ['push'],
-        uncertainties: ['Async race condition'],
-      },
-    })
-    const risk = planReviewRisk(candidate)
-    expect(risk.triggered).toBe(true)
-    expect(risk.reasons).toContain('user-requirements-count')
-    expect(risk.reasons).toContain('multiple-allowed-paths')
-    expect(risk.reasons).toContain('authority-granted')
-    expect(risk.reasons).toContain('unresolved-uncertainties')
-  })
-})
-
 describe('parseForemanAssessment strict structural schema validation', () => {
   const candidate = makeCandidate()
   const digest = candidateDigest(candidate)
@@ -667,7 +551,7 @@ describe('parseForemanAssessment strict structural schema validation', () => {
 
   it('preserves the verbatim required FOREMAN_SYSTEM_PROMPT constant', () => {
     expect(FOREMAN_SYSTEM_PROMPT).toBe(
-      'You are Foreman, an independent plan auditor. Review only the supplied candidate work order. Find semantic gaps that deterministic Host validation cannot decide: uncovered hard requirements, weak acceptance oracles, concrete false-green scenarios, unsupported decisions, counterexamples, unresolved critical assumptions, scope contradictions, and material ambiguities that would change observable behavior. Do not propose an alternative plan. Do not discuss formatting, permissions, path syntax, or other deterministic Host checks. Return exactly one JSON object matching ForemanAssessment schema version 1. Use verdict "ready" only when every finding array is empty; otherwise use "concerns". Report at most 8 findings across all finding arrays, most material first; when the plan has more problems than that, report the ones that would change observable behavior and omit the rest. Copy candidateDigest exactly. Do not use Markdown or include any text outside the JSON object.',
+      'You are Foreman, an independent plan auditor. Review only the supplied candidate work order. Find semantic gaps that deterministic Host validation cannot decide: uncovered hard requirements, weak acceptance oracles, concrete false-green scenarios, unsupported decisions, counterexamples, unresolved critical assumptions, scope contradictions, and material ambiguities that would change observable behavior. A candidate whose mode is explore or text has no acceptance checks by construction: audit whether its goal, brief and constraints can still answer the question the user asked, and leave the acceptance-audit arrays empty instead of inventing checks it was never meant to have. Do not propose an alternative plan. Do not discuss formatting, permissions, path syntax, or other deterministic Host checks. Return exactly one JSON object matching ForemanAssessment schema version 1. Use verdict "ready" only when every finding array is empty; otherwise use "concerns". Report at most 8 findings across all finding arrays, most material first; when the plan has more problems than that, report the ones that would change observable behavior and omit the rest. Copy candidateDigest exactly. Do not use Markdown or include any text outside the JSON object.',
     )
   })
 

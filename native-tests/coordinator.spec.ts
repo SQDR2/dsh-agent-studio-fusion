@@ -50,7 +50,7 @@ import { FUSION_TASK_CONTEXT } from '../src/host/native-task-context.js'
 import { isFusionSourceKind } from '../src/message-source.js'
 import { KEEPALIVE_ATTEMPTS, KEEPALIVE_INTERVAL_MS, KEEPALIVE_PROMPT } from '../src/host/native-keepalive.js'
 import type { KeepaliveClock, KeepaliveRecord } from '../src/host/native-keepalive.js'
-import { WorkOrderId, type ForemanPolicy, type PhysicalRoute, type PlanReviewCandidate, type PlanReviewRecord, type RequirementCoverage } from '../src/contracts.js'
+import { WorkOrderId, type PhysicalRoute, type PlanReviewCandidate, type PlanReviewRecord, type RequirementCoverage } from '../src/contracts.js'
 import { candidateDigest, semanticCandidateProjection, type PlanReviewModule, type PlanReviewOutcome } from '../src/plan-review.js'
 import { snapshotWorkspace } from '../src/host/workspace.js'
 import type { SessionBinding } from '../src/host/bindings.js'
@@ -114,7 +114,7 @@ async function setup(script: Script, workerScript?: Script, options: {
    * adapter still script-drives it: the fixture asserts the ceiling, not agy.
    */
   bridgeTransport?: boolean
-  foreman?: { route?: PhysicalRoute; maxOutputTokens?: number; timeoutMs?: number; policy?: ForemanPolicy } | boolean
+  foreman?: { route?: PhysicalRoute; maxOutputTokens?: number; timeoutMs?: number } | boolean
   planReview?: (agent: Agent, binding: SessionBinding) => PlanReviewModule
   /**
    * After a bridge dispatch settles, also dispatch the transport's own replay of that step,
@@ -246,10 +246,9 @@ async function setup(script: Script, workerScript?: Script, options: {
   const selectionRef = { current: { provider: 'test-native', model: 'ordinary' }, assembled: undefined }
   installModelSelection(parent.ctx, selectionRef)
   const prompts = loadPromptBundle()
-  const foremanConfig = options.foreman === true
-    ? { route: { provider: 'test-native', model: 'foreman' }, maxOutputTokens: 2048, timeoutMs: 10000, policy: 'shadow' as const }
-    : options.foreman
-      ? { route: { provider: 'test-native', model: 'foreman' }, maxOutputTokens: 2048, timeoutMs: 10000, policy: options.foreman.policy ?? 'shadow', ...options.foreman }
+  const foremanConfig = options.foreman
+    ? { route: { provider: 'test-native', model: 'foreman' }, maxOutputTokens: 2048, timeoutMs: 10000,
+      ...(options.foreman === true ? {} : options.foreman) }
       : undefined
   const profile = completeProfile({ id: 'fusion-auto', version: 'faithful-v1', enabled: true,
     ...(options.keepalive ? { cacheKeepalive: options.keepalive } : {}),
@@ -5231,7 +5230,7 @@ describe('plan review gate binds a disposition to the reviewed candidate', () =>
       [edit(), report()],
       {
         ...options,
-        foreman: { policy: 'gate' },
+        foreman: true,
         planReview: () => ({
           review: async candidate => {
             calls++
@@ -5282,7 +5281,7 @@ describe('plan review gate binds a disposition to the reviewed candidate', () =>
       [edit(), report()],
       {
         ...options,
-        foreman: { policy: 'gate' },
+        foreman: true,
         planReview: () => ({
           review: async candidate => {
             calls++
@@ -5402,7 +5401,7 @@ describe('plan review candidate construction and deterministic lint in coordinat
   })
 })
 
-describe('shadow plan review in coordinator', () => {
+describe('plan review in coordinator', () => {
   const options = { modelLike: true, enforcedWorkflow: 'enforced-v3', files: true, sandbox: true } as const
 
   it('does not invoke plan review when foreman is not configured', async () => {
@@ -5483,10 +5482,10 @@ describe('shadow plan review in coordinator', () => {
     expect(state.phase).toBe('COMPLETED')
   })
 
-  it('records concerns assessment in shadow mode without altering or blocking worker dispatch', async () => {
+  it('blocks dispatch on concerns: a configured Foreman has no shadow bypass', async () => {
     let reviewCalled = false
     const { parent, coordinator, store, taskId } = await setup(
-      [delegateV3(), acceptV3(), textResponse('Verified.')],
+      [delegateV3(), textResponse('Acknowledging concerns.')],
       [edit(), report()],
       {
         ...options,
@@ -5502,12 +5501,12 @@ describe('shadow plan review in coordinator', () => {
                 verdict: 'concerns',
                 acceptanceAudit: {
                   uncoveredRequirements: [{
-                    id: 'concern-gap',
+                    id: 'shadow-gap',
                     category: 'requirement-coverage',
                     severity: 'blocking-concern',
                     requirementIndexes: [0],
                     decisionIndexes: [0],
-                    message: 'Shadow concern regarding edge case',
+                    message: 'Concern regarding edge case',
                     suggestedCorrection: 'Add edge case test',
                   }],
                   weakOracles: [],
@@ -5529,12 +5528,12 @@ describe('shadow plan review in coordinator', () => {
     expect(completed).toBeDefined()
     expect((completed as any).payload.assessment.verdict).toBe('concerns')
 
-    // Shadow mode: Worker was dispatched, ran, and completed normally!
-    const state = coordinator.state(taskId)
-    expect(state.latestPlanReview?.outcome).toBe('assessment')
-    expect(state.latestPlanReview?.assessment?.verdict).toBe('concerns')
-    expect(state.phase).toBe('COMPLETED')
-    expect(state.verification).toBe('verified')
+    // Concerns stop the dispatch. The old shadow mode dispatched anyway, which is exactly
+    // the bypass a configured reviewer must not have.
+    expect(store.events(taskId).some(e => e.type === 'work-order/prepared')).toBe(false)
+    const messages = toolResults(parent).flatMap(r => r.message.content).filter(c => c.type === 'text').map(c => c.text).join('\n')
+    expect(messages).toContain('Concern regarding edge case')
+    expect(coordinator.state(taskId).latestPlanReview?.assessment?.verdict).toBe('concerns')
   })
 
   it('fails open when review returns unavailable and dispatches worker normally', async () => {
@@ -5562,14 +5561,14 @@ describe('shadow plan review in coordinator', () => {
     expect(state.phase).toBe('COMPLETED')
 
     // Failing open is not the same as passing: the run continued without an audit, so the
-    // transcript says so. Without this the only trace was a status line, and a `gate` combo
-    // looked exactly like one whose review had approved the plan.
+    // transcript says so. Without this the only trace was a status line, and a configured
+    // Foreman looked exactly like one whose review had approved the plan.
     const notices = parent.session.snapshotEvents().filter(event => event.type === 'user/message'
       && event.data.source?.form === 'notice' && JSON.stringify(event.data.content).includes('model timeout'))
     expect(notices).toHaveLength(1)
     // The row's own heading, then the reason and what it means for this policy.
     expect((notices[0]!.data.source as { summary?: string }).summary).toContain('本次计划审查未生效')
-    expect(JSON.stringify(notices[0]!.data.content)).toContain('任务按 shadow 策略继续执行')
+    expect(JSON.stringify(notices[0]!.data.content)).toContain('门禁因此没有生效')
   })
 
   it('fails open when review throws an exception and dispatches worker normally', async () => {
@@ -5687,7 +5686,7 @@ describe('shadow plan review in coordinator', () => {
       [edit(), report()],
       {
         ...options,
-        foreman: { policy: 'gate' },
+        foreman: true,
         planReview: () => ({
           review: async candidate => {
             reviewCalled = true
@@ -5753,7 +5752,7 @@ describe('shadow plan review in coordinator', () => {
       [edit(), report()],
       {
         ...options,
-        foreman: { policy: 'gate' },
+        foreman: true,
         planReview: () => ({
           review: async candidate => {
             callCount++
@@ -5808,7 +5807,7 @@ describe('shadow plan review in coordinator', () => {
       [edit(), report()],
       {
         ...options,
-        foreman: { policy: 'gate' },
+        foreman: true,
         planReview: () => ({
           review: async candidate => {
             callCount++
@@ -5923,7 +5922,7 @@ describe('shadow plan review in coordinator', () => {
       [edit(), report()],
       {
         ...options,
-        foreman: { policy: 'gate' },
+        foreman: true,
         planReview: () => ({
           review: async candidate => {
             callCount++
@@ -6073,7 +6072,7 @@ describe('shadow plan review in coordinator', () => {
       [edit(), report()],
       {
         ...options,
-        foreman: { policy: 'gate' },
+        foreman: true,
         planReview: () => ({
           review: async candidate => ({
             kind: 'concerns',
@@ -6092,72 +6091,43 @@ describe('shadow plan review in coordinator', () => {
     expect(coordinator.state(taskId)).toMatchObject({ phase: 'COMPLETED', verification: 'verified' })
   })
 
-  it('skips foreman call for low-risk plan and calls foreman for high-risk plan under risk-gated policy', async () => {
+  it('reviews an exploration candidate too, because a configured Foreman reviews every plan', async () => {
+    // The risk gate used to make exploration orders unreachable: they carry no user
+    // requirements, no allowed paths, no authority and no uncertainties, so no trigger
+    // could ever fire and a configured reviewer stayed silent for the whole survey
+    // (session-0a8d7fbf).
     let callCount = 0
-    const exploreDelegate = toolCallResponse('delegate-low-risk', 'fusion_explore', {
+    const reviewed: (string | undefined)[] = []
+    const exploreDelegate = toolCallResponse('explore-1', 'fusion_explore', {
       goal: 'Explore addition code',
       brief: 'Read calc.py and test_calc.py',
       constraints: ['Do not change files'],
       block: true,
     })
 
-    const { parent: parent1 } = await setup(
+    const { parent, coordinator, store, taskId } = await setup(
       [exploreDelegate, textResponse('Done.')],
       [findings()],
       {
         ...options,
-        foreman: { policy: 'risk-gated' },
-        planReview: () => ({
-          review: async () => {
-            callCount++
-            return { kind: 'ready', assessment: testReadyAssessment('' as any) }
-          },
-        }),
-      },
-    )
-    parent1.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Explore addition.' }] }))
-    await parent1.whenIdle()
-    expect(callCount).toBe(0)
-
-    const highRiskDelegate = toolCallResponse('delegate-high-risk', 'fusion_delegate', {
-      block: true,
-      requirements: ['addition'],
-      goal: 'Correct addition',
-      brief: 'Fix calc.py add and preserve the test. Submit a report after implementing.',
-      constraints: ['Do not change test_calc.py'],
-      allowedPaths: ['calc.py', 'extra.py'],
-      uncertainties: ['Edge case with overflow'],
-      checks: [{
-        id: 'addition',
-        description: 'Existing addition test passes',
-        command: py('python3 -B -m unittest -v test_calc'),
-        kind: 'test',
-        parser: 'unittest',
-        definitionPaths: ['test_calc.py'],
-      }],
-      requirementCoverage: [
-        { requirementIndex: 0, implementationNotes: ['Satisfy requirement 0'], acceptanceIds: ['addition'] },
-      ],
-    })
-
-    const { parent: parent2, coordinator: coord2, taskId: task2 } = await setup(
-      [highRiskDelegate, acceptV3(), textResponse('Done.')],
-      [edit(), report()],
-      {
-        ...options,
-        foreman: { policy: 'risk-gated' },
+        foreman: true,
         planReview: () => ({
           review: async candidate => {
             callCount++
+            reviewed.push(candidate.order.mode)
             return { kind: 'ready', assessment: testReadyAssessment(candidate.order.candidateDigest!) }
           },
         }),
       },
     )
-    parent2.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Correct addition.' }] }))
-    await parent2.whenIdle()
+    parent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Explore addition.' }] }))
+    await parent.whenIdle()
+
     expect(callCount).toBe(1)
-    expect(coord2.state(task2)).toMatchObject({ phase: 'COMPLETED', verification: 'verified' })
+    expect(reviewed).toEqual(['explore'])
+    const requested = store.events(taskId).find(e => e.type === 'plan-review/requested')
+    expect(requested).toBeDefined()
+    expect(coordinator.state(taskId).planReviews).toHaveLength(1)
   })
 
   it('fails open and dispatches worker when foreman returns unavailable or times out', async () => {
@@ -6167,7 +6137,7 @@ describe('shadow plan review in coordinator', () => {
       [edit(), report()],
       {
         ...options,
-        foreman: { policy: 'gate' },
+        foreman: true,
         planReview: () => ({
           review: async () => {
             reviewCount++
@@ -6192,7 +6162,7 @@ describe('shadow plan review in coordinator', () => {
       [edit(), report()],
       {
         ...options,
-        foreman: { policy: 'gate' },
+        foreman: true,
         planReview: () => ({
           review: async candidate => {
             callCount++
@@ -6208,7 +6178,6 @@ describe('shadow plan review in coordinator', () => {
       round: 1,
       route: { provider: 'test-native', model: 'foreman' },
       requestedAt: new Date().toISOString(),
-      triggerDecision: { triggered: true, reasons: ['policy-gate'] },
     })
 
     await coordinator.close()
@@ -6286,7 +6255,7 @@ describe('shadow plan review in coordinator', () => {
         [edit(), report()],
         {
           ...options,
-          foreman: { policy: 'gate' },
+          foreman: true,
           planReview: () => ({
             review: async () => {
               callCount++
@@ -6306,7 +6275,6 @@ describe('shadow plan review in coordinator', () => {
         round: 1,
         route: { provider: 'test-native', model: 'foreman' },
         requestedAt: reqAt1,
-        triggerDecision: { triggered: true, reasons: ['policy-gate'] },
       })
       coordinator.append(taskId, 'plan-review/completed', {
         workOrderId: wId,
@@ -6320,7 +6288,6 @@ describe('shadow plan review in coordinator', () => {
           workOrderId: wId,
           candidateDigest: cDigest,
           round: 1,
-          policy: 'gate',
           route: { provider: 'test-native', model: 'foreman' },
           requestedAt: reqAt1,
           completedAt: new Date().toISOString(),
@@ -6357,7 +6324,7 @@ describe('shadow plan review in coordinator', () => {
         [edit(), report()],
         {
           ...options,
-          foreman: { policy: 'gate' },
+          foreman: true,
           planReview: () => ({
             review: async () => {
               callCount++
@@ -6381,7 +6348,6 @@ describe('shadow plan review in coordinator', () => {
         round: 1,
         route: { provider: 'test-native', model: 'foreman' },
         requestedAt: reqAt1,
-        triggerDecision: { triggered: true, reasons: ['policy-gate'] },
       })
       coordinator.append(taskId, 'plan-review/completed', {
         workOrderId: wId,
@@ -6395,7 +6361,6 @@ describe('shadow plan review in coordinator', () => {
           workOrderId: wId,
           candidateDigest: originalDigest,
           round: 1,
-          policy: 'gate',
           route: { provider: 'test-native', model: 'foreman' },
           requestedAt: reqAt1,
           completedAt: new Date().toISOString(),
@@ -6417,7 +6382,6 @@ describe('shadow plan review in coordinator', () => {
         round: 2,
         route: { provider: 'test-native', model: 'foreman' },
         requestedAt: reqAt2,
-        triggerDecision: { triggered: true, reasons: ['policy-gate'] },
       })
       coordinator.append(taskId, 'plan-review/completed', {
         workOrderId: wId,
@@ -6431,7 +6395,6 @@ describe('shadow plan review in coordinator', () => {
           workOrderId: wId,
           candidateDigest: cDigest,
           round: 2,
-          policy: 'gate',
           route: { provider: 'test-native', model: 'foreman' },
           requestedAt: reqAt2,
           completedAt: new Date().toISOString(),
@@ -6462,7 +6425,7 @@ describe('shadow plan review in coordinator', () => {
         [edit(), report()],
         {
           ...options,
-          foreman: { policy: 'gate' },
+          foreman: true,
           planReview: () => ({
             review: async () => {
               callCount++
@@ -6486,7 +6449,6 @@ describe('shadow plan review in coordinator', () => {
         round: 1,
         route: { provider: 'test-native', model: 'foreman' },
         requestedAt: reqAt1,
-        triggerDecision: { triggered: true, reasons: ['policy-gate'] },
       })
       coordinator.append(taskId, 'plan-review/completed', {
         workOrderId: wId,
@@ -6500,7 +6462,6 @@ describe('shadow plan review in coordinator', () => {
           workOrderId: wId,
           candidateDigest: originalDigest,
           round: 1,
-          policy: 'gate',
           route: { provider: 'test-native', model: 'foreman' },
           requestedAt: reqAt1,
           completedAt: new Date().toISOString(),
@@ -6522,7 +6483,6 @@ describe('shadow plan review in coordinator', () => {
         round: 2,
         route: { provider: 'test-native', model: 'foreman' },
         requestedAt: reqAt2,
-        triggerDecision: { triggered: true, reasons: ['policy-gate'] },
       })
       coordinator.append(taskId, 'plan-review/completed', {
         workOrderId: wId,
@@ -6536,7 +6496,6 @@ describe('shadow plan review in coordinator', () => {
           workOrderId: wId,
           candidateDigest: cDigest,
           round: 2,
-          policy: 'gate',
           route: { provider: 'test-native', model: 'foreman' },
           requestedAt: reqAt2,
           completedAt: new Date().toISOString(),

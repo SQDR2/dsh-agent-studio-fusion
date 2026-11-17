@@ -408,10 +408,9 @@ export function FusionSettings() {
                           // A review that finds many problems must still fit its budget, and a
                           // slow reviewer must be allowed to finish: 4096 output tokens and 30
                           // seconds turned real reviews into `max-tokens` and `TimeoutError`
-                          // aborts, which every policy then reads as approval.
+                          // aborts, which the gate then reads as approval.
                           maxOutputTokens: 8192,
                           timeoutMs: 120000,
-                          policy: 'shadow',
                         },
                       },
                     }
@@ -425,19 +424,17 @@ export function FusionSettings() {
                     the user guessing whether a Foreman was configured at all. */}
                 <small>{current.pair.foreman
                   ? current.pair.foreman.route.provider && current.pair.foreman.route.model
-                    ? tr(lang, `已启用 · ${routeName(current.pair.foreman.route)} · ${current.pair.foreman.policy === 'gate' ? '全量软门禁'
-                      : current.pair.foreman.policy === 'risk-gated' ? '风险触发软门禁' : 'Shadow 仅审查'}`,
-                      `On · ${routeName(current.pair.foreman.route)} · ${current.pair.foreman.policy === 'gate' ? 'full gate'
-                        : current.pair.foreman.policy === 'risk-gated' ? 'risk-gated' : 'shadow only'}`)
+                    ? tr(lang, `已启用 · ${routeName(current.pair.foreman.route)} · 每一份计划都先审查`,
+                      `On · ${routeName(current.pair.foreman.route)} · every plan is reviewed first`)
                     : tr(lang, '已启用，但还没有选择工长模型：保存前必须选一个。', 'On, but no Foreman model is chosen yet; choose one before saving.')
-                  : tr(lang, '可选。开启后由一个独立模型审计 Lead 的候选计划，发现语义缺陷；关闭时不影响任何流程。',
-                    'Optional. When on, a separate model audits the Lead\'s candidate plan for semantic gaps; when off nothing changes.')}</small>
+                  : tr(lang, '可选。开启后每一份候选计划都先由独立模型审查，发现语义缺陷；关闭时不影响任何流程。',
+                    'Optional. When on, an independent model reviews every candidate plan before it runs; when off nothing changes.')}</small>
               </span>
             </label>
             {current.pair.foreman && (
               <div className="fusion-foreman-panel">
-                <p>{tr(lang, '工长模型独立审计候选工作单，发现潜在语义缺陷。开启后模型必填。',
-                  'The Foreman independently audits candidate work orders for semantic gaps. The model is required while this is on.')}</p>
+                <p>{tr(lang, '工长模型独立审计候选工作单，发现潜在语义缺陷。开启后模型必填，且每一份候选计划都必须先通过审查：没有“仅审查不阻断”或“只审高风险”这类开关。',
+                  'The Foreman independently audits candidate work orders for semantic gaps. The model is required while this is on, and every candidate plan must pass its review: there is no "audit only" or "high-risk only" setting.')}</p>
                 {/* The plan warns against a hard price check and for a same-model arm: the same
                     model in a separate context is a valid experiment, so this is a hint, and
                     saving is never refused for it. */}
@@ -469,25 +466,6 @@ export function FusionSettings() {
                     })
                   }}
                 />
-                <label>
-                  {tr(lang, '审查策略', 'Review policy')}
-                  <select
-                    aria-label={tr(lang, '工长审查策略', 'Foreman review policy')}
-                    value={current.pair.foreman.policy ?? 'shadow'}
-                    onChange={event => {
-                      const policy = event.target.value as 'shadow' | 'gate' | 'risk-gated'
-                      update(combo =>
-                        combo.pair.foreman
-                          ? { ...combo, pair: { ...combo.pair, foreman: { ...combo.pair.foreman, policy } } }
-                          : combo,
-                      )
-                    }}
-                  >
-                    <option value="shadow">{tr(lang, 'Shadow · 仅审查不阻断', 'Shadow · audit without blocking')}</option>
-                    <option value="gate">{tr(lang, '全量软门禁 · 发现分歧需处理', 'Gate · require disposition on concerns')}</option>
-                    <option value="risk-gated">{tr(lang, '风险触发软门禁 · 仅高风险工作单门禁', 'Risk-gated · gate only high-risk plans')}</option>
-                  </select>
-                </label>
                 <label>
                   {tr(lang, '输出上限', 'Output limit')}
                   <input

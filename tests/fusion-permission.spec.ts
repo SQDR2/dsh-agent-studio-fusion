@@ -301,7 +301,7 @@ describe('live status shows the Foreman review state', () => {
     expect(JSON.stringify(reviewing.toJSON())).toContain('审查中')
     await act(async () => { reviewing.unmount() })
 
-    const concerns = await mountStatus(withReview({ status: 'concerns', round: 1, policy: 'gate',
+    const concerns = await mountStatus(withReview({ status: 'concerns', round: 1,
       findings: [{ id: 'f-1', category: 'acceptance-gap', severity: 'blocking-concern', message: 'no oracle' }] }))
     const concernsText = JSON.stringify(concerns.toJSON())
     expect(concernsText).toContain('有分歧')

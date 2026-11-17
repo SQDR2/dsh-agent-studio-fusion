@@ -95,47 +95,6 @@ export function candidateDigest(candidate: PlanReviewCandidate): Digest {
   return digestOf(semanticCandidateProjection(candidate))
 }
 
-export type PlanReviewRiskReason =
-  | 'user-requirements-count'
-  | 'multiple-allowed-paths'
-  | 'authority-granted'
-  | 'empty-acceptance'
-  | 'unresolved-uncertainties'
-
-export interface PlanReviewRiskEvaluation {
-  triggered: boolean
-  reasons: readonly PlanReviewRiskReason[]
-}
-
-/**
- * Pure deterministic risk assessment on a candidate work order.
- */
-export function planReviewRisk(candidate: PlanReviewCandidate): PlanReviewRiskEvaluation {
-  const reasons: PlanReviewRiskReason[] = []
-  const order = candidate.order
-  const userRequirements = (order.constraints ?? []).filter(c => c && c.provenance === 'user')
-  if (userRequirements.length > 1) {
-    reasons.push('user-requirements-count')
-  }
-  if ((order.allowedPaths ?? []).length > 1) {
-    reasons.push('multiple-allowed-paths')
-  }
-  if (order.authority && order.authority.length > 0) {
-    reasons.push('authority-granted')
-  }
-  const checkCount = (order.acceptance ?? []).length
-  if (order.mode === 'implement' && checkCount === 0) {
-    reasons.push('empty-acceptance')
-  }
-  if ((order.uncertainties ?? []).length > 0) {
-    reasons.push('unresolved-uncertainties')
-  }
-  return {
-    triggered: reasons.length > 0,
-    reasons,
-  }
-}
-
 /**
  * Collect all findings across all 7 sections of ForemanAssessment.
  */
@@ -498,7 +457,7 @@ export type PlanReviewOutcome =
 export const FOREMAN_MAX_FINDINGS = 8
 
 export const FOREMAN_SYSTEM_PROMPT =
-  'You are Foreman, an independent plan auditor. Review only the supplied candidate work order. Find semantic gaps that deterministic Host validation cannot decide: uncovered hard requirements, weak acceptance oracles, concrete false-green scenarios, unsupported decisions, counterexamples, unresolved critical assumptions, scope contradictions, and material ambiguities that would change observable behavior. Do not propose an alternative plan. Do not discuss formatting, permissions, path syntax, or other deterministic Host checks. Return exactly one JSON object matching ForemanAssessment schema version 1. Use verdict "ready" only when every finding array is empty; otherwise use "concerns". Report at most 8 findings across all finding arrays, most material first; when the plan has more problems than that, report the ones that would change observable behavior and omit the rest. Copy candidateDigest exactly. Do not use Markdown or include any text outside the JSON object.'
+  'You are Foreman, an independent plan auditor. Review only the supplied candidate work order. Find semantic gaps that deterministic Host validation cannot decide: uncovered hard requirements, weak acceptance oracles, concrete false-green scenarios, unsupported decisions, counterexamples, unresolved critical assumptions, scope contradictions, and material ambiguities that would change observable behavior. A candidate whose mode is explore or text has no acceptance checks by construction: audit whether its goal, brief and constraints can still answer the question the user asked, and leave the acceptance-audit arrays empty instead of inventing checks it was never meant to have. Do not propose an alternative plan. Do not discuss formatting, permissions, path syntax, or other deterministic Host checks. Return exactly one JSON object matching ForemanAssessment schema version 1. Use verdict "ready" only when every finding array is empty; otherwise use "concerns". Report at most 8 findings across all finding arrays, most material first; when the plan has more problems than that, report the ones that would change observable behavior and omit the rest. Copy candidateDigest exactly. Do not use Markdown or include any text outside the JSON object.'
 
 const ROOT_KEYS = new Set(['schemaVersion', 'candidateDigest', 'verdict', 'acceptanceAudit', 'decisionChallenges', 'materialAmbiguities'])
 const ACCEPTANCE_AUDIT_KEYS = new Set(['uncoveredRequirements', 'weakOracles', 'falseGreenScenarios'])

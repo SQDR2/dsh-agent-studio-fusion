@@ -9,7 +9,6 @@ import { collectForemanFindings } from '../plan-review.js'
 export interface TaskPlanReviewSummary {
   status: 'ready' | 'concerns' | 'unavailable'
   round: number
-  policy?: 'shadow' | 'gate' | 'risk-gated'
   /** Present for an unavailable review so the history row can say why it did not happen. */
   unavailableReason?: string
   /**
@@ -75,7 +74,6 @@ export function taskSummary(state: TaskState, createdAt: string, updatedAt: stri
     planReview = {
       status,
       round: r.round,
-      ...(r.policy ? { policy: r.policy } : {}),
       ...(r.unavailableReason ? { unavailableReason: r.unavailableReason } : {}),
       ...(findings.length ? { findings } : {}),
       ...(dispositionsCount ? { dispositionsCount } : {}),

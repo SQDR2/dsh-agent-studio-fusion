@@ -25,7 +25,7 @@ import { resolveBenchmarkOutputLimits, type BenchmarkOutputLimits } from './outp
 export type ForemanManifest =
   | { condition: 'off' }
   | {
-      condition: 'shadow' | 'gate' | 'risk-gated'
+      condition: 'on'
       route: PhysicalRoute
       maxOutputTokens: number
       timeoutMs: number
@@ -37,14 +37,14 @@ export type ForemanManifest =
  * Only the `fusion` variant mounts a coordinator, and therefore only it can ever call the
  * reviewer: a solo Lead, solo Worker, self-review or naive variant has no plan-review seam at
  * all. Reporting the profile's reviewer settings there would claim an experiment arm that was
- * never run, so those variants record `off` regardless of what the profile holds. The other
- * three conditions (shadow, gate, risk-gated) remain independently selectable for `fusion`.
+ * never run, so those variants record `off` regardless of what the profile holds. For `fusion`
+ * the only two arms are a configured Foreman, which reviews every candidate plan, and none.
  */
 export function projectForemanManifest(profile: PairProfile,
   variant: 'lead_only' | 'worker_only' | 'worker_selfreview' | 'naive' | 'fusion' = 'fusion'): ForemanManifest {
   if (variant !== 'fusion' || !profile.foreman) return { condition: 'off' as const }
   return {
-    condition: profile.foreman.policy ?? 'shadow',
+    condition: 'on',
     route: profile.foreman.route,
     maxOutputTokens: profile.foreman.maxOutputTokens,
     timeoutMs: profile.foreman.timeoutMs,

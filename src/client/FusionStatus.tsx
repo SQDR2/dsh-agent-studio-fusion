@@ -112,7 +112,7 @@ export function PlanReviewBlock({ lang, review }: { lang: Lang; review: PlanRevi
     <h3>{tr(lang, '工长审查', 'Foreman review')}</h3>
     <dl>
       <dt>{tr(lang, '状态', 'Status')}</dt>
-      <dd>{label}{review.round ? <small>{tr(lang, `第 ${review.round} 轮`, `round ${review.round}`)}{review.policy ? ` · ${review.policy}` : ''}</small> : null}</dd>
+      <dd>{label}{review.round ? <small>{tr(lang, `第 ${review.round} 轮`, `round ${review.round}`)}</small> : null}</dd>
       {review.unavailableReason && <><dt>{tr(lang, '原因', 'Reason')}</dt><dd>{review.unavailableReason}</dd></>}
       {review.accepted !== undefined || review.overridden !== undefined
         ? <><dt>{tr(lang, '处理结果', 'Dispositions')}</dt>

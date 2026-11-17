@@ -22,6 +22,68 @@ read them before assuming a platform is covered.
 
 ## Unreleased
 
+### A configured Foreman now reviews every plan, with no policy to skip it
+
+- **A configured reviewer could stay silent for an entire task.** The Foreman had three
+  policies — `shadow` (audit, never block), `gate` (block on concerns) and `risk-gated`
+  (block only when a deterministic trigger fired). Under `risk-gated`, an exploration order
+  can never trigger: `#requirements` returns nothing for `explore`, `fusion_explore` passes
+  no `allowedPaths`, grants no `authority`, offers no `uncertainties` parameter, and the
+  empty-acceptance rule only applies to `implement`. Every reason was therefore impossible,
+  and the only work order that existed during the survey was never audited. `session-0a8d7fbf`
+  showed the consequence: the combo had a Foreman configured, the Lead dispatched a
+  read-only `fusion_explore`, and no review happened at all — indistinguishable from a
+  broken reviewer, with nothing recorded to say it had been skipped. `session-3bbd03e1` had
+  `gate` on the same install, which is why the feature looked intermittent.
+- **`policy` is gone. A configured Foreman reviews every candidate plan.** Explore, text and
+  implement orders all go through the same gate: round 1 always reviews, concerns block the
+  dispatch until every finding is accepted or overridden, and a revised candidate owes its
+  own round-2 review. Skipping a candidate costs one model call, which is the price of the
+  reviewer; a user who does not want it turns the Foreman off.
+- **The setting is removed everywhere it was selectable or reported**: the profile type
+  (`PairProfile.foreman.policy`), the settings page dropdown and its "Shadow / full gate /
+  risk-gated" summary, the status and history projections, `PlanReviewRecord.policy`,
+  `triggerDecision` on `plan-review/requested`, and `planReviewRisk` itself. The benchmark
+  manifest records `on`/`off` because those are the only two arms left.
+- **An existing combo keeps its Foreman.** A stored profile still carrying `policy` is read
+  and silently upgraded rather than rejected: `foremanChoice` tolerates the retired key and
+  drops it, so the next save writes the unconditional shape instead of switching plan review
+  off as a side effect of an unknown field.
+- **The prompt covers candidates that have no acceptance checks.** A reviewer asked to audit
+  an explore order used to see empty `acceptance` and could only invent checks to complain
+  about; it is now told to audit whether the goal, brief and constraints can answer the
+  user's question and to leave the acceptance-audit arrays empty.
+- **The fail-open notice no longer talks about policies.** A review that cannot finish is
+  still recorded as `unavailable` and still lets the task continue, and the transcript
+  notice now says only that the gate did not apply.
+
+- **A frozen profile keeps the reviewer policy it was saved with, because its digest cannot
+  move.** `readBinding` re-parses the stored profile with the current code and refuses the
+  document when the result hashes differently, and every task record, checkpoint, keepalive
+  row and model-control document in the store is bound to the digest that was recorded when
+  the combo was frozen. Dropping `foreman.policy` moved that digest for every profile frozen
+  while the reviewer still had one, so `BindingRepository.selected()` — which reads *every*
+  binding at startup — threw `Frozen Fusion profile or prompt digest changed` and the plugin
+  refused to activate ("1 entry did not activate"), leaving those sessions with no way to be
+  opened and migrated. `completeProfile` now re-attaches a `foreman.policy` that the stored
+  document carries, so a frozen profile hashes to exactly what it was frozen with. Nothing
+  reads the key: `PairProfile` does not declare it, the reviewer reviews every plan
+  regardless, and a combo created now has no policy at all.
+
+Validated: unit suite 822 passed (1 new case in `tests/foreman-choice.spec.ts`: a stored
+Foreman carrying `policy: 'risk-gated'` still yields a configured reviewer and drops the key;
+3 in `tests/host-bindings.spec.ts`: a legacy binding with `policy` reads and keeps both its
+digest and the key, a rollover rewrites it without moving either, a freshly frozen combo has
+no key, and a tampered lead route is still rejected; 7 `planReviewRisk` cases and the
+shadow-mode assertions replaced); host coordinator suite 326 passed (2 new cases: an
+exploration candidate is reviewed like any other plan, and concerns from a configured Foreman
+block the dispatch with no shadow bypass). Checked against the live store: all 52 stored
+bindings read, and each still re-derives to itself and to its recorded digest. Not claimed:
+the explore review was not replayed against a live provider, and the plugin was not
+re-activated on a second Host — the case boundary is the Host gate, the recorded
+`plan-review/requested` event, and `readBinding`/`selected()`, which is the call the boot
+failure came from.
+
 ### A publication the user asked for after delegation can now be granted
 
 - **A work order frozen without `authority` could never publish, and nothing could fix it.**

@@ -2,13 +2,11 @@ import { describe, expect, it } from 'vitest'
 import { FOREMAN_MAX_OUTPUT_TOKENS, FOREMAN_TIMEOUT_MS, foremanChoice } from '../src/profile/foreman.js'
 
 const route = { provider: 'physical', model: 'audit' }
-const valid = { route, maxOutputTokens: 4096, timeoutMs: 30_000, policy: 'shadow' as const }
+const valid = { route, maxOutputTokens: 4096, timeoutMs: 30_000 }
 
 describe('foreman configuration validation', () => {
-  it('reads a well-formed foreman, leaving policy optional', () => {
+  it('reads a well-formed foreman', () => {
     expect(foremanChoice(valid)).toEqual(valid)
-    const { policy: _policy, ...withoutPolicy } = valid
-    expect(foremanChoice(withoutPolicy)).toEqual(withoutPolicy)
     expect(foremanChoice(undefined)).toBeUndefined()
     // A reasoning effort travels with the route, as it does for the other roles.
     expect(foremanChoice({ ...valid, route: { ...route, reasoningEffort: 'high' } })?.route)
@@ -27,8 +25,16 @@ describe('foreman configuration validation', () => {
     expect(() => foremanChoice({ ...valid, timeoutMs: FOREMAN_TIMEOUT_MS.max + 1 })).toThrow('工长超时')
     // A missing model is its own message, not a restatement of every bound.
     expect(() => foremanChoice({ ...valid, route: { provider: '', model: '' } })).toThrow('请为工长选择模型')
-    expect(() => foremanChoice({ ...valid, policy: 'blocking' })).toThrow('工长审查策略无效')
     expect(() => foremanChoice({ ...valid, extra: true })).toThrow()
+  })
+
+  // A combo saved while the reviewer had a policy still carries one. Reading it must
+  // keep the Foreman (now unconditional) instead of dropping it as an unknown field,
+  // which would silently switch plan review off for every existing installation.
+  it('keeps a stored Foreman that still carries the retired policy key', () => {
+    const stored = { ...valid, policy: 'risk-gated' }
+    expect(foremanChoice(stored)).toEqual(valid)
+    expect(foremanChoice(stored)).not.toHaveProperty('policy')
   })
 
   // The bound has to admit a review that a slow model and a large plan need: five

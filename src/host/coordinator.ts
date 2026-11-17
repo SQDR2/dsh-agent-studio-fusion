@@ -10,9 +10,9 @@ import { NativeWorkerNotices } from './native-worker-notices.js'
 import { SessionId as NativeSessionId } from '@deepseek-ai/dsh-session'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ToolExecution, ToolRunContext } from '@deepseek-ai/dsh-tools'
-import type { AuthorityAction, Digest, ExplorationReport, ForemanAssessment, ForemanDisposition, ForemanFinding, ForemanPolicy, FusionEvent, PlanReviewCandidate, PlanReviewCheckDefinition, PlanReviewRecord, RequirementCoverage, Role, RuntimeHandle, TaskId, WorkerReport, WorkOrder } from '../contracts.js'
+import type { AuthorityAction, Digest, ExplorationReport, ForemanAssessment, ForemanDisposition, ForemanFinding, FusionEvent, PlanReviewCandidate, PlanReviewCheckDefinition, PlanReviewRecord, RequirementCoverage, Role, RuntimeHandle, TaskId, WorkerReport, WorkOrder } from '../contracts.js'
 import { EpochId, OperationId, PUBLICATION_PROHIBITION, SessionId, SnapshotId, TaskId as asTaskId, WorkOrderId } from '../contracts.js'
-import { candidateDigest, semanticCandidateProjection, assertValidPlanReviewCandidate, lintPlanReviewCandidate, collectForemanFindings, foremanAssessmentSchema, planReviewGateDecision, planReviewRisk, type PlanReviewRiskReason, type PlanReviewModule, type PlanReviewOutcome } from '../plan-review.js'
+import { candidateDigest, semanticCandidateProjection, assertValidPlanReviewCandidate, lintPlanReviewCandidate, collectForemanFindings, foremanAssessmentSchema, planReviewGateDecision, type PlanReviewModule, type PlanReviewOutcome } from '../plan-review.js'
 import { NativePlanReviewService } from './plan-review.js'
 import { digestOf } from '../digest.js'
 import { WorkspaceWriteLease } from '../execution/write-lease.js'
@@ -695,7 +695,6 @@ export class FusionCoordinator {
           workOrderId: pending.workOrderId,
           candidateDigest: pending.candidateDigest,
           round: pending.round,
-          policy: binding.profile.foreman?.policy ?? 'shadow',
           route: pending.route,
           requestedAt: pending.requestedAt,
           completedAt: new Date().toISOString(),
@@ -1080,28 +1079,23 @@ export class FusionCoordinator {
    * Say, where the user is reading, that this candidate was never audited.
    *
    * A review that times out or exceeds its output budget is recorded as `unavailable`, and
-   * every policy reads that as approval (`planReviewGateDecision` lists "ready, unavailable,
-   * or overridden"): a gate silently stops gating. The status panel carries the reason, but
-   * a shadow review is easy to miss there, and a `gate` combo looks like it ran. One notice
-   * per reviewed candidate puts it in the transcript, which is also the Lead's context, so
-   * the next turn can tell the user instead of assuming an audit happened.
+   * `planReviewGateDecision` reads that as approval ("ready, unavailable, or overridden"),
+   * so a configured reviewer silently stops reviewing. The status panel carries the reason,
+   * but it is easy to miss there. One notice per reviewed candidate puts it in the
+   * transcript, which is also the Lead's context, so the next turn can tell the user
+   * instead of assuming an audit happened.
    */
   #announcePlanReviewUnavailable(agent: Agent, binding: SessionBinding, record: PlanReviewRecord): void {
     try {
       // Keyed by what was reviewed: a replay of the same candidate must not speak twice.
       const id = `plan-review-notice:${binding.taskId}:${record.candidateDigest}:${record.round}`
       if (this.store.readDocument(id)) return
-      const gated = record.policy !== 'shadow'
       const reason = record.unavailableReason ?? bi('未记录原因', 'reason not recorded')
       const message = createUserMessage({ source: { kind: FUSION_SOURCE_KIND, form: 'notice',
         summary: bi('本次计划审查未生效', 'The plan review did not run') },
         content: [{ type: 'text', text: bi(
-          `工长没有产出审查结论（${reason}），这份候选计划未经独立审查。${gated
-            ? '门禁因此没有生效，任务按失败开放策略继续执行。'
-            : '任务按 shadow 策略继续执行，审查结论本来也不参与决策。'}`,
-          `The Foreman produced no verdict (${reason}), so this candidate was never independently audited. ${gated
-            ? 'The gate therefore did not apply and the task continued under the fail-open policy.'
-            : 'The task continued under the shadow policy, where a verdict would not have decided anything.'}`) }] })
+          `工长没有产出审查结论（${reason}），这份候选计划未经独立审查。门禁因此没有生效，任务按失败开放策略继续执行。`,
+          `The Foreman produced no verdict (${reason}), so this candidate was never independently audited. The gate therefore did not apply and the task continued under the fail-open policy.`) }] })
       const event = agent.session.append('user/message', message, { surfaceOp: 'append' })
       this.store.writeDocument(id, 0, { schemaVersion: 1, taskId: binding.taskId,
         candidateDigest: record.candidateDigest, round: record.round, eventSeq: event.seq })
@@ -2198,7 +2192,6 @@ export class FusionCoordinator {
         workOrderId: pending.workOrderId,
         candidateDigest: pending.candidateDigest,
         round: pending.round,
-        policy: binding.profile.foreman?.policy ?? 'shadow',
         route: pending.route,
         requestedAt: pending.requestedAt,
         completedAt: new Date().toISOString(),
@@ -2215,127 +2208,110 @@ export class FusionCoordinator {
       })
     }
 
+    // A configured Foreman always reviews. There is no shadow or risk-gated setting to
+    // downgrade that: a reviewer the user switched on but which silently skips work orders
+    // is indistinguishable from a broken one, and the skipped plans are exactly the ones
+    // nobody audited.
     if (binding.profile.foreman) {
-      const policy: ForemanPolicy = binding.profile.foreman.policy ?? 'shadow'
       const currentState = this.state(binding.taskId)
       const reviews = currentState.planReviews ?? []
       const resolutions = currentState.planReviewResolutions ?? []
+      // Whether this exact candidate may be dispatched without another model call.
+      //
+      // Approval is bound to the digest that was actually reviewed. A round-1 `accepted`
+      // disposition is NOT an approval of whatever candidate arrives later: it says the
+      // Lead claims to have revised the plan, and the revised plan still owes a round-2
+      // review. Treating any new digest as approved is exactly the bypass that lets a
+      // reworded order skip the second review.
+      const decision = planReviewGateDecision({ candidateDigest: order.candidateDigest!, reviews,
+        resolutions: resolutions.map(item => ({ candidateDigest: item.candidateDigest, round: item.round,
+          dispositions: item.dispositions, ...(item.revisedCandidateDigest === undefined ? {} : { revisedCandidateDigest: item.revisedCandidateDigest }) })) })
 
-      if (policy === 'shadow') {
-        if (args.foremanDispositions && args.foremanDispositions.length > 0) {
-          throw new Error('Unexpected foremanDispositions: Foreman is running in shadow mode.')
-        }
-        await this.#runPlanReview(agent, binding, candidate, 1, policy, exec.signal)
+      if (decision.approved) {
+        // Already approved across round 1 or round 2 (ready, unavailable, or overridden).
+        // Allow replay/retry without re-calling Foreman.
       } else {
-        // Whether this exact candidate may be dispatched without another model call.
-        //
-        // Approval is bound to the digest that was actually reviewed. A round-1 `accepted`
-        // disposition is NOT an approval of whatever candidate arrives later: it says the
-        // Lead claims to have revised the plan, and the revised plan still owes a round-2
-        // review. Treating any new digest as approved is exactly the bypass that lets a
-        // reworded order skip the second review.
-        const decision = planReviewGateDecision({ candidateDigest: order.candidateDigest!, reviews,
-          resolutions: resolutions.map(item => ({ candidateDigest: item.candidateDigest, round: item.round,
-            dispositions: item.dispositions, ...(item.revisedCandidateDigest === undefined ? {} : { revisedCandidateDigest: item.revisedCandidateDigest }) })) })
+        const unresolvedReview = [...reviews].reverse().find(r => {
+          if (r.outcome !== 'assessment' || r.assessment?.verdict !== 'concerns') return false
+          const isResolved = Boolean(r.dispositions && r.dispositions.length > 0) ||
+            resolutions.some(res => res.candidateDigest === r.candidateDigest && res.round === r.round)
+          return !isResolved
+        })
 
-        if (decision.approved) {
-          // Already approved across round 1 or round 2 (ready, unavailable, or overridden).
-          // Allow replay/retry without re-calling Foreman.
-        } else {
-          const unresolvedReview = [...reviews].reverse().find(r => {
-            if (r.policy === 'shadow') return false
-            if (r.outcome !== 'assessment' || r.assessment?.verdict !== 'concerns') return false
-            const isResolved = Boolean(r.dispositions && r.dispositions.length > 0) ||
-              resolutions.some(res => res.candidateDigest === r.candidateDigest && res.round === r.round)
-            return !isResolved
+        if (unresolvedReview) {
+          if (!args.foremanDispositions || !Array.isArray(args.foremanDispositions) || args.foremanDispositions.length === 0) {
+            throw new Error(formatForemanConcerns(unresolvedReview.assessment!, unresolvedReview.round))
+          }
+          const findings = collectForemanFindings(unresolvedReview.assessment!)
+          const findingIds = new Set(findings.map(f => f.id))
+          const seenIds = new Set<string>()
+          for (const d of args.foremanDispositions) {
+            if (!findingIds.has(d.findingId)) {
+              throw new Error(`Unknown findingId "${d.findingId}" in dispositions`)
+            }
+            if (seenIds.has(d.findingId)) {
+              throw new Error(`Duplicate disposition for findingId "${d.findingId}"`)
+            }
+            seenIds.add(d.findingId)
+            if (d.action === 'overridden') {
+              if (typeof d.reason !== 'string' || !d.reason.trim()) {
+                throw new Error(`Disposition for finding "${d.findingId}" has action "overridden" but is missing a non-empty reason.`)
+              }
+            } else if (d.action === 'accepted') {
+              if (typeof d.changeSummary !== 'string' || !d.changeSummary.trim()) {
+                throw new Error(`Disposition for finding "${d.findingId}" has action "accepted" but is missing a non-empty changeSummary.`)
+              }
+              if (order.candidateDigest === unresolvedReview.candidateDigest) {
+                throw new Error(`Disposition for finding "${d.findingId}" was accepted, but candidate work order was not changed (digest is identical to round ${unresolvedReview.round}). Accepted findings require candidate changes.`)
+              }
+              if (unresolvedReview.round >= 2) {
+                throw new Error('Foreman plan review reached the maximum of 2 review rounds. Accepted findings are not permitted in post-round-2; you must override all findings with reasons, ask the user for guidance, or abort the task.')
+              }
+            } else {
+              throw new Error(`Invalid disposition action "${String((d as { action?: unknown }).action)}"`)
+            }
+          }
+
+          if (seenIds.size !== findings.length) {
+            throw new Error(`Foreman dispositions count (${seenIds.size}) does not match findings count (${findings.length}). All findings must be addressed.`)
+          }
+
+          const hasAccepted = args.foremanDispositions.some(d => d.action === 'accepted')
+          // An override is an answer about the plan that was actually reviewed. If the Lead
+          // also changed the brief, allowed paths or checks in the same call, those changes
+          // were never reviewed: appending the resolution would record an "override" for a
+          // candidate the reviewer never saw and then dispatch it. A revision must go through
+          // an `accepted` disposition and its own round-2 review instead.
+          if (!hasAccepted && order.candidateDigest !== unresolvedReview.candidateDigest) {
+            throw new Error('An override applies only to the reviewed candidate. Keep the candidate unchanged, or accept a finding and submit the revision for round 2.')
+          }
+          this.append(binding.taskId, 'plan-review/resolved', {
+            workOrderId: unresolvedReview.workOrderId,
+            candidateDigest: unresolvedReview.candidateDigest,
+            round: unresolvedReview.round,
+            dispositions: args.foremanDispositions,
+            ...(hasAccepted ? { revisedCandidateDigest: order.candidateDigest! } : {}),
           })
 
-          if (unresolvedReview) {
-            if (!args.foremanDispositions || !Array.isArray(args.foremanDispositions) || args.foremanDispositions.length === 0) {
-              throw new Error(formatForemanConcerns(unresolvedReview.assessment!, unresolvedReview.round))
+          if (hasAccepted) {
+            const round2Outcome = await this.#runPlanReview(agent, binding, candidate, 2, exec.signal)
+            if (round2Outcome.kind === 'concerns') {
+              return formatForemanConcerns(round2Outcome.assessment, 2)
             }
-            const findings = collectForemanFindings(unresolvedReview.assessment!)
-            const findingIds = new Set(findings.map(f => f.id))
-            const seenIds = new Set<string>()
-            for (const d of args.foremanDispositions) {
-              if (!findingIds.has(d.findingId)) {
-                throw new Error(`Unknown findingId "${d.findingId}" in dispositions`)
-              }
-              if (seenIds.has(d.findingId)) {
-                throw new Error(`Duplicate disposition for findingId "${d.findingId}"`)
-              }
-              seenIds.add(d.findingId)
-              if (d.action === 'overridden') {
-                if (typeof d.reason !== 'string' || !d.reason.trim()) {
-                  throw new Error(`Disposition for finding "${d.findingId}" has action "overridden" but is missing a non-empty reason.`)
-                }
-              } else if (d.action === 'accepted') {
-                if (typeof d.changeSummary !== 'string' || !d.changeSummary.trim()) {
-                  throw new Error(`Disposition for finding "${d.findingId}" has action "accepted" but is missing a non-empty changeSummary.`)
-                }
-                if (order.candidateDigest === unresolvedReview.candidateDigest) {
-                  throw new Error(`Disposition for finding "${d.findingId}" was accepted, but candidate work order was not changed (digest is identical to round ${unresolvedReview.round}). Accepted findings require candidate changes.`)
-                }
-                if (unresolvedReview.round >= 2) {
-                  throw new Error('Foreman plan review reached the maximum of 2 review rounds. Accepted findings are not permitted in post-round-2; you must override all findings with reasons, ask the user for guidance, or abort the task.')
-                }
-              } else {
-                throw new Error(`Invalid disposition action "${String((d as { action?: unknown }).action)}"`)
-              }
-            }
+          }
+        } else {
+          if (args.foremanDispositions && args.foremanDispositions.length > 0) {
+            throw new Error('Unexpected foremanDispositions: no unresolved Foreman concerns exist for this task.')
+          }
 
-            if (seenIds.size !== findings.length) {
-              throw new Error(`Foreman dispositions count (${seenIds.size}) does not match findings count (${findings.length}). All findings must be addressed.`)
-            }
-
-            const hasAccepted = args.foremanDispositions.some(d => d.action === 'accepted')
-            // An override is an answer about the plan that was actually reviewed. If the Lead
-            // also changed the brief, allowed paths or checks in the same call, those changes
-            // were never reviewed: appending the resolution would record an "override" for a
-            // candidate the reviewer never saw and then dispatch it. A revision must go through
-            // an `accepted` disposition and its own round-2 review instead.
-            if (!hasAccepted && order.candidateDigest !== unresolvedReview.candidateDigest) {
-              throw new Error('An override applies only to the reviewed candidate. Keep the candidate unchanged, or accept a finding and submit the revision for round 2.')
-            }
-            this.append(binding.taskId, 'plan-review/resolved', {
-              workOrderId: unresolvedReview.workOrderId,
-              candidateDigest: unresolvedReview.candidateDigest,
-              round: unresolvedReview.round,
-              dispositions: args.foremanDispositions,
-              ...(hasAccepted ? { revisedCandidateDigest: order.candidateDigest! } : {}),
-            })
-
-            if (hasAccepted) {
-              const round2Outcome = await this.#runPlanReview(agent, binding, candidate, 2, policy, exec.signal)
-              if (round2Outcome.kind === 'concerns') {
-                return formatForemanConcerns(round2Outcome.assessment, 2)
-              }
-            }
-          } else {
-            if (args.foremanDispositions && args.foremanDispositions.length > 0) {
-              throw new Error('Unexpected foremanDispositions: no unresolved Foreman concerns exist for this task.')
-            }
-
-            let shouldReview = true
-            let riskReasons: readonly string[] | undefined
-            if (policy === 'risk-gated') {
-              const risk = planReviewRisk(candidate)
-              shouldReview = risk.triggered
-              riskReasons = risk.reasons
-            }
-
-            // `decision.round` is 2 exactly when an accepted round-1 resolution revised the
-            // plan into this candidate and the process stopped before requesting round 2.
-            // Re-running round 1 would ask the answered findings again and spend a third
-            // model call on a two-call budget.
-            const round = decision.round
-            if (shouldReview || decision.reason === 'interrupted-round-2') {
-              const outcome = await this.#runPlanReview(agent, binding, candidate, round, policy, exec.signal,
-                decision.reason === 'interrupted-round-2' && riskReasons === undefined ? ['round-2-continuation'] : riskReasons)
-              if (outcome.kind === 'concerns') {
-                return formatForemanConcerns(outcome.assessment, round)
-              }
-            }
+          // `decision.round` is 2 exactly when an accepted round-1 resolution revised the
+          // plan into this candidate and the process stopped before requesting round 2.
+          // Re-running round 1 would ask the answered findings again and spend a third
+          // model call on a two-call budget.
+          const round = decision.round
+          const outcome = await this.#runPlanReview(agent, binding, candidate, round, exec.signal)
+          if (outcome.kind === 'concerns') {
+            return formatForemanConcerns(outcome.assessment, round)
           }
         }
       }
@@ -2465,9 +2441,7 @@ export class FusionCoordinator {
     binding: SessionBinding,
     candidate: PlanReviewCandidate,
     round: number,
-    policy: ForemanPolicy,
     signal?: AbortSignal,
-    riskReasons?: readonly string[],
   ): Promise<PlanReviewOutcome> {
     const currentState = this.state(binding.taskId)
     const priorReview = currentState.planReviews?.find(
@@ -2481,17 +2455,12 @@ export class FusionCoordinator {
     }
 
     const requestedAt = new Date().toISOString()
-    const triggerDecision = {
-      triggered: policy === 'risk-gated' ? Boolean(riskReasons?.length) : true,
-      reasons: riskReasons ?? (policy === 'gate' ? ['policy-gate'] : ['shadow']),
-    }
     this.append(binding.taskId, 'plan-review/requested', {
       workOrderId: candidate.order.id,
       candidateDigest: candidate.order.candidateDigest!,
       round,
       route: binding.profile.foreman!.route,
       requestedAt,
-      triggerDecision,
     })
 
     let outcome: PlanReviewOutcome
@@ -2516,14 +2485,12 @@ export class FusionCoordinator {
         workOrderId: candidate.order.id,
         candidateDigest: candidate.order.candidateDigest!,
         round,
-        policy,
         route: binding.profile.foreman!.route,
         requestedAt,
         completedAt,
         outcome: 'assessment',
         assessment: outcome.assessment,
         durationMs,
-        triggerDecision,
       }
       this.append(binding.taskId, 'plan-review/completed', {
         workOrderId: candidate.order.id,
@@ -2539,14 +2506,12 @@ export class FusionCoordinator {
         workOrderId: candidate.order.id,
         candidateDigest: candidate.order.candidateDigest!,
         round,
-        policy,
         route: binding.profile.foreman!.route,
         requestedAt,
         completedAt,
         outcome: 'unavailable',
         unavailableReason: outcome.reason,
         durationMs,
-        triggerDecision,
       }
       this.append(binding.taskId, 'plan-review/unavailable', {
         workOrderId: candidate.order.id,

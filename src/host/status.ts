@@ -174,7 +174,6 @@ function planReviewStatus(state: TaskState): PlanReviewStatus | undefined {
   return {
     status: record.outcome === 'unavailable' ? 'unavailable' : record.assessment?.verdict ?? 'unavailable',
     round: record.round,
-    ...(record.policy ? { policy: record.policy } : {}),
     ...(record.unavailableReason ? { unavailableReason: record.unavailableReason } : {}),
     ...(findings.length ? { findings } : {}),
     ...(dispositions?.length ? { accepted: dispositions.filter(d => d.action === 'accepted').length,

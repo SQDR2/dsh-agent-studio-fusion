@@ -234,8 +234,6 @@ export interface ForemanAssessment {
 export type ForemanDisposition =
   | { findingId: string; action: 'accepted'; changeSummary: string }
   | { findingId: string; action: 'overridden'; reason: string };
-/** How a combo uses the reviewer: shadow, blocking gate, or deterministic risk trigger. */
-export type ForemanPolicy = 'shadow' | 'gate' | 'risk-gated';
 /** One plan review attempt, bound to the candidate digest and round it reviewed. */
 export interface PlanReviewRecord {
   schemaVersion: 1;
@@ -250,8 +248,6 @@ export interface PlanReviewRecord {
   assessment?: ForemanAssessment;
   unavailableReason?: string;
   durationMs: number;
-  policy?: ForemanPolicy;
-  triggerDecision?: { triggered: boolean; reasons: readonly string[] };
   dispositions?: readonly ForemanDisposition[];
 }
 export interface ExplorationSource {
@@ -356,8 +352,8 @@ export interface PairProfile {
   cacheKeepalive?: Readonly<Record<Role, boolean | 'auto'>>;
   /** Optional explicit summary route. Missing means the current role model. */
   compactor?: { readonly route: PhysicalRoute; readonly maxOutputTokens: number };
-  /** Optional independent plan reviewer. Missing means plan review is off. */
-  foreman?: { readonly route: PhysicalRoute; readonly maxOutputTokens: number; readonly timeoutMs: number; readonly policy?: ForemanPolicy };
+  /** Optional independent plan reviewer. Missing means plan review is off; present means every plan is reviewed. */
+  foreman?: { readonly route: PhysicalRoute; readonly maxOutputTokens: number; readonly timeoutMs: number };
   dataPolicyId: string;
   evidenceCampaignIds: readonly string[];
 }
@@ -517,7 +513,7 @@ export type FusionEvent =
   | EventEnvelope<'requirements/revised', { reason: string }>
   | EventEnvelope<'profile/frozen', { digest: Digest; profileId: string; version: string }>
   | EventEnvelope<'intent/chosen', { intent: ExecutionIntent }>
-  | EventEnvelope<'plan-review/requested', { workOrderId: WorkOrderId; candidateDigest: Digest; round: number; route: PhysicalRoute; requestedAt?: string; triggerDecision?: { triggered: boolean; reasons: readonly string[] } }>
+  | EventEnvelope<'plan-review/requested', { workOrderId: WorkOrderId; candidateDigest: Digest; round: number; route: PhysicalRoute; requestedAt?: string }>
   | EventEnvelope<'plan-review/completed', { workOrderId: WorkOrderId; candidateDigest: Digest; round: number; assessment: ForemanAssessment; record: PlanReviewRecord }>
   | EventEnvelope<'plan-review/resolved', { workOrderId: WorkOrderId; candidateDigest: Digest; round: number; dispositions: readonly ForemanDisposition[]; revisedCandidateDigest?: Digest; resolvedAt?: string }>
   | EventEnvelope<'plan-review/unavailable', { workOrderId: WorkOrderId; candidateDigest: Digest; round: number; reason: string; record: PlanReviewRecord }>

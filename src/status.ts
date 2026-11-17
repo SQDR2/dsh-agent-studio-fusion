@@ -137,7 +137,6 @@ export interface PlanReviewStatus {
   /** `reviewing` is a request in flight, the rest are the last recorded outcome. */
   status: 'reviewing' | 'ready' | 'concerns' | 'unavailable'
   round: number | null
-  policy?: 'shadow' | 'gate' | 'risk-gated'
   /** Why the reviewer was not available; bounded text, no prompt material. */
   unavailableReason?: string
   /** Findings the Lead still has to answer, by id and category only. */

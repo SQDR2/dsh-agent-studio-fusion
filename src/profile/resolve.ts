@@ -77,6 +77,30 @@ export function promptDigests(prompts: PromptBundle): PairProfile['promptDigests
   }
 }
 
+/**
+ * The reviewer as a frozen profile records it, including a policy it may still carry.
+ *
+ * `foreman.policy` was a setting: shadow, gate or a deterministic risk trigger. It is gone —
+ * a configured reviewer now reviews every candidate plan — so nothing reads it any more. But
+ * it *is* part of the profile a session was frozen with, and the digest of that profile is
+ * what every task record, checkpoint, keepalive row and model-control document in the store
+ * is bound to. Re-deriving the profile without it moved the digest of every existing
+ * selection, and `readBinding` then refused the whole plugin at boot with "Frozen Fusion
+ * profile or prompt digest changed" — the session could not even be opened to migrate it.
+ *
+ * So the frozen document keeps its own copy and the run ignores it: `PairProfile` does not
+ * declare the key, which is what stops new code from reading it back as a setting. A combo
+ * created now has no policy at all, because `foremanChoice` no longer emits one.
+ */
+function frozenForeman(value: unknown): PairProfile['foreman'] {
+  const foreman = foremanChoice(value)
+  if (foreman === undefined) return undefined
+  const raw = value as Record<string, unknown>
+  // Only a string was ever a valid policy; anything else never reached a frozen profile
+  // because the freeze itself refused it.
+  return typeof raw.policy === 'string' ? { ...foreman, policy: raw.policy } as PairProfile['foreman'] : foreman
+}
+
 export function completeProfile(raw: Record<string, unknown>, prompts: PromptBundle): PairProfile {
   const lead = raw.lead as PhysicalRoute
   const worker = raw.worker as PhysicalRoute
@@ -84,7 +108,7 @@ export function completeProfile(raw: Record<string, unknown>, prompts: PromptBun
   const promptHash = promptDigests(prompts)
   const cacheKeepalive = keepaliveChoice(raw.cacheKeepalive)
   const compactor = compactorChoice(raw.compactor)
-  const foreman = foremanChoice(raw.foreman)
+  const foreman = frozenForeman(raw.foreman)
   if (raw.interactionMode !== undefined && raw.interactionMode !== 'model-like') throw new Error('Unknown Fusion interaction mode')
   if (raw.workflowPolicy !== undefined && (!['enforced-v1', 'enforced-v2', 'enforced-v3'].includes(String(raw.workflowPolicy)) || raw.interactionMode !== 'model-like')) throw new Error('Unknown Fusion workflow policy')
   const profile: PairProfile = {

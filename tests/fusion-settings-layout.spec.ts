@@ -722,7 +722,6 @@ describe('FusionSettings layout after sidebar integration', () => {
         route: { provider: 'p1', model: 'm-deleted' },
         maxOutputTokens: 4096,
         timeoutMs: 30000,
-        policy: 'shadow' as const,
       },
     }
     vi.stubGlobal('fetch', vi.fn(async (url: string) => {
@@ -775,7 +774,7 @@ describe('Foreman settings guidance', () => {
         json: async () => ({
           revision: 1, catalog, maxPairs: 6, authorized: true,
           pairs: [{ id: 'combo-1', name: 'Combo Alpha', pair: { lead: shared, worker: shared,
-            foreman: { route: shared, maxOutputTokens: 4096, timeoutMs: 30000, policy: 'shadow' } } }],
+            foreman: { route: shared, maxOutputTokens: 4096, timeoutMs: 30000 } } }],
         }),
       }
     }))

@@ -478,7 +478,7 @@ describe('live plan review status projection', () => {
   const record = (overrides: Record<string, unknown> = {}) => ({
     schemaVersion: 1 as const, taskId: TASK, workOrderId: order().id, candidateDigest: digest, round: 1, route,
     requestedAt: '2026-09-22T00:00:00Z', completedAt: '2026-09-22T00:00:02Z', outcome: 'assessment' as const,
-    assessment: concerns, durationMs: 2000, policy: 'gate' as const, ...overrides,
+    assessment: concerns, durationMs: 2000, ...overrides,
   })
 
   it('reports reviewing while a request is in flight, without any prompt material', () => {
@@ -498,7 +498,6 @@ describe('live plan review status projection', () => {
       assessment: concerns, record: record() as never })])
     const raised = readFusionStatus(store, PARENT).task!.planReview!
     expect(raised.status).toBe('concerns')
-    expect(raised.policy).toBe('gate')
     expect(raised.findings?.map(finding => finding.id)).toEqual(['f-1'])
     expect(raised.findings?.[0]).toMatchObject({ category: 'material-ambiguity', severity: 'blocking-concern' })
 

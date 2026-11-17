@@ -5,7 +5,6 @@ import { type Count } from '../usage/ledger.js';
 export interface TaskPlanReviewSummary {
     status: 'ready' | 'concerns' | 'unavailable';
     round: number;
-    policy?: 'shadow' | 'gate' | 'risk-gated';
     /** Present for an unavailable review so the history row can say why it did not happen. */
     unavailableReason?: string;
     /**

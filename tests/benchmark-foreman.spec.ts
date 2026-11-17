@@ -21,35 +21,26 @@ describe('benchmark foreman manifest and stream guard', () => {
     expect(manifest).toEqual({ condition: 'off' })
   })
 
-  it('records shadow, gate, and risk-gated conditions with limits in manifest', () => {
-    const shadowProfile: PairProfile = {
+  it('records the on condition with limits in manifest', () => {
+    // A configured Foreman always reviews, so the arm is on or off: there is no policy
+    // to select, and the benchmark must not claim two arms that run the same way.
+    const reviewing: PairProfile = {
       ...baseProfile,
-      foreman: { route, maxOutputTokens: 2048, timeoutMs: 15000, policy: 'shadow' },
+      foreman: { route, maxOutputTokens: 2048, timeoutMs: 15000 },
     }
-    expect(projectForemanManifest(shadowProfile)).toEqual({
-      condition: 'shadow',
+    expect(projectForemanManifest(reviewing)).toEqual({
+      condition: 'on',
       route,
       maxOutputTokens: 2048,
       timeoutMs: 15000,
     })
 
-    const gateProfile: PairProfile = {
+    const otherLimits: PairProfile = {
       ...baseProfile,
-      foreman: { route, maxOutputTokens: 4096, timeoutMs: 30000, policy: 'gate' },
+      foreman: { route, maxOutputTokens: 4096, timeoutMs: 25000 },
     }
-    expect(projectForemanManifest(gateProfile)).toEqual({
-      condition: 'gate',
-      route,
-      maxOutputTokens: 4096,
-      timeoutMs: 30000,
-    })
-
-    const riskProfile: PairProfile = {
-      ...baseProfile,
-      foreman: { route, maxOutputTokens: 4096, timeoutMs: 25000, policy: 'risk-gated' },
-    }
-    expect(projectForemanManifest(riskProfile)).toEqual({
-      condition: 'risk-gated',
+    expect(projectForemanManifest(otherLimits)).toEqual({
+      condition: 'on',
       route,
       maxOutputTokens: 4096,
       timeoutMs: 25000,
@@ -154,7 +145,7 @@ describe('benchmark variant manifest honesty', () => {
   const enabled = {
     schemaVersion: 1, id: 'p-1', version: '1', digest: 'd', enabled: true,
     lead: { provider: 'test-p', model: 'lead-m' }, worker: { provider: 'test-p', model: 'worker-m' },
-    foreman: { route, maxOutputTokens: 2048, timeoutMs: 15000, policy: 'gate' as const },
+    foreman: { route, maxOutputTokens: 2048, timeoutMs: 15000 },
     dataPolicyId: 'local',
   } as unknown as PairProfile
 
@@ -164,15 +155,11 @@ describe('benchmark variant manifest honesty', () => {
     for (const variant of ['lead_only', 'worker_only', 'worker_selfreview', 'naive'] as const) {
       expect(projectForemanManifest(enabled, variant)).toEqual({ condition: 'off' })
     }
-    expect(projectForemanManifest(enabled, 'fusion')).toMatchObject({ condition: 'gate' })
+    expect(projectForemanManifest(enabled, 'fusion')).toMatchObject({ condition: 'on' })
   })
 
-  it('keeps each selectable condition independently visible for fusion', () => {
-    const withPolicy = (policy: 'shadow' | 'gate' | 'risk-gated') => ({ ...enabled,
-      foreman: { ...enabled.foreman!, policy } }) as PairProfile
-    expect(projectForemanManifest(withPolicy('shadow')).condition).toBe('shadow')
-    expect(projectForemanManifest(withPolicy('gate')).condition).toBe('gate')
-    expect(projectForemanManifest(withPolicy('risk-gated')).condition).toBe('risk-gated')
+  it('reports off only when the profile configures no reviewer', () => {
+    expect(projectForemanManifest(enabled).condition).toBe('on')
     expect(projectForemanManifest({ ...enabled, foreman: undefined } as PairProfile).condition).toBe('off')
   })
 })

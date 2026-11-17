@@ -91,7 +91,7 @@ describe('saved combos', () => {
     const pair: PairChoice = {
       ...choice('deepseek-v4', 'deepseek-v4-mini'),
       compactor: { route: { provider: 'llm-deepseek', model: 'deepseek-v4-mini' }, maxOutputTokens: 8192 },
-      foreman: { route: { provider: 'pi-anthropic', model: 'claude-opus-5' }, maxOutputTokens: 2048, timeoutMs: 15000, policy: 'gate' },
+      foreman: { route: { provider: 'pi-anthropic', model: 'claude-opus-5' }, maxOutputTokens: 2048, timeoutMs: 15000 },
     }
     writePairs(store, 0, validatePairs([{ name: '审', pair }], catalog, []))
     expect(readPairs(store).pairs[0]!.pair).toMatchObject({ compactor: pair.compactor, foreman: pair.foreman })

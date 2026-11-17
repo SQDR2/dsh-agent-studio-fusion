@@ -155,7 +155,7 @@ describe('FusionSettings combo list', () => {
     expect(posts).toHaveLength(0)
   })
 
-  it('configures optional foreman with model requirement, policy selection, and token/timeout limits', async () => {
+  it('configures optional foreman with model requirement and token/timeout limits, and no policy', async () => {
     pinLanguage('zh-CN')
     const posts: unknown[] = []
     stub(posts)
@@ -166,16 +166,13 @@ describe('FusionSettings combo list', () => {
     // Initially, foreman is disabled
     const foremanCheckbox = root.root.findByProps({ 'aria-label': '启用工长审查' })
     expect(foremanCheckbox.props.checked).toBe(false)
-    expect(root.root.findAllByProps({ 'aria-label': '工长审查策略' })).toHaveLength(0)
+    expect(root.root.findAllByProps({ 'aria-label': '工长输出 Token 上限' })).toHaveLength(0)
 
     // Toggle foreman on
     await act(async () => { foremanCheckbox.props.onChange({ target: { checked: true } }) })
-    expect(root.root.findAllByProps({ 'aria-label': '工长审查策略' })).toHaveLength(1)
-
-    // Select policy 'gate'
-    const policySelect = root.root.findByProps({ 'aria-label': '工长审查策略' })
-    expect(policySelect.props.value).toBe('shadow')
-    await act(async () => { policySelect.props.onChange({ target: { value: 'gate' } }) })
+    expect(root.root.findAllByProps({ 'aria-label': '工长输出 Token 上限' })).toHaveLength(1)
+    // A configured Foreman reviews every plan, so there is no policy control to pick.
+    expect(root.root.findAllByProps({ 'aria-label': '工长审查策略' })).toHaveLength(0)
 
     // Change tokens and timeout
     const tokenInput = root.root.findByProps({ 'aria-label': '工长输出 Token 上限' })
@@ -189,14 +186,13 @@ describe('FusionSettings combo list', () => {
     expect((posts[0] as any).action).toBe('configure')
     expect((posts[0] as any).pairs[0].pair.foreman).toEqual({
       route: pair('deepseek-v4').lead,
-      policy: 'gate',
       maxOutputTokens: 2048,
       timeoutMs: 15000,
     })
 
     // Toggle foreman off: pair.foreman is deleted
     await act(async () => { foremanCheckbox.props.onChange({ target: { checked: false } }) })
-    expect(root.root.findAllByProps({ 'aria-label': '工长审查策略' })).toHaveLength(0)
+    expect(root.root.findAllByProps({ 'aria-label': '工长输出 Token 上限' })).toHaveLength(0)
 
     posts.length = 0
     await act(async () => { button(root, '保存组合').props.onClick() })
@@ -282,7 +278,7 @@ describe('FusionSettings combo list', () => {
   // and it disappeared". This drives exactly that round trip.
   it('shows the Foreman again after reopening the page on a saved combo', async () => {
     pinLanguage('zh-CN')
-    const foreman = { route: { provider: 'pi-anthropic', model: 'claude-opus-5' }, maxOutputTokens: 2048, timeoutMs: 15000, policy: 'gate' }
+    const foreman = { route: { provider: 'pi-anthropic', model: 'claude-opus-5' }, maxOutputTokens: 2048, timeoutMs: 15000 }
     vi.stubGlobal('fetch', vi.fn(async (url: string, init?: { method?: string }) => {
       if (init?.method === 'POST') return { ok: true, json: async () => ({ ok: true, revision: 4 }) }
       if (url.includes('view=cache')) return { ok: true, json: async () => ({ checked: '2026-11-01', models: [] }) }
@@ -301,10 +297,9 @@ describe('FusionSettings combo list', () => {
 
     // The saved Foreman is on, configured and visible without the user re-entering it.
     expect(root.root.findByProps({ 'aria-label': '启用工长审查' }).props.checked).toBe(true)
-    expect(root.root.findByProps({ 'aria-label': '工长审查策略' }).props.value).toBe('gate')
     expect(root.root.findByProps({ 'aria-label': '工长输出 Token 上限' }).props.value).toBe(2048)
     expect(root.root.findByProps({ 'aria-label': '工长超时毫秒' }).props.value).toBe(15000)
-    // The closed-state row already names the model and policy, so the combo list is not silent about it.
+    // The closed-state row already names the model, so the combo list is not silent about it.
     expect(JSON.stringify(root.toJSON())).toContain('Claude Opus 5')
     expect(JSON.stringify(root.toJSON())).toContain('工长：')
   })

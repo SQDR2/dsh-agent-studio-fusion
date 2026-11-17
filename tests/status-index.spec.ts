@@ -459,7 +459,7 @@ describe('history projection of plan review detail', () => {
       planReviews: [{
         schemaVersion: 1 as const, taskId: TaskId('t'), workOrderId: 'wo' as WorkOrderId, candidateDigest: digest as never,
         round: 1, route: { provider: 'p', model: 'foreman' }, requestedAt: '2026-01-01T00:00:00Z',
-        completedAt: '2026-01-01T00:00:02Z', outcome: 'assessment' as const, durationMs: 2000, policy: 'gate' as const,
+        completedAt: '2026-01-01T00:00:02Z', outcome: 'assessment' as const, durationMs: 2000,
         assessment: { schemaVersion: 1 as const, candidateDigest: digest, verdict: 'concerns' as const,
           acceptanceAudit: { uncoveredRequirements: [{ id: 'f-1', category: 'acceptance-gap' as const, severity: 'warning' as const,
             requirementIndexes: [0], decisionIndexes: [], message: 'no oracle', suggestedCorrection: 'add one' }],
@@ -473,7 +473,7 @@ describe('history projection of plan review detail', () => {
     } as never
     const planned = { ...(state as Record<string, unknown>), latestPlanReview: (state as unknown as { planReviews: readonly unknown[] }).planReviews[0] }
     const summary = taskSummary(planned as never, '2026-01-01T00:00:00Z', '2026-01-01T00:05:00Z')
-    expect(summary.planReview).toMatchObject({ status: 'concerns', round: 1, policy: 'gate',
+    expect(summary.planReview).toMatchObject({ status: 'concerns', round: 1,
       dispositionsCount: { accepted: 1, overridden: 0 } })
     expect(summary.planReview?.findings?.[0]).toMatchObject({ id: 'f-1', category: 'acceptance-gap',
       disposition: { action: 'accepted', note: 'added a check' } })

@@ -1,5 +1,5 @@
 import { bi } from '../bilingual.js'
-import type { ForemanPolicy, PairProfile } from '../contracts.js'
+import type { PairProfile } from '../contracts.js'
 
 /** Output ceiling for one review call; the same bound the compaction model uses. */
 export const FOREMAN_MAX_OUTPUT_TOKENS = 128_000
@@ -17,6 +17,9 @@ export function foremanChoice(value: unknown): PairProfile['foreman'] {
   const raw = value as Record<string, unknown>, route = raw.route as Record<string, unknown> | undefined
   // Each field is reported on its own: one combined sentence listing model, output
   // limit and timeout left the user guessing which of the three had been rejected.
+  // `policy` is a retired setting: a combo saved before the reviewer became
+  // unconditional still carries it, and refusing the key would silently disable the
+  // Foreman on the next save instead of upgrading it to "always reviews".
   if (Object.keys(raw).some(key => !['route', 'maxOutputTokens', 'timeoutMs', 'policy'].includes(key))
     || !route || typeof route !== 'object' || Array.isArray(route)
     || Object.keys(route).some(key => !['provider', 'model', 'reasoningEffort'].includes(key))
@@ -33,9 +36,6 @@ export function foremanChoice(value: unknown): PairProfile['foreman'] {
     throw new Error(bi(`工长超时必须 ${FOREMAN_TIMEOUT_MS.min}–${FOREMAN_TIMEOUT_MS.max} 毫秒，现在是 ${String(raw.timeoutMs)}`,
       `The foreman timeout must be ${FOREMAN_TIMEOUT_MS.min}–${FOREMAN_TIMEOUT_MS.max} ms; it is ${String(raw.timeoutMs)}`))
   }
-  if (raw.policy !== undefined && !['shadow', 'gate', 'risk-gated'].includes(raw.policy as string)) {
-    throw new Error(bi('工长审查策略无效', 'Invalid foreman review policy'))
-  }
   return {
     route: {
       provider: route.provider,
@@ -44,6 +44,5 @@ export function foremanChoice(value: unknown): PairProfile['foreman'] {
     },
     maxOutputTokens: Number(raw.maxOutputTokens),
     timeoutMs: Number(raw.timeoutMs),
-    ...(raw.policy !== undefined ? { policy: raw.policy as ForemanPolicy } : {}),
   }
 }
