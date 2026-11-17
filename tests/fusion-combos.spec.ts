@@ -204,6 +204,26 @@ describe('FusionSettings combo list', () => {
     expect((posts[0] as any).pairs[0].pair).not.toHaveProperty('foreman')
   })
 
+  // A review that finds many problems must still fit its output budget, and a slow reviewer
+  // must be allowed to finish: 4096 tokens and 30 seconds turned real reviews into
+  // `max-tokens` and `TimeoutError` discards, and every policy reads a discard as approval.
+  it('starts a new Foreman at a budget and timeout a real review can finish within', async () => {
+    pinLanguage('zh-CN')
+    const posts: unknown[] = []
+    stub(posts)
+    let root!: ReactTestRenderer
+    await act(async () => { root = create(React.createElement(FusionSettings)) })
+    roots.push(root)
+
+    await act(async () => { root.root.findByProps({ 'aria-label': '启用工长审查' }).props.onChange({ target: { checked: true } }) })
+    expect(root.root.findByProps({ 'aria-label': '工长输出 Token 上限' }).props.value).toBe(8192)
+    expect(root.root.findByProps({ 'aria-label': '工长超时毫秒' }).props.value).toBe(120000)
+
+    await act(async () => { button(root, '保存组合').props.onClick() })
+    expect(root.root.findAllByProps({ role: 'alert' })).toHaveLength(0)
+    expect((posts[0] as any).pairs[0].pair.foreman).toMatchObject({ maxOutputTokens: 8192, timeoutMs: 120000 })
+  })
+
   // A five-minute review timeout was refused with one sentence that listed the
   // model, the output limit and the timeout together, so the page could not say
   // that a single number was out of range.

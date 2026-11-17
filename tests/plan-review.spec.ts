@@ -4,7 +4,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
 import type { PlanReviewCandidate, PlanReviewCheckDefinition, PlanReviewRecord, RequirementCoverage, WorkOrder } from '../src/contracts.js'
 import { OperationId, SessionId, SnapshotId, TaskId, WorkOrderId } from '../src/contracts.js'
-import { assertValidPlanReviewCandidate, candidateDigest, collectForemanFindings, FOREMAN_SYSTEM_PROMPT, foremanAssessmentSchema, lintPlanReviewCandidate, parseForemanAssessment, planReviewGateDecision, planReviewRisk, semanticCandidateProjection } from '../src/plan-review.js'
+import { assertValidPlanReviewCandidate, candidateDigest, collectForemanFindings, FOREMAN_MAX_FINDINGS, FOREMAN_SYSTEM_PROMPT, foremanAssessmentSchema, lintPlanReviewCandidate, parseForemanAssessment, planReviewGateDecision, planReviewRisk, semanticCandidateProjection } from '../src/plan-review.js'
 import { NativePlanReviewService } from '../src/host/plan-review.js'
 import { NativeAuxiliaryRequests } from '../src/host/native-auxiliary.js'
 import type { SessionBinding } from '../src/host/bindings.js'
@@ -667,8 +667,16 @@ describe('parseForemanAssessment strict structural schema validation', () => {
 
   it('preserves the verbatim required FOREMAN_SYSTEM_PROMPT constant', () => {
     expect(FOREMAN_SYSTEM_PROMPT).toBe(
-      'You are Foreman, an independent plan auditor. Review only the supplied candidate work order. Find semantic gaps that deterministic Host validation cannot decide: uncovered hard requirements, weak acceptance oracles, concrete false-green scenarios, unsupported decisions, counterexamples, unresolved critical assumptions, scope contradictions, and material ambiguities that would change observable behavior. Do not propose an alternative plan. Do not discuss formatting, permissions, path syntax, or other deterministic Host checks. Return exactly one JSON object matching ForemanAssessment schema version 1. Use verdict "ready" only when every finding array is empty; otherwise use "concerns". Copy candidateDigest exactly. Do not use Markdown or include any text outside the JSON object.',
+      'You are Foreman, an independent plan auditor. Review only the supplied candidate work order. Find semantic gaps that deterministic Host validation cannot decide: uncovered hard requirements, weak acceptance oracles, concrete false-green scenarios, unsupported decisions, counterexamples, unresolved critical assumptions, scope contradictions, and material ambiguities that would change observable behavior. Do not propose an alternative plan. Do not discuss formatting, permissions, path syntax, or other deterministic Host checks. Return exactly one JSON object matching ForemanAssessment schema version 1. Use verdict "ready" only when every finding array is empty; otherwise use "concerns". Report at most 8 findings across all finding arrays, most material first; when the plan has more problems than that, report the ones that would change observable behavior and omit the rest. Copy candidateDigest exactly. Do not use Markdown or include any text outside the JSON object.',
     )
+  })
+
+  // The cap keeps the assessment inside the request's output budget by construction: a
+  // review that overruns that budget is discarded whole, and every policy then reads the
+  // discard as approval. The prompt must therefore name the same number the constant does.
+  it('bounds the findings the prompt asks for', () => {
+    expect(FOREMAN_MAX_FINDINGS).toBe(8)
+    expect(FOREMAN_SYSTEM_PROMPT).toContain(`Report at most ${FOREMAN_MAX_FINDINGS} findings`)
   })
 
   it('parses valid ready assessment when all finding lists are empty', () => {

@@ -78,7 +78,17 @@ export type PlanReviewOutcome = {
     kind: 'unavailable';
     reason: string;
 };
-export declare const FOREMAN_SYSTEM_PROMPT = "You are Foreman, an independent plan auditor. Review only the supplied candidate work order. Find semantic gaps that deterministic Host validation cannot decide: uncovered hard requirements, weak acceptance oracles, concrete false-green scenarios, unsupported decisions, counterexamples, unresolved critical assumptions, scope contradictions, and material ambiguities that would change observable behavior. Do not propose an alternative plan. Do not discuss formatting, permissions, path syntax, or other deterministic Host checks. Return exactly one JSON object matching ForemanAssessment schema version 1. Use verdict \"ready\" only when every finding array is empty; otherwise use \"concerns\". Copy candidateDigest exactly. Do not use Markdown or include any text outside the JSON object.";
+/**
+ * The most findings one review may report.
+ *
+ * A finding carries a message and a suggested correction, so the assessment grows with the
+ * count. The request also has a finite output budget ({@link ForemanConfig.maxOutputTokens}),
+ * and a review that exceeds it is discarded whole rather than partly kept, which reads
+ * downstream as approval. Bounding the count keeps the review inside the budget by
+ * construction instead of relying on the cap to catch it.
+ */
+export declare const FOREMAN_MAX_FINDINGS = 8;
+export declare const FOREMAN_SYSTEM_PROMPT = "You are Foreman, an independent plan auditor. Review only the supplied candidate work order. Find semantic gaps that deterministic Host validation cannot decide: uncovered hard requirements, weak acceptance oracles, concrete false-green scenarios, unsupported decisions, counterexamples, unresolved critical assumptions, scope contradictions, and material ambiguities that would change observable behavior. Do not propose an alternative plan. Do not discuss formatting, permissions, path syntax, or other deterministic Host checks. Return exactly one JSON object matching ForemanAssessment schema version 1. Use verdict \"ready\" only when every finding array is empty; otherwise use \"concerns\". Report at most 8 findings across all finding arrays, most material first; when the plan has more problems than that, report the ones that would change observable behavior and omit the rest. Copy candidateDigest exactly. Do not use Markdown or include any text outside the JSON object.";
 export declare function parseForemanAssessment(rawText: string, candidate: PlanReviewCandidate): PlanReviewOutcome;
 /**
  * Read-only JSON Schema of `ForemanAssessment`, exactly as plan 7.2 declares it.

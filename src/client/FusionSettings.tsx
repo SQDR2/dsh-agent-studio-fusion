@@ -405,8 +405,12 @@ export function FusionSettings() {
                         ...rest,
                         foreman: {
                           route: combo.pair.lead ?? { provider: '', model: '' },
-                          maxOutputTokens: 4096,
-                          timeoutMs: 30000,
+                          // A review that finds many problems must still fit its budget, and a
+                          // slow reviewer must be allowed to finish: 4096 output tokens and 30
+                          // seconds turned real reviews into `max-tokens` and `TimeoutError`
+                          // aborts, which every policy then reads as approval.
+                          maxOutputTokens: 8192,
+                          timeoutMs: 120000,
                           policy: 'shadow',
                         },
                       },

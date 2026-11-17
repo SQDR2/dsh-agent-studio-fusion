@@ -1076,6 +1076,38 @@ export class FusionCoordinator {
     } catch (error) { this.ctx.logger.warn(`[dsh-fusion] blocked-step notice failed: ${String(error)}`) }
   }
 
+  /**
+   * Say, where the user is reading, that this candidate was never audited.
+   *
+   * A review that times out or exceeds its output budget is recorded as `unavailable`, and
+   * every policy reads that as approval (`planReviewGateDecision` lists "ready, unavailable,
+   * or overridden"): a gate silently stops gating. The status panel carries the reason, but
+   * a shadow review is easy to miss there, and a `gate` combo looks like it ran. One notice
+   * per reviewed candidate puts it in the transcript, which is also the Lead's context, so
+   * the next turn can tell the user instead of assuming an audit happened.
+   */
+  #announcePlanReviewUnavailable(agent: Agent, binding: SessionBinding, record: PlanReviewRecord): void {
+    try {
+      // Keyed by what was reviewed: a replay of the same candidate must not speak twice.
+      const id = `plan-review-notice:${binding.taskId}:${record.candidateDigest}:${record.round}`
+      if (this.store.readDocument(id)) return
+      const gated = record.policy !== 'shadow'
+      const reason = record.unavailableReason ?? bi('未记录原因', 'reason not recorded')
+      const message = createUserMessage({ source: { kind: FUSION_SOURCE_KIND, form: 'notice',
+        summary: bi('本次计划审查未生效', 'The plan review did not run') },
+        content: [{ type: 'text', text: bi(
+          `工长没有产出审查结论（${reason}），这份候选计划未经独立审查。${gated
+            ? '门禁因此没有生效，任务按失败开放策略继续执行。'
+            : '任务按 shadow 策略继续执行，审查结论本来也不参与决策。'}`,
+          `The Foreman produced no verdict (${reason}), so this candidate was never independently audited. ${gated
+            ? 'The gate therefore did not apply and the task continued under the fail-open policy.'
+            : 'The task continued under the shadow policy, where a verdict would not have decided anything.'}`) }] })
+      const event = agent.session.append('user/message', message, { surfaceOp: 'append' })
+      this.store.writeDocument(id, 0, { schemaVersion: 1, taskId: binding.taskId,
+        candidateDigest: record.candidateDigest, round: record.round, eventSeq: event.seq })
+    } catch (error) { this.ctx.logger.warn(`[dsh-fusion] plan-review notice failed: ${String(error)}`) }
+  }
+
   /** Whether a task waits on human inspection of interrupted effects rather than on a pause. */
   #needsReconcile(taskId: TaskId): boolean {
     if (this.#trackingErrors.has(taskId)) return true
@@ -2522,6 +2554,7 @@ export class FusionCoordinator {
         reason: outcome.reason,
         record,
       })
+      this.#announcePlanReviewUnavailable(agent, binding, record)
     }
     return outcome
   }

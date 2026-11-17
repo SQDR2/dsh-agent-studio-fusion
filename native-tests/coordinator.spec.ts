@@ -5537,6 +5537,16 @@ describe('shadow plan review in coordinator', () => {
     expect(state.latestPlanReview?.outcome).toBe('unavailable')
     expect(state.latestPlanReview?.unavailableReason).toBe('model timeout')
     expect(state.phase).toBe('COMPLETED')
+
+    // Failing open is not the same as passing: the run continued without an audit, so the
+    // transcript says so. Without this the only trace was a status line, and a `gate` combo
+    // looked exactly like one whose review had approved the plan.
+    const notices = parent.session.snapshotEvents().filter(event => event.type === 'user/message'
+      && event.data.source?.form === 'notice' && JSON.stringify(event.data.content).includes('model timeout'))
+    expect(notices).toHaveLength(1)
+    // The row's own heading, then the reason and what it means for this policy.
+    expect((notices[0]!.data.source as { summary?: string }).summary).toContain('本次计划审查未生效')
+    expect(JSON.stringify(notices[0]!.data.content)).toContain('任务按 shadow 策略继续执行')
   })
 
   it('fails open when review throws an exception and dispatches worker normally', async () => {
