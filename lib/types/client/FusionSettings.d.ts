@@ -9,7 +9,7 @@ export interface SavedPairView {
     reason?: string;
 }
 export declare function ModelChoice({ role, route, catalog, onChange }: {
-    role: 'Lead' | 'Sidekick' | 'compactor';
+    role: 'Lead' | 'Sidekick' | 'compactor' | 'Foreman';
     route?: PhysicalRoute;
     catalog: SettingsCatalog;
     onChange(route: PhysicalRoute | undefined): void;

@@ -42,15 +42,14 @@ describe('the published contracts entry point matches the source contracts', () 
   it('exports the same type and interface names', () => {
     // `TerminalPhase` is the one intentional addition: the source exports a
     // runtime `TERMINAL_PHASES` set, which a declaration-only file cannot.
-    expect(exportedNames(published).filter(name => name !== 'TerminalPhase'))
-      .toEqual(exportedNames(source))
+    expect(exportedNames(published).filter(name => name !== 'TerminalPhase')).toEqual(exportedNames(source))
   })
 
   it('enumerates every FusionEvent kind, in the same order', () => {
     expect(eventKinds(published)).toEqual(eventKinds(source))
     // A union that stops early is the failure this guards: assert the count so
     // a future addition to the source cannot pass by adding nothing.
-    expect(eventKinds(published).length).toBeGreaterThanOrEqual(30)
+    expect(eventKinds(published).length).toBeGreaterThanOrEqual(35)
   })
 
   it('keeps WorkOrder mode, which decides whether a task may write at all', () => {

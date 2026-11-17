@@ -21,7 +21,14 @@
  * the native selection listener (which would otherwise read the pin as "the user picked
  * another model" and drain the task) and the model menu projection (which would otherwise
  * display the pair's Lead model, which is what the settle-time restore above undoes).
- * {@link isNativeRoutePin} answers both.
+ *
+ * Recognising it is a *scoped* fact, never a comparison. {@link isNativeRoutePin} reports
+ * whether an append is being published right now from inside {@link pinNativeRoute} or
+ * {@link restoreNativeIntent}; every append Fusion makes runs through that guard, and
+ * nothing else does. Comparing a recorded route with the route Fusion last wrote instead
+ * classified any *later* choice of the same route as Fusion's own pin — which is how an
+ * explicit `gz/deepseek-v4.1-flash` (or `gz/gpt-6.1-sol`) selection was silently turned
+ * back into the combo, and how a session the user had left kept running a Fusion task.
  *
  * The capability is `agent.model`, which 0.2.1 does not have at all: there the route is
  * still applied by the `agent/request` rewrite, and every function here is a no-op.
@@ -36,18 +43,39 @@ interface Selection {
 /** Whether this Host requires the route to be selected before step preparation. */
 export declare function requiresSelectedRoute(agent: Agent): boolean;
 /**
+ * Run one selection append that is Fusion's own, invisible to the intent readers.
+ *
+ * The append publishes synchronously, so a flag around the call is enough: every listener
+ * that runs before it is cleared is looking at Fusion's write, not at a user choice. The
+ * `finally` matters — a Session that refuses the append must not leave the Agent marked.
+ * @param agent - the Agent whose selection Fusion is recording.
+ * @param write - the append to run under the guard.
+ * @returns whatever the append returned.
+ */
+export declare function withFusionAppend<T>(agent: Agent, write: () => T): T;
+/**
+ * Whether the selection append being published right now is Fusion's own pin or restore.
+ *
+ * Callers must consult this while handling a `session/event` that is being published, not
+ * later: after the append returns nothing is "in progress" any more, and a recorded route
+ * that happens to equal a pin is a user choice like any other.
+ * @param agent - the Agent the event belongs to.
+ * @returns true only inside {@link withFusionAppend}.
+ */
+export declare function isNativeRoutePin(agent: Agent): boolean;
+/**
  * Remember the selection the user made, so a later pin can be undone.
  * @param agent - the Agent the selection belongs to.
  * @param selection - the recorded `model/selection` payload.
  */
 export declare function recordNativeIntent(agent: Agent, selection: Selection): void;
 /**
- * Whether one recorded selection is Fusion's own pin rather than a user choice.
- * @param agent - the Agent the event belongs to.
+ * Whether a recorded selection is the pin Fusion itself still owes the user back.
+ * @param agent - the Agent the selection belongs to.
  * @param selection - the recorded `model/selection` payload.
- * @returns true when Fusion recorded it to route a step.
+ * @returns true when the recorded value is Fusion's own, un-restored pin.
  */
-export declare function isNativeRoutePin(agent: Agent, selection: Selection): boolean;
+export declare function isPinnedRoute(agent: Agent, selection: Selection): boolean;
 /**
  * Make the physical route the step's selection, if it is not already.
  *
@@ -70,6 +98,10 @@ export declare function pinNativeRoute(agent: Agent, route: PhysicalRoute): bool
  * append, and it is a no-op when the recorded selection already is the user's choice. The
  * next turn pins again, which is correct: a task rollover can change the route, and pinning
  * is skipped when the selection already matches.
+ *
+ * A pin nobody asked to undo — the user switched models mid-turn, or left Fusion — is
+ * simply dropped: the recorded selection is then already theirs, and re-appending it would
+ * only resurrect the value Fusion wrote in between.
  *
  * The native selection listener calls this from the Agent's `running` → `idle` transition,
  * which is the same moment as `turn/end` but outside the append that publishes `turn/end`:

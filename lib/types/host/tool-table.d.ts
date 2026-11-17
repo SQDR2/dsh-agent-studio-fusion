@@ -25,7 +25,7 @@ export interface ProjectedTools<T extends NamedTool> {
  * silently smaller catalog.
  */
 export declare function projectRoleTools<T extends NamedTool>(input: {
-    assembled: readonly T[];
+    assembled?: readonly T[];
     allowlist: readonly string[] | undefined;
     registry: readonly T[];
     /** Names this role keeps even when the allowlist omits them. */

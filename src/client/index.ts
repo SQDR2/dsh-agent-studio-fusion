@@ -9,6 +9,7 @@ import { FusionSettings } from './FusionSettings.js'
 import { FusionPanelIcon } from './FusionPanelIcon.js'
 import { FusionHint } from './FusionHint.js'
 import { FusionPermission } from './FusionPermission.js'
+import { FusionModelLabel, type ComposerModelLabelOwner } from './FusionModelLabel.js'
 import { FusionTool, fusionControlTools } from './FusionTool.js'
 import { AGY_TOOL_VIEWS, installAgyToolViewStyles } from './agy/toolview.js'
 import { NS as AGY_LOCALE_NS } from './agy/locales.js'
@@ -23,6 +24,20 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
       kind: 'list'
       scope: 'root'
       owner: { size: number; active: boolean }
+    }
+    /**
+     * The composer model seat's inline label: a single non-interactive contribution the seat
+     * renders in place of the catalog name (trigger, root-menu value, option rows).
+     *
+     * The seat declares it, so this entry claims nothing at runtime — it only types the
+     * registration below. It is declared here because the composer's own slot table lives in
+     * the Host's conversation/model-selection entries, and this checkout compiles against
+     * published types that predate the extension point.
+     */
+    'conversation.input.model.label': {
+      kind: 'single'
+      scope: 'session'
+      owner: ComposerModelLabelOwner
     }
   }
 }
@@ -85,5 +100,10 @@ export function apply(ctx: Context): void {
     scope.slots.inject('conversation.input.left', () => scope.slots.register({
       name: 'conversation.input.left', id: 'fusion-permission', order: 10, inject: sessionProps,
     }, FusionPermission))
+    // Additive too: the native seat keeps its trigger, menu and selection verbs; this only
+    // names the bound combo while a pinned turn makes the pair's Lead the current route.
+    scope.slots.inject('conversation.input.model.label', () => scope.slots.register({
+      name: 'conversation.input.model.label', inject: sessionProps,
+    }, FusionModelLabel))
   })
 }

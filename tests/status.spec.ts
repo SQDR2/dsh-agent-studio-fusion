@@ -49,7 +49,16 @@ describe('read-only Fusion status', () => {
     bindings.clear(PARENT); write.mockClear()
     expect(readFusionStatus(store, PARENT)).toMatchObject({ selected: false })
     expect(readFusionStatus(store, PARENT)).not.toHaveProperty('task')
+    expect(readFusionStatus(store, PARENT)).not.toHaveProperty('selection')
     expect(write).not.toHaveBeenCalled()
+  })
+
+  it('names the bound combo so the UI can show it while the physical route is pinned', () => {
+    // The session's own frozen profile is `fusion-auto`; the menu spells that combo
+    // `dsh-fusion/auto`, and the composer shows the pair's Lead while a turn is pinned.
+    expect(readFusionStatus(setup().store, PARENT)).toMatchObject({
+      selected: true, selection: { provider: 'dsh-fusion', model: 'auto' },
+    })
   })
 
   it('projects authoritative usage without summing partial snapshots, and keeps missing fields unknown', () => {
@@ -453,5 +462,64 @@ describe('task deletion', () => {
     expect(store.readDocument(`scope-expansion:${TASK_B}:exp1`)).toBeDefined()
     expect(store.readDocument('child:child-b')).toBeDefined()
     expect(bindings.read(PARENT_B)?.binding.selected).toBe(true)
+  })
+})
+
+describe('live plan review status projection', () => {
+  const digest = 'a'.repeat(64) as never
+  const route = { provider: 'fixture', model: 'foreman' }
+  const concerns = {
+    schemaVersion: 1 as const, candidateDigest: digest as unknown as string, verdict: 'concerns' as const,
+    acceptanceAudit: { uncoveredRequirements: [], weakOracles: [], falseGreenScenarios: [] },
+    decisionChallenges: { unsupportedDecisions: [], counterexamples: [], unresolvedCriticalAssumptions: [] },
+    materialAmbiguities: [{ id: 'f-1', category: 'material-ambiguity' as const, severity: 'blocking-concern' as const,
+      requirementIndexes: [], decisionIndexes: [], message: 'Rounding is unspecified', suggestedCorrection: 'Say which rounding' }],
+  }
+  const record = (overrides: Record<string, unknown> = {}) => ({
+    schemaVersion: 1 as const, taskId: TASK, workOrderId: order().id, candidateDigest: digest, round: 1, route,
+    requestedAt: '2026-09-22T00:00:00Z', completedAt: '2026-09-22T00:00:02Z', outcome: 'assessment' as const,
+    assessment: concerns, durationMs: 2000, ...overrides,
+  })
+
+  it('reports reviewing while a request is in flight, without any prompt material', () => {
+    const { store } = setup()
+    store.append(TASK, 1, [envelope('plan-review/requested', 3, { workOrderId: order().id, candidateDigest: digest, round: 1, route,
+      requestedAt: '2026-09-22T00:00:00Z' })])
+    const planReview = readFusionStatus(store, PARENT).task!.planReview!
+    expect(planReview).toMatchObject({ status: 'reviewing', round: 1 })
+    expect(JSON.stringify(planReview)).not.toContain('Foreman, an independent plan auditor')
+  })
+
+  it('reports concerns with unanswered findings, then the recorded dispositions', () => {
+    const { store } = setup()
+    store.append(TASK, 1, [envelope('plan-review/requested', 3, { workOrderId: order().id, candidateDigest: digest, round: 1, route,
+      requestedAt: '2026-09-22T00:00:00Z' })])
+    store.append(TASK, 1, [envelope('plan-review/completed', 4, { workOrderId: order().id, candidateDigest: digest, round: 1,
+      assessment: concerns, record: record() as never })])
+    const raised = readFusionStatus(store, PARENT).task!.planReview!
+    expect(raised.status).toBe('concerns')
+    expect(raised.findings?.map(finding => finding.id)).toEqual(['f-1'])
+    expect(raised.findings?.[0]).toMatchObject({ category: 'material-ambiguity', severity: 'blocking-concern' })
+
+    store.append(TASK, 1, [envelope('plan-review/resolved', 5, { workOrderId: order().id, candidateDigest: digest, round: 1,
+      dispositions: [{ findingId: 'f-1', action: 'overridden', reason: 'the repo convention decides it' }] })])
+    const answered = readFusionStatus(store, PARENT).task!.planReview!
+    // Once answered, the concern is no longer something the Lead still owes an answer to.
+    expect(answered.findings).toBeUndefined()
+    expect(answered).toMatchObject({ accepted: 0, overridden: 1 })
+  })
+
+  it('makes an unavailable review visible with its reason', () => {
+    const { store } = setup()
+    store.append(TASK, 1, [envelope('plan-review/requested', 3, { workOrderId: order().id, candidateDigest: digest, round: 1, route,
+      requestedAt: '2026-09-22T00:00:00Z' })])
+    store.append(TASK, 1, [envelope('plan-review/unavailable', 4, { workOrderId: order().id, candidateDigest: digest, round: 1,
+      reason: 'Foreman output exceeded maxOutputTokens reservation (finish reason: max-tokens)',
+      record: record({ outcome: 'unavailable', assessment: undefined, unavailableReason: 'Foreman output exceeded maxOutputTokens reservation (finish reason: max-tokens)' }) as never })])
+    const planReview = readFusionStatus(store, PARENT).task!.planReview!
+    expect(planReview.status).toBe('unavailable')
+    // The reason is the failure text; the candidate and the model's raw output stay out.
+    expect(planReview.unavailableReason).toContain('max-tokens')
+    expect(JSON.stringify(readFusionStatus(store, PARENT))).not.toContain('candidateDigest')
   })
 })

@@ -5,14 +5,15 @@ import type { Context } from '@deepseek-ai/cordis'
 import { installModelSelection } from '@deepseek-ai/dsh-agent'
 import { createUserMessage, isAgentLoopRequest, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import { SessionId, type Session } from '@deepseek-ai/dsh-session'
-import { TaskId } from '../contracts.js'
-import type { PhysicalRoute } from '../contracts.js'
+import { TaskId, type Digest, type PairProfile, type PhysicalRoute, type Role } from '../contracts.js'
 import { digestOf } from '../digest.js'
 import { FusionCoordinator } from '../host/coordinator.js'
 import { NativeRequestBudget } from '../host/native-budget.js'
 import { nativeRequestAgent } from '../host/native-request.js'
 import { observeNativeUsage } from '../host/native-usage.js'
 import type { NativeUsageRecord } from '../host/native-usage.js'
+import type { AuxiliaryRequest } from '../host/native-auxiliary.js'
+import type { GenerateOptions } from '@deepseek-ai/dsh-llm'
 import { nativeShellTool } from '../host/shell.js'
 import { snapshotWorkspace } from '../host/workspace.js'
 import type { ResolvedProfile } from '../profile/resolve.js'
@@ -20,6 +21,86 @@ import { profileRoutes } from '../profile/compactor.js'
 import { SqliteFusionStore } from '../task/sqlite-store.js'
 import { NaiveCoordinator, naivePrompts } from './naive.js'
 import { resolveBenchmarkOutputLimits, type BenchmarkOutputLimits } from './output-limits.js'
+
+export type ForemanManifest =
+  | { condition: 'off' }
+  | {
+      condition: 'on'
+      route: PhysicalRoute
+      maxOutputTokens: number
+      timeoutMs: number
+    }
+
+/**
+ * The Foreman condition one benchmark variant actually ran under.
+ *
+ * Only the `fusion` variant mounts a coordinator, and therefore only it can ever call the
+ * reviewer: a solo Lead, solo Worker, self-review or naive variant has no plan-review seam at
+ * all. Reporting the profile's reviewer settings there would claim an experiment arm that was
+ * never run, so those variants record `off` regardless of what the profile holds. For `fusion`
+ * the only two arms are a configured Foreman, which reviews every candidate plan, and none.
+ */
+export function projectForemanManifest(profile: PairProfile,
+  variant: 'lead_only' | 'worker_only' | 'worker_selfreview' | 'naive' | 'fusion' = 'fusion'): ForemanManifest {
+  if (variant !== 'fusion' || !profile.foreman) return { condition: 'off' as const }
+  return {
+    condition: 'on',
+    route: profile.foreman.route,
+    maxOutputTokens: profile.foreman.maxOutputTokens,
+    timeoutMs: profile.foreman.timeoutMs,
+  }
+}
+
+export interface ForemanGuardOwner {
+  readonly binding: {
+    readonly taskId: TaskId
+    readonly sessionId: string
+    readonly profile: { readonly digest: Digest }
+  }
+  readonly role: Role
+}
+
+export function validateForemanGuardRequest(
+  request: { provider?: string; model?: string; maxTokens?: number; tools?: unknown[] },
+  profile: PairProfile,
+  tag?: AuxiliaryRequest,
+  owner?: ForemanGuardOwner,
+): void {
+  const foremanConfig = profile.foreman
+  if (!foremanConfig) {
+    throw new Error('Benchmark refuses Foreman call when Foreman is not configured')
+  }
+  if (!tag || tag.purpose !== 'foreman') {
+    throw new Error('Benchmark refuses Foreman call without valid foreman tag')
+  }
+  if (!owner) {
+    throw new Error('Benchmark refuses unowned auxiliary Foreman calls')
+  }
+  if (owner.role !== 'lead') {
+    throw new Error('Benchmark refuses Foreman call from non-lead owner')
+  }
+  if (tag.role !== 'lead') {
+    throw new Error('Benchmark Foreman tag has invalid role')
+  }
+  if (tag.taskId !== owner.binding.taskId) {
+    throw new Error('Benchmark Foreman tag taskId does not match binding')
+  }
+  if (tag.sessionId !== owner.binding.sessionId) {
+    throw new Error('Benchmark Foreman tag sessionId does not match binding')
+  }
+  if (tag.profileDigest !== owner.binding.profile.digest) {
+    throw new Error('Benchmark Foreman tag profileDigest does not match binding')
+  }
+  if (request.provider !== foremanConfig.route.provider || request.model !== foremanConfig.route.model) {
+    throw new Error('Benchmark Foreman request diverged from configured Foreman route')
+  }
+  if (request.maxTokens !== foremanConfig.maxOutputTokens) {
+    throw new Error('Benchmark Foreman request diverged from configured maxOutputTokens')
+  }
+  if (!Array.isArray(request.tools) || request.tools.length !== 0) {
+    throw new Error('Benchmark Foreman request must have empty tools')
+  }
+}
 
 export interface NativeBenchmarkOptions {
   runId: string
@@ -134,19 +215,27 @@ export async function runNativeBenchmark(ctx: Context, options: NativeBenchmarkO
         throw new Error('Benchmark refuses unowned auxiliary model calls')
       }
       naive?.assertReady()
-      if (isAgentLoopRequest(request) && request.purpose === undefined) {
+      const auxiliaryRequest = coordinator?.auxiliary.get(request)
+      if (auxiliaryRequest?.purpose === 'foreman') {
+        const owner = coordinator?.owner(agent)
+        validateForemanGuardRequest(request, profile, auxiliaryRequest, owner)
+      } else if (isAgentLoopRequest(request) && request.purpose === undefined) {
         const requestRole = coordinator?.owner(agent)?.role ?? (agent === parent ? role : 'worker')
         const frozen = outputLimits.roles[requestRole]
         if (request.provider !== frozen.provider || request.model !== frozen.model || request.maxTokens !== frozen.maxTokens) {
           throw new Error(`Benchmark ${requestRole} request diverged from frozen role output limits`)
         }
+      } else {
+        throw new Error('Benchmark refuses unowned auxiliary model calls')
       }
       if (!coordinator) reserve(request, request.maxTokens ?? 0)
       yield* next()
     }, { prepend: true })
+    const foremanManifest = projectForemanManifest(profile, options.variant)
     const frozen = { schemaVersion: 1, runId: options.runId, variant: options.variant, dataKind: options.dataKind,
       startedAt, pluginVersion: options.engineVersion ?? 'unknown', profile, promptsDigest: digestOf(prompts), taskPromptDigest: digestOf(options.prompt),
       initialSnapshot: before, maxRequests: options.maxRequests, timeoutMs: options.timeoutMs, outputLimits,
+      foreman: foremanManifest,
       protocol: { requiredStages: selfReview ? ['implementation', 'self_review'] : ['implementation'],
         selfReviewPromptDigest: selfReview ? digestOf(selfReviewPrompt) : null,
         ...(naive ? { delegationMode: 'fresh-one-shot', rolePromptsDigest: digestOf(naivePrompts),

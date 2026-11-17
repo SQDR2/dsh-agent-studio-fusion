@@ -2,6 +2,7 @@ import LocalSandbox from '@deepseek-ai/dsh-sandbox-local'
 import SandboxPolicy from '@deepseek-ai/dsh-sandbox-policy'
 import { parse as parseYaml } from 'yaml'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { randomUUID } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -49,9 +50,14 @@ import { FUSION_TASK_CONTEXT } from '../src/host/native-task-context.js'
 import { isFusionSourceKind } from '../src/message-source.js'
 import { KEEPALIVE_ATTEMPTS, KEEPALIVE_INTERVAL_MS, KEEPALIVE_PROMPT } from '../src/host/native-keepalive.js'
 import type { KeepaliveClock, KeepaliveRecord } from '../src/host/native-keepalive.js'
+import { WorkOrderId, type PhysicalRoute, type PlanReviewCandidate, type PlanReviewRecord, type RequirementCoverage } from '../src/contracts.js'
+import { candidateDigest, semanticCandidateProjection, type PlanReviewModule, type PlanReviewOutcome } from '../src/plan-review.js'
+import { snapshotWorkspace } from '../src/host/workspace.js'
+import type { SessionBinding } from '../src/host/bindings.js'
 import type { NativeUsageRecord } from '../src/host/native-usage.js'
 import { NativeRequestBudget, authorizeConfiguredPair } from '../src/host/native-budget.js'
 import { readFusionStatus } from '../src/host/status.js'
+import { projectPlanReviewMetrics } from '../src/status.js'
 import { readModelControl } from '../src/host/native-model-control.js'
 import { readHistory } from '../src/host/history.js'
 import { ManualKeepaliveClock } from './fixtures/keepalive-clock.js'
@@ -108,6 +114,8 @@ async function setup(script: Script, workerScript?: Script, options: {
    * adapter still script-drives it: the fixture asserts the ceiling, not agy.
    */
   bridgeTransport?: boolean
+  foreman?: { route?: PhysicalRoute; maxOutputTokens?: number; timeoutMs?: number } | boolean
+  planReview?: (agent: Agent, binding: SessionBinding) => PlanReviewModule
   /**
    * After a bridge dispatch settles, also dispatch the transport's own replay of that step,
    * the way the session's next native card does. Used to prove a replay is never refused.
@@ -238,8 +246,13 @@ async function setup(script: Script, workerScript?: Script, options: {
   const selectionRef = { current: { provider: 'test-native', model: 'ordinary' }, assembled: undefined }
   installModelSelection(parent.ctx, selectionRef)
   const prompts = loadPromptBundle()
+  const foremanConfig = options.foreman
+    ? { route: { provider: 'test-native', model: 'foreman' }, maxOutputTokens: 2048, timeoutMs: 10000,
+      ...(options.foreman === true ? {} : options.foreman) }
+      : undefined
   const profile = completeProfile({ id: 'fusion-auto', version: 'faithful-v1', enabled: true,
     ...(options.keepalive ? { cacheKeepalive: options.keepalive } : {}),
+    ...(foremanConfig ? { foreman: foremanConfig } : {}),
     context: {
       lead: options.outputTokens ? { reserveOutputTokens: options.outputTokens.lead } : {},
       worker: { ...(options.workerTarget ? { targetInputTokens: options.workerTarget } : {}),
@@ -257,6 +270,7 @@ async function setup(script: Script, workerScript?: Script, options: {
     workerTools: [...(options.jobs ? [shellTool, 'job_output', 'job_kill'] : [shellTool]), ...(options.files ? ['read', 'write', 'edit'] : [])], keepaliveClock: options.clock,
     commandMaxSeconds: options.commandMaxSeconds,
     maxWorkerSteps: options.maxWorkerSteps, maxReworkRounds: options.maxReworkRounds,
+    ...(options.planReview ? { planReview: options.planReview } : {}),
     authorizeRequest: () => { /* scripted in-process adapter: no upstream or bill */ },
     reserveRequest: request => { budget && budget.reserve(request, request.maxTokens!) } })
   cleanups.push(async () => { await coordinator.close(); await ctx.fiber.dispose(); store.close(); rmSync(root, { recursive: true, force: true }) })
@@ -277,12 +291,17 @@ const edit = (id = 'edit') => toolCallResponse(id, shellTool, { command: shellCo
 const report = (id = 'report') => toolCallResponse(id, 'fusion_submit_result', { summary: 'Corrected add in calc.py.', status: 'completed', unresolved: [] })
 const review = (decision: 'accept' | 'rework') => toolCallResponse(`review-${decision}`, 'fusion_review_result', { decision, reason: decision === 'accept' ? 'The implementation adds both inputs and the frozen native test passed.' : 'The candidate needs a further implementation pass.' })
 /** enforced-v3 handoff: the user's hard requirement quoted verbatim ('addition' occurs in the v3 test prompts). */
-const delegateV3 = (block = true, requirements = ['addition']) => toolCallResponse('delegate', 'fusion_delegate', {
+const delegateV3 = (block = true, requirements = ['addition'], coverage?: RequirementCoverage[]) => toolCallResponse('delegate', 'fusion_delegate', {
   block, requirements,
   goal: 'Correct addition', brief: 'Fix calc.py add and preserve the test. Submit a report after implementing.',
   constraints: ['Do not change test_calc.py'], allowedPaths: ['calc.py'],
   checks: [{ id: 'addition', description: 'Existing addition test passes', command: py('python3 -B -m unittest -v test_calc'),
     kind: 'test', parser: 'unittest', definitionPaths: ['test_calc.py'] }],
+  requirementCoverage: coverage ?? (requirements.length ? requirements.map((_, i) => ({
+    requirementIndex: i,
+    implementationNotes: [`Satisfy requirement ${i}`],
+    acceptanceIds: ['addition'],
+  })) : []),
 })
 const acceptV3 = (id = 'review-accept') => toolCallResponse(id, 'fusion_review_result', { decision: 'accept',
   reason: 'The implementation adds both inputs and the frozen native test passed.',
@@ -710,7 +729,7 @@ describe('read-only exploration before a Lead plan', () => {
       goal: 'Fix addition', brief: 'Use addition in calc.py.', constraints: [], allowedPaths: ['calc.py'],
       checks: [{ id: 'addition', description: 'Addition works', command: py('python3 -B -m unittest -v test_calc'), kind: 'test', parser: 'unittest', definitionPaths: ['test_calc.py'] }],
     })
-    const { parent, coordinator, taskId } = await setup([
+    const { parent, coordinator, store, taskId } = await setup([
       explore(false), delegate(), toolCallResponse('wait-exploration', 'fusion_wait', {}), next, review('accept'), textResponse('Done.'),
     ], [findings(), edit(), report()])
     parent.followup(createUserMessage({ source: { kind: 'user' },  content: [{ type: 'text', text: 'Explore then fix.' }] }))
@@ -1929,6 +1948,7 @@ describe('retained runtime across handoffs', () => {
     constraints: ['Do not change test_calc.py'], allowedPaths: ['calc.py'],
     checks: [{ id: 'addition', description: 'Existing addition test passes', command: py('python3 -B -m unittest -v test_calc'),
       kind: 'test', parser: 'unittest', definitionPaths: ['test_calc.py'] }],
+    requirementCoverage: [{ requirementIndex: 0, implementationNotes: ['Fix addition with runtime'], acceptanceIds: ['addition'] }],
   })
 
   it('lands the report while the declared job runs, and records it for the next handoff', async () => {
@@ -2345,7 +2365,7 @@ describe('complete native Fusion workflow', () => {
       if (!block || block.role !== 'tool' || block.isError) throw new Error(`Missing successful native result: ${id}`)
       return JSON.parse(block.content.filter(part => part.type === 'text').map(part => part.text).join(''))
     }
-    const { parent, coordinator, taskId } = await setup([
+    const { parent, coordinator, store, taskId } = await setup([
       delegate(), edit(), report(),
       request => toolCallResponse('read-receipt', 'fusion_read_evidence', { id: result(request, 'delegate').report.coverage[0].evidenceIds[0] }),
       request => {
@@ -3069,7 +3089,7 @@ describe('complete native Fusion workflow', () => {
   })
 
   it('refuses an accepting review when native acceptance checks failed', async () => {
-    const { parent, coordinator, taskId } = await setup([delegate(), report(), review('accept'), textResponse('The task remains incomplete.')])
+    const { parent, coordinator, store, taskId } = await setup([delegate(), report(), review('accept'), textResponse('The task remains incomplete.')])
     parent.followup(createUserMessage({ source: { kind: 'user' },  content: [{ type: 'text', text: 'Fix addition and verify it.' }] }))
     await parent.whenIdle()
     expect(coordinator.state(taskId).phase).not.toBe('COMPLETED')
@@ -3703,7 +3723,7 @@ describe('Lead scope expansion', () => {
     // Rewrites an original assertion line (still passing): the gate must see the delegation-time bytes.
     const rewriteTest = toolCallResponse('rewrite-test', shellTool, { command: `${python} -c "import pathlib; p = pathlib.Path('test_calc.py'); p.write_text(p.read_text().replace('add(2, 3)', 'add(3, 2)'))"`,
       description: 'Rewrite the existing assertion' })
-    const { parent, coordinator, taskId } = await setup([
+    const { parent, coordinator, store, taskId } = await setup([
       narrow, needsDecision, widen(['test_calc.py']), review('accept'), textResponse('Refused until named.'),
     ], [edit(), report(), rewriteTest, report('re-report')])
     parent.followup(createUserMessage({ source: { kind: 'user' },  content: [{ type: 'text', text: 'Correct addition and cover zero.' }] }))
@@ -3786,7 +3806,7 @@ describe('review-only delegation', () => {
       goal: 'Correct addition', brief: 'Fix calc.py add. There is no runnable acceptance command for this change.',
       constraints: ['Do not change test_calc.py'], allowedPaths: ['calc.py'], checks: [],
     })
-    const { parent, coordinator, taskId } = await setup([reviewOnly, review('accept'), textResponse('Reviewed the diff; no automated checks ran.')], [edit(), report()])
+    const { parent, coordinator, store, taskId } = await setup([reviewOnly, review('accept'), textResponse('Reviewed the diff; no automated checks ran.')], [edit(), report()])
     parent.followup(createUserMessage({ source: { kind: 'user' },  content: [{ type: 'text', text: 'Correct addition.' }] }))
     await parent.whenIdle()
     expect(coordinator.state(taskId), JSON.stringify(toolResults(parent))).toMatchObject({ phase: 'COMPLETED' })
@@ -3852,7 +3872,7 @@ describe('model-like native execution', () => {
   it('accepts a minimal delegation with only a command per check', async () => {
     const minimal = toolCallResponse('delegate-minimal', 'fusion_delegate', { goal: 'Correct addition', brief: 'Fix calc.py add.',
       allowedPaths: ['calc.py'], checks: [{ command: py('python3 -B -m unittest -v test_calc'), parser: 'unittest' }] })
-    const { parent, coordinator, taskId } = await setup([minimal, review('accept'), textResponse('Verified.')], [edit(), report()], { modelLike: true })
+    const { parent, coordinator, store, taskId } = await setup([minimal, review('accept'), textResponse('Verified.')], [edit(), report()], { modelLike: true })
     parent.followup(createUserMessage({ source: { kind: 'user' },  content: [{ type: 'text', text: 'Delegate the addition fix.' }] }))
     await parent.whenIdle()
     expect(coordinator.state(taskId), JSON.stringify(toolResults(parent))).toMatchObject({ phase: 'COMPLETED', verification: 'verified' })
@@ -4529,6 +4549,7 @@ describe('Sidekick authority boundary', () => {
     constraints: ['Do not change test_calc.py'], allowedPaths: ['calc.py'],
     checks: [{ id: 'addition', description: 'Existing addition test passes', command: py('python3 -B -m unittest -v test_calc'),
       kind: 'test', parser: 'unittest', definitionPaths: ['test_calc.py'] }],
+    requirementCoverage: [{ requirementIndex: 0, implementationNotes: ['Fix addition under authority'], acceptanceIds: ['addition'] }],
   })
 
   it('refuses a commit and a push the work order did not grant, and the order still completes', async () => {
@@ -4561,12 +4582,35 @@ describe('Sidekick authority boundary', () => {
     expect(JSON.stringify(coordinator.state(taskId).currentWorkOrder)).toContain('commit')
     expect(state, JSON.stringify(toolResults(parent))).toMatchObject({ phase: 'COMPLETED' })
   })
+
+  it('grants a publication after the report, so a refused action finishes in the same order', async () => {
+    // The order was frozen with no authority (the user asked for the commit only
+    // once the change was verified). Before the grant existed there was no way
+    // out: fusion_delegate refuses while a Worker owns the task, the Lead's own
+    // session is read-only, and fusion_rework could not grant.
+    const grant = toolCallResponse('grant', 'fusion_rework', {
+      authority: ['commit'], block: true, feedback: 'The user asked for the commit now that the change is verified. Run it.',
+    })
+    const { parent, coordinator, store, ctx, taskId } = await setup([delegateV3(), grant, acceptV3()],
+      [edit(), publication('commit-refused', 'git commit -m x'), report(), publication('commit', 'git commit -m x'), report('report-2')], options)
+    parent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Correct addition.' }] }))
+    await parent.whenIdle()
+    const state = coordinator.state(taskId)
+    const results = await persistedToolResults(ctx, state.acceptedChild!)
+    const outcome = (id: string) => results.find(result => result.message.role === 'tool' && result.message.toolCallId === id)!.message
+    expect(JSON.stringify(outcome('commit-refused')), 'refused before the grant').toContain('FUSION_WORKER_AUTHORITY_DENIED')
+    expect(JSON.stringify(outcome('commit')), 'allowed after the grant').not.toContain('FUSION_WORKER_AUTHORITY_DENIED')
+    // The grant is part of the recorded order, not a momentary permission.
+    expect(coordinator.state(taskId).currentWorkOrder?.authority).toEqual(['commit'])
+    expect(store.events(taskId).map(event => event.type)).toContain('work-order/authority-granted')
+    expect(state, JSON.stringify(toolResults(parent))).toMatchObject({ phase: 'COMPLETED' })
+  })
 })
 
 describe('enforced-v3 delegation after Lead inspection', () => {
   const options = { modelLike: true, enforcedWorkflow: 'enforced-v3', files: true, sandbox: true } as const
   it('delegates after a foreground read-only Lead command', async () => {
-    const { parent, coordinator, taskId } = await setup([
+    const { parent, coordinator, store, taskId } = await setup([
       toolCallResponse('inspect', shellTool, { command: 'ls', description: 'list' }), delegateV3(), acceptV3(), textResponse('Done.'),
     ], [edit(), report()], options)
     parent.followup(createUserMessage({ source: { kind: 'user' },  content: [{ type: 'text', text: 'Correct addition.' }] }))
@@ -4575,7 +4619,7 @@ describe('enforced-v3 delegation after Lead inspection', () => {
   })
 
   it('refuses a background Lead command so it cannot block the handoff (study failure A)', async () => {
-    const { parent, coordinator, taskId } = await setup([
+    const { parent, coordinator, store, taskId } = await setup([
       toolCallResponse('inspect-bg', shellTool, { command: 'sleep 1; ls', description: 'list', run_in_background: true }), delegateV3(), acceptV3(), textResponse('Done.'),
     ], [edit(), report()], { ...options, jobs: true })
     parent.followup(createUserMessage({ source: { kind: 'user' },  content: [{ type: 'text', text: 'Correct addition.' }] }))
@@ -4655,7 +4699,7 @@ describe('enforced-v3 delegation in the same step as Lead inspection', () => {
 
   it('does not refuse a delegation issued alongside a read-only Lead command', async () => {
     const step = parallelCalls(toolCallResponse('inspect', shellTool, { command: 'sleep 1; ls', description: 'list' }), delegateV3())
-    const { parent, coordinator, taskId } = await setup([step, acceptV3(), textResponse('Done.')], [edit(), report()], options)
+    const { parent, coordinator, store, taskId } = await setup([step, acceptV3(), textResponse('Done.')], [edit(), report()], options)
     parent.followup(createUserMessage({ source: { kind: 'user' },  content: [{ type: 'text', text: 'Correct addition.' }] }))
     await parent.whenIdle()
     const results = toolResults(parent).map(result => JSON.stringify(result.message.content))
@@ -4669,7 +4713,13 @@ describe('enforced-v3 daily-driver safeguards (study 2026-09-26)', () => {
   const results = (parent: Awaited<ReturnType<typeof setup>>['parent']) => JSON.stringify(toolResults(parent))
   const withChecks = (checks: unknown[], requirements = ['addition']) => toolCallResponse('delegate', 'fusion_delegate', {
     requirements, goal: 'Correct addition', brief: 'Fix calc.py add. Submit a report after implementing.',
-    constraints: [], allowedPaths: ['calc.py'], checks })
+    constraints: [], allowedPaths: ['calc.py'], checks,
+    requirementCoverage: requirements.length ? requirements.map((_, i) => ({
+      requirementIndex: i,
+      implementationNotes: [`Satisfy requirement ${i}`],
+      acceptanceIds: ['addition'],
+    })) : [],
+  })
   const unit = { id: 'addition', command: py('python3 -B -m unittest -v test_calc'), kind: 'test', parser: 'unittest', definitionPaths: ['test_calc.py'] }
   const suiteScript = process.platform === 'win32' ? 'suite.ps1' : 'suite.sh'
   const suite = { id: 'suite', command: shellCommand('sh suite.sh', 'pwsh -NoProfile -File suite.ps1'), parser: 'pytest', baseline: 'no-new-failures' }
@@ -4688,13 +4738,15 @@ describe('enforced-v3 daily-driver safeguards (study 2026-09-26)', () => {
   it('makes the Lead name an existing test the Worker rewrote before accepting (canvasapi)', async () => {
     const checks = [{ id: 'addition', command: py('python3 -B -m unittest -v test_calc'), kind: 'test', parser: 'unittest' }]
     const handoff = toolCallResponse('delegate', 'fusion_delegate', { requirements: ['addition'], goal: 'Correct addition', brief: 'Fix add.',
-      constraints: [], allowedPaths: ['calc.py', 'test_calc.py'], checks })
+      constraints: [], allowedPaths: ['calc.py', 'test_calc.py'], checks,
+      requirementCoverage: [{ requirementIndex: 0, implementationNotes: ['Fix add'], acceptanceIds: ['addition'] }],
+    })
     const rewrite = toolCallResponse('rewrite', shellTool, { description: 'Fix add and weaken its test', command:
       shellCommand("printf 'def add(a, b):\\n    return a + b\\n' > calc.py && sed -i.bak 's/add(2, 3), 5/add(2, 3), add(2, 3)/' test_calc.py && rm test_calc.py.bak", "[IO.File]::WriteAllText((Join-Path $PWD 'calc.py'), \"def add(a, b):`n    return a + b`n\"); (Get-Content (Join-Path $PWD 'test_calc.py') -Raw).Replace('add(2, 3), 5','add(2, 3), add(2, 3)') | Set-Content (Join-Path $PWD 'test_calc.py') -NoNewline") })
     const named = toolCallResponse('accept-named', 'fusion_review_result', { decision: 'accept',
       reason: 'test_calc.py assertion changed; confirmed it still asserts add(2, 3) is computed by add, calc.py fixed and unittest passes.',
       requirements: [{ index: 1, met: true, evidence: 'calc.py add returns a + b; test_calc passed natively' }] })
-    const { parent, coordinator, taskId } = await setup([handoff, acceptV3(), named, textResponse('Done.')], [rewrite, report()], options)
+    const { parent, coordinator, store, taskId } = await setup([handoff, acceptV3(), named, textResponse('Done.')], [rewrite, report()], options)
     parent.followup(createUserMessage({ source: { kind: 'user' },  content: [{ type: 'text', text: 'Correct addition.' }] }))
     await parent.whenIdle()
     expect(results(parent)).toContain('rewrittenTests')
@@ -4705,10 +4757,12 @@ describe('enforced-v3 daily-driver safeguards (study 2026-09-26)', () => {
   it('does not flag tests that were only extended', async () => {
     const checks = [{ id: 'addition', command: py('python3 -B -m unittest -v test_calc'), kind: 'test', parser: 'unittest' }]
     const handoff = toolCallResponse('delegate', 'fusion_delegate', { requirements: ['addition'], goal: 'Correct addition', brief: 'Fix add.',
-      constraints: [], allowedPaths: ['calc.py', 'test_calc.py'], checks })
+      constraints: [], allowedPaths: ['calc.py', 'test_calc.py'], checks,
+      requirementCoverage: [{ requirementIndex: 0, implementationNotes: ['Fix add'], acceptanceIds: ['addition'] }],
+    })
     const extend = toolCallResponse('extend', shellTool, { description: 'Fix add and add a test', command:
       shellCommand("printf 'def add(a, b):\\n    return a + b\\n' > calc.py && printf '    def test_zero(self):\\n        self.assertEqual(add(0, 0), 0)\\n' >> test_calc.py", "[IO.File]::WriteAllText((Join-Path $PWD 'calc.py'), \"def add(a, b):`n    return a + b`n\"); [IO.File]::AppendAllText((Join-Path $PWD 'test_calc.py'), \"    def test_zero(self):`n        self.assertEqual(add(0, 0), 0)`n\")") })
-    const { parent, coordinator, taskId } = await setup([handoff, acceptV3(), textResponse('Done.')], [extend, report()], options)
+    const { parent, coordinator, store, taskId } = await setup([handoff, acceptV3(), textResponse('Done.')], [extend, report()], options)
     parent.followup(createUserMessage({ source: { kind: 'user' },  content: [{ type: 'text', text: 'Correct addition.' }] }))
     await parent.whenIdle()
     expect(results(parent)).not.toContain('rewrittenTests')
@@ -4754,7 +4808,7 @@ describe('enforced-v3 daily-driver safeguards (study 2026-09-26)', () => {
     const quote = 'the docstring must say `Adds two numbers`'
     const spanAware = toolCallResponse('review-accept-3', 'fusion_review_result', { decision: 'accept', reason: 'Addition is fixed; the required docstring literal was checked explicitly.',
       requirements: [{ index: 1, met: true, evidence: 'calc.py: reviewer confirmed the literal Adds two numbers requirement against the diff' }] })
-    const { parent, coordinator, taskId } = await setup([delegateV3(true, [quote]), acceptV3(), spanAware, textResponse('Done.')], [edit(), report()], options)
+    const { parent, coordinator, store, taskId } = await setup([delegateV3(true, [quote]), acceptV3(), spanAware, textResponse('Done.')], [edit(), report()], options)
     parent.followup(createUserMessage({ source: { kind: 'user' },  content: [{ type: 'text', text: `Correct addition; ${quote}.` }] }))
     await parent.whenIdle()
     expect(results(parent)).toContain('literalSpansMissing')
@@ -5088,5 +5142,1386 @@ describe('ACP Sidekick bridge authority over the live coordinator', () => {
     const stranger = (await ctx.agents.create({ sessionId: SessionId('session-stranger'),
       meta: { cwd: workspace }, agentOptions: { provider: 'test-native', model: 'ordinary' } })).agent
     expect(coordinator.acpWorkerFacts(stranger)).toBeUndefined()
+  })
+})
+
+describe('rework metric counts real rework handoffs', () => {
+  it('records one rework round for a real fusion_rework while the requirement revision stays 1, and zero without one', async () => {
+    const metricsFor = (store: Awaited<ReturnType<typeof setup>>['store'], taskId: string) =>
+      projectPlanReviewMetrics(store.events(taskId as never))
+
+    // A task that never reworks: the Lead reviews and accepts the first report.
+    const clean = await setup([delegate(), report(), review('accept'), textResponse('Done.')], [edit(), report()])
+    clean.parent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Fix addition.' }] }))
+    await clean.parent.whenIdle()
+    expect(clean.coordinator.state(clean.taskId)).toMatchObject({ phase: 'COMPLETED' })
+    expect(metricsFor(clean.store, clean.taskId).reworkRounds).toBe(0)
+
+    // A task the Lead sends back once. The WorkOrder revision tracks the user's requirements
+    // and stays 1, so only the explicit rework event can report the round.
+    const reworked = await setup([
+      delegate(), report('bad-implementation'), review('rework'),
+      toolCallResponse('fix-it', 'fusion_rework', { feedback: 'The test failed. Correct subtraction to addition.' }),
+      report('fixed-implementation'), review('accept'), textResponse('Done.'),
+    ], [edit(), report('bad-implementation'), edit(), report('fixed-implementation')])
+    reworked.parent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Fix addition.' }] }))
+    await reworked.parent.whenIdle()
+    expect(reworked.coordinator.state(reworked.taskId)).toMatchObject({ phase: 'COMPLETED' })
+    expect(reworked.coordinator.state(reworked.taskId).currentWorkOrder?.revision).toBe(1)
+    const metrics = metricsFor(reworked.store, reworked.taskId)
+    expect(metrics.reworkRounds).toBe(1)
+    // Rework and the reviewer's own second round stay independent counters.
+    expect(metrics.planReviewRevisions).toBe(0)
+    const events = reworked.store.events(reworked.taskId).filter(event => event.type === 'worker/rework-requested')
+    expect(events).toHaveLength(1)
+    expect((events[0]!.payload as { ordinal: number }).ordinal).toBe(1)
+  })
+})
+
+describe('plan review gate binds a disposition to the reviewed candidate', () => {
+  const options = { modelLike: true, enforcedWorkflow: 'enforced-v3', files: true, sandbox: true } as const
+  const oneFinding = (digest: string) => ({
+    schemaVersion: 1 as const, candidateDigest: digest, verdict: 'concerns' as const,
+    acceptanceAudit: {
+      uncoveredRequirements: [{ id: 'finding-1', category: 'acceptance-gap' as const, severity: 'blocking-concern' as const,
+        requirementIndexes: [0], decisionIndexes: [], message: 'no oracle', suggestedCorrection: 'add one' }],
+      weakOracles: [], falseGreenScenarios: [],
+    },
+    decisionChallenges: { unsupportedDecisions: [], counterexamples: [], unresolvedCriticalAssumptions: [] },
+    materialAmbiguities: [],
+  })
+  const delegate = (id: string, patch: Record<string, unknown> = {}) => toolCallResponse(id, 'fusion_delegate', {
+    block: true,
+    requirements: ['addition'],
+    goal: 'Correct addition',
+    brief: 'Fix calc.py add and preserve the test. Submit a report after implementing.',
+    constraints: ['Do not change test_calc.py'],
+    allowedPaths: ['calc.py'],
+    checks: [{
+      id: 'addition',
+      description: 'Existing addition test passes',
+      command: py('python3 -B -m unittest -v test_calc'),
+      kind: 'test',
+      parser: 'unittest',
+      definitionPaths: ['test_calc.py'],
+    }],
+    requirementCoverage: [{ requirementIndex: 0, implementationNotes: ['Satisfy requirement 0'], acceptanceIds: ['addition'] }],
+    ...patch,
+  })
+
+  it('rejects an all-override that also changes the candidate, and dispatches it unchanged', async () => {
+    let calls = 0
+    const { parent, coordinator, store, taskId } = await setup(
+      [
+        delegate('delegate-1'),
+        // Same findings, but the brief changed: the reviewer never saw this plan, so an
+        // override cannot stand for it.
+        delegate('delegate-override-changed', {
+          brief: 'A different brief the reviewer never saw.',
+          foremanDispositions: [{ findingId: 'finding-1', action: 'overridden', reason: 'I disagree' }],
+        }),
+        // Unchanged candidate: the override is about the reviewed plan, so it may dispatch.
+        delegate('delegate-override-same', {
+          foremanDispositions: [{ findingId: 'finding-1', action: 'overridden', reason: 'I disagree' }],
+        }),
+        acceptV3(),
+        textResponse('Verified.'),
+      ],
+      [edit(), report()],
+      {
+        ...options,
+        foreman: true,
+        planReview: () => ({
+          review: async candidate => {
+            calls++
+            return { kind: 'concerns', assessment: oneFinding(candidate.order.candidateDigest!) } as never
+          },
+        }),
+      },
+    )
+    parent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Correct addition.' }] }))
+    await parent.whenIdle()
+
+    // Only the first round-1 review ran: the changed candidate was refused before any
+    // resolution, and the unchanged one dispatched on the recorded override.
+    expect(calls).toBe(1)
+    const messages = JSON.stringify(toolResults(parent))
+    expect(messages).toContain('An override applies only to the reviewed candidate.')
+    const prepared = store.events(taskId).filter(event => event.type === 'work-order/prepared')
+    expect(prepared).toHaveLength(1)
+    // The dispatched order is the reviewed one, not the reworded candidate.
+    expect((prepared[0]!.payload as { order: { goal: string } }).order.goal).toBe('Correct addition')
+    expect(coordinator.state(taskId)).toMatchObject({ phase: 'COMPLETED', verification: 'verified' })
+    const resolutions = store.events(taskId).filter(event => event.type === 'plan-review/resolved')
+    expect(resolutions).toHaveLength(1)
+  })
+
+  it('rejects a changed candidate after round 2 concerns even when every finding is overridden', async () => {
+    let calls = 0
+    const { parent, coordinator, store, taskId } = await setup(
+      [
+        delegate('delegate-r1'),
+        // Round 1 accepted the finding and revised the brief, so round 2 reviews the revision.
+        delegate('delegate-r1-accepted', {
+          brief: 'Revised brief for round 2.',
+          foremanDispositions: [{ findingId: 'finding-1', action: 'accepted', changeSummary: 'Strengthened the check' }],
+        }),
+        // Final round: overriding everything is allowed, but only for the reviewed candidate.
+        delegate('delegate-r2-changed', {
+          brief: 'Yet another brief after the final review.',
+          foremanDispositions: [{ findingId: 'finding-1', action: 'overridden', reason: 'I disagree' }],
+        }),
+        delegate('delegate-r2-same', {
+          brief: 'Revised brief for round 2.',
+          foremanDispositions: [{ findingId: 'finding-1', action: 'overridden', reason: 'I disagree' }],
+        }),
+        acceptV3(),
+        textResponse('Verified.'),
+      ],
+      [edit(), report()],
+      {
+        ...options,
+        foreman: true,
+        planReview: () => ({
+          review: async candidate => {
+            calls++
+            return { kind: 'concerns', assessment: oneFinding(candidate.order.candidateDigest!) } as never
+          },
+        }),
+      },
+    )
+    parent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Correct addition.' }] }))
+    await parent.whenIdle()
+
+    // round 1 for the original candidate, then round 2 for the revision.
+    expect(calls).toBe(2)
+    const messages = JSON.stringify(toolResults(parent))
+    expect(messages).toContain('An override applies only to the reviewed candidate.')
+    const prepared = store.events(taskId).filter(event => event.type === 'work-order/prepared')
+    expect(prepared).toHaveLength(1)
+    expect(coordinator.state(taskId)).toMatchObject({ phase: 'COMPLETED', verification: 'verified' })
+  })
+})
+
+describe('plan review candidate construction and deterministic lint in coordinator', () => {
+  const options = { modelLike: true, enforcedWorkflow: 'enforced-v3', files: true, sandbox: true } as const
+
+  it('persists decisions, uncertainties, requirementCoverage, and candidateDigest on the work order', async () => {
+    const delegateWithCandidate = toolCallResponse('delegate', 'fusion_delegate', {
+      block: true,
+      requirements: ['addition'],
+      goal: 'Correct addition',
+      brief: 'Fix calc.py add and preserve the test.',
+      constraints: ['Do not change test_calc.py'],
+      allowedPaths: ['calc.py'],
+      checks: [{
+        id: 'addition',
+        description: 'Existing addition test passes',
+        command: py('python3 -B -m unittest -v test_calc'),
+        kind: 'test',
+        parser: 'unittest',
+        definitionPaths: ['test_calc.py'],
+      }],
+      decisions: ['Use functional addition'],
+      uncertainties: ['Python version compatibility'],
+      requirementCoverage: [{
+        requirementIndex: 0,
+        implementationNotes: ['Implement a + b'],
+        acceptanceIds: ['addition'],
+      }],
+    })
+
+    const { parent, coordinator, store, taskId } = await setup(
+      [delegateWithCandidate, acceptV3(), textResponse('Verified.')],
+      [edit(), report()],
+      options,
+    )
+    parent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Correct addition.' }] }))
+    await parent.whenIdle()
+
+    const state = coordinator.state(taskId)
+    expect(state).toMatchObject({ phase: 'COMPLETED', verification: 'verified' })
+    const order = state.currentWorkOrder!
+    expect(order.decisions).toHaveLength(1)
+    expect(order.decisions[0]!.text).toBe('Use functional addition')
+    expect(order.decisions[0]!.source).toBeDefined()
+    expect(order.uncertainties).toEqual(['Python version compatibility'])
+    expect(order.requirementCoverage).toEqual([{
+      requirementIndex: 0,
+      implementationNotes: ['Implement a + b'],
+      acceptanceIds: ['addition'],
+    }])
+    expect(order.candidateDigest).toBeDefined()
+    expect(order.candidateDigest).toMatch(/^[0-9a-f]{64}$/)
+  })
+
+  it('rejects candidate with lint issues before transport dispatch or work-order/prepared', async () => {
+    const invalidDelegate = toolCallResponse('delegate', 'fusion_delegate', {
+      block: true,
+      requirements: ['addition'],
+      goal: 'Correct addition',
+      brief: 'Fix calc.py add and preserve the test.',
+      constraints: ['Do not change test_calc.py'],
+      allowedPaths: ['calc.py'],
+      checks: [{
+        id: 'addition',
+        description: 'Existing addition test passes',
+        command: py('python3 -B -m unittest -v test_calc'),
+        kind: 'test',
+        parser: 'unittest',
+        definitionPaths: ['test_calc.py'],
+      }],
+      requirementCoverage: [{
+        requirementIndex: 0,
+        implementationNotes: ['Implement a + b'],
+        acceptanceIds: ['unknown-acceptance-id'],
+      }],
+    })
+
+    const { parent, coordinator, store, taskId } = await setup(
+      [invalidDelegate, delegateV3(), acceptV3(), textResponse('Verified.')],
+      [edit(), report()],
+      options,
+    )
+    parent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Correct addition.' }] }))
+    await parent.whenIdle()
+
+    // First attempt must have failed with lint rejection
+    const errors = toolResults(parent).map(result => result.message).filter(block => block.role === 'tool' && block.isError)
+    expect(errors.length).toBeGreaterThanOrEqual(1)
+    expect(JSON.stringify(errors)).toContain('Plan review candidate rejected')
+    expect(JSON.stringify(errors)).toContain('Unknown acceptanceId')
+
+    // Only the second (corrected) delegate caused work-order/prepared
+    const preparedEvents = store.events(taskId).filter(event => event.type === 'work-order/prepared')
+    expect(preparedEvents).toHaveLength(1)
+
+    // Task eventually completed with the corrected handoff
+    expect(coordinator.state(taskId)).toMatchObject({ phase: 'COMPLETED', verification: 'verified' })
+  })
+})
+
+describe('plan review in coordinator', () => {
+  const options = { modelLike: true, enforcedWorkflow: 'enforced-v3', files: true, sandbox: true } as const
+
+  it('does not invoke plan review when foreman is not configured', async () => {
+    let reviewCalled = false
+    const { parent, coordinator, store, taskId } = await setup(
+      [delegateV3(), acceptV3(), textResponse('Verified.')],
+      [edit(), report()],
+      {
+        ...options,
+        planReview: () => ({
+          review: async () => {
+            reviewCalled = true
+            return {
+              kind: 'ready',
+              assessment: {
+                schemaVersion: 1,
+                candidateDigest: '' as any,
+                verdict: 'ready',
+                acceptanceAudit: { uncoveredRequirements: [], weakOracles: [], falseGreenScenarios: [] },
+                decisionChallenges: { unsupportedDecisions: [], counterexamples: [], unresolvedCriticalAssumptions: [] },
+                materialAmbiguities: [],
+              },
+            }
+          },
+        }),
+      },
+    )
+    parent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Correct addition.' }] }))
+    await parent.whenIdle()
+
+    expect(reviewCalled).toBe(false)
+    const reviewEvents = store.events(taskId).filter(e => e.type.startsWith('plan-review/'))
+    expect(reviewEvents).toHaveLength(0)
+    expect(coordinator.state(taskId)).toMatchObject({ phase: 'COMPLETED', verification: 'verified' })
+  })
+
+  it('records plan-review/completed and dispatches worker when foreman assessment is ready', async () => {
+    let reviewCalled = false
+    const { parent, coordinator, store, taskId } = await setup(
+      [delegateV3(), acceptV3(), textResponse('Verified.')],
+      [edit(), report()],
+      {
+        ...options,
+        foreman: true,
+        planReview: () => ({
+          review: async candidate => {
+            reviewCalled = true
+            return {
+              kind: 'ready',
+              assessment: {
+                schemaVersion: 1,
+                candidateDigest: candidate.order.candidateDigest!,
+                verdict: 'ready',
+                acceptanceAudit: { uncoveredRequirements: [], weakOracles: [], falseGreenScenarios: [] },
+                decisionChallenges: { unsupportedDecisions: [], counterexamples: [], unresolvedCriticalAssumptions: [] },
+                materialAmbiguities: [],
+              },
+            }
+          },
+        }),
+      },
+    )
+    parent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Correct addition.' }] }))
+    await parent.whenIdle()
+
+    expect(reviewCalled).toBe(true)
+    const events = store.events(taskId)
+    const requested = events.find(e => e.type === 'plan-review/requested')
+    const completed = events.find(e => e.type === 'plan-review/completed')
+    expect(requested).toBeDefined()
+    expect(completed).toBeDefined()
+    expect((completed as any).payload.assessment.verdict).toBe('ready')
+
+    const state = coordinator.state(taskId)
+    expect(state.latestPlanReview?.outcome).toBe('assessment')
+    expect(state.latestPlanReview?.assessment?.verdict).toBe('ready')
+    expect(state.planReviews).toHaveLength(1)
+    expect(state.phase).toBe('COMPLETED')
+  })
+
+  it('blocks dispatch on concerns: a configured Foreman has no shadow bypass', async () => {
+    let reviewCalled = false
+    const { parent, coordinator, store, taskId } = await setup(
+      [delegateV3(), textResponse('Acknowledging concerns.')],
+      [edit(), report()],
+      {
+        ...options,
+        foreman: true,
+        planReview: () => ({
+          review: async candidate => {
+            reviewCalled = true
+            return {
+              kind: 'concerns',
+              assessment: {
+                schemaVersion: 1,
+                candidateDigest: candidate.order.candidateDigest!,
+                verdict: 'concerns',
+                acceptanceAudit: {
+                  uncoveredRequirements: [{
+                    id: 'shadow-gap',
+                    category: 'requirement-coverage',
+                    severity: 'blocking-concern',
+                    requirementIndexes: [0],
+                    decisionIndexes: [0],
+                    message: 'Concern regarding edge case',
+                    suggestedCorrection: 'Add edge case test',
+                  }],
+                  weakOracles: [],
+                  falseGreenScenarios: [],
+                },
+                decisionChallenges: { unsupportedDecisions: [], counterexamples: [], unresolvedCriticalAssumptions: [] },
+                materialAmbiguities: [],
+              },
+            }
+          },
+        }),
+      },
+    )
+    parent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Correct addition.' }] }))
+    await parent.whenIdle()
+
+    expect(reviewCalled).toBe(true)
+    const completed = store.events(taskId).find(e => e.type === 'plan-review/completed')
+    expect(completed).toBeDefined()
+    expect((completed as any).payload.assessment.verdict).toBe('concerns')
+
+    // Concerns stop the dispatch. The old shadow mode dispatched anyway, which is exactly
+    // the bypass a configured reviewer must not have.
+    expect(store.events(taskId).some(e => e.type === 'work-order/prepared')).toBe(false)
+    const messages = toolResults(parent).flatMap(r => r.message.content).filter(c => c.type === 'text').map(c => c.text).join('\n')
+    expect(messages).toContain('Concern regarding edge case')
+    expect(coordinator.state(taskId).latestPlanReview?.assessment?.verdict).toBe('concerns')
+  })
+
+  it('fails open when review returns unavailable and dispatches worker normally', async () => {
+    const { parent, coordinator, store, taskId } = await setup(
+      [delegateV3(), acceptV3(), textResponse('Verified.')],
+      [edit(), report()],
+      {
+        ...options,
+        foreman: true,
+        planReview: () => ({
+          review: async () => ({ kind: 'unavailable', reason: 'model timeout' }),
+        }),
+      },
+    )
+    parent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Correct addition.' }] }))
+    await parent.whenIdle()
+
+    const unavailable = store.events(taskId).find(e => e.type === 'plan-review/unavailable')
+    expect(unavailable).toBeDefined()
+    expect((unavailable as any).payload.reason).toBe('model timeout')
+
+    const state = coordinator.state(taskId)
+    expect(state.latestPlanReview?.outcome).toBe('unavailable')
+    expect(state.latestPlanReview?.unavailableReason).toBe('model timeout')
+    expect(state.phase).toBe('COMPLETED')
+
+    // Failing open is not the same as passing: the run continued without an audit, so the
+    // transcript says so. Without this the only trace was a status line, and a configured
+    // Foreman looked exactly like one whose review had approved the plan.
+    const notices = parent.session.snapshotEvents().filter(event => event.type === 'user/message'
+      && event.data.source?.form === 'notice' && JSON.stringify(event.data.content).includes('model timeout'))
+    expect(notices).toHaveLength(1)
+    // The row's own heading, then the reason and what it means for this policy.
+    expect((notices[0]!.data.source as { summary?: string }).summary).toContain('本次计划审查未生效')
+    expect(JSON.stringify(notices[0]!.data.content)).toContain('门禁因此没有生效')
+  })
+
+  it('fails open when review throws an exception and dispatches worker normally', async () => {
+    const { parent, coordinator, store, taskId } = await setup(
+      [delegateV3(), acceptV3(), textResponse('Verified.')],
+      [edit(), report()],
+      {
+        ...options,
+        foreman: true,
+        planReview: () => ({
+          review: async () => { throw new Error('abrupt network disconnect') },
+        }),
+      },
+    )
+    parent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Correct addition.' }] }))
+    await parent.whenIdle()
+
+    const unavailable = store.events(taskId).find(e => e.type === 'plan-review/unavailable')
+    expect(unavailable).toBeDefined()
+    expect((unavailable as any).payload.reason).toContain('abrupt network disconnect')
+
+    const state = coordinator.state(taskId)
+    expect(state.latestPlanReview?.outcome).toBe('unavailable')
+    expect(state.phase).toBe('COMPLETED')
+  })
+
+  it('does not re-invoke plan review on replay when a review record already exists for the candidate and round', async () => {
+    let callCount = 0
+    const mockReview: PlanReviewModule = {
+      review: async candidate => {
+        callCount++
+        return {
+          kind: 'ready',
+          assessment: {
+            schemaVersion: 1,
+            candidateDigest: candidate.order.candidateDigest!,
+            verdict: 'ready',
+            acceptanceAudit: { uncoveredRequirements: [], weakOracles: [], falseGreenScenarios: [] },
+            decisionChallenges: { unsupportedDecisions: [], counterexamples: [], unresolvedCriticalAssumptions: [] },
+            materialAmbiguities: [],
+          },
+        }
+      },
+    }
+
+    const { parent, coordinator, store, taskId } = await setup(
+      [delegateV3(), acceptV3(), textResponse('Verified.')],
+      [edit(), report()],
+      {
+        ...options,
+        foreman: true,
+        planReview: () => mockReview,
+      },
+    )
+    parent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Correct addition.' }] }))
+    await parent.whenIdle()
+
+    expect(callCount).toBe(1)
+    const reviewRequests = store.events(taskId).filter(e => e.type === 'plan-review/requested')
+    expect(reviewRequests).toHaveLength(1)
+
+    // Task state already has completed plan review record
+    const state = coordinator.state(taskId)
+    expect(state.planReviews).toHaveLength(1)
+    expect(state.planReviews![0]!.candidateDigest).toBe(state.currentWorkOrder!.candidateDigest)
+  })
+
+  const testFinding = {
+    id: 'finding-1',
+    category: 'uncovered-requirement' as const,
+    severity: 'blocking-concern' as const,
+    requirementIndexes: [0],
+    decisionIndexes: [0],
+    message: 'Missing error handling coverage in requirement 0',
+    suggestedCorrection: 'Add explicit test for error handling',
+  }
+  const testConcernsAssessment = (digest: any) => ({
+    schemaVersion: 1 as const,
+    candidateDigest: digest,
+    verdict: 'concerns' as const,
+    acceptanceAudit: {
+      uncoveredRequirements: [testFinding],
+      weakOracles: [],
+      falseGreenScenarios: [],
+    },
+    decisionChallenges: {
+      unsupportedDecisions: [],
+      counterexamples: [],
+      unresolvedCriticalAssumptions: [],
+    },
+    materialAmbiguities: [],
+  })
+
+  const testReadyAssessment = (digest: any) => ({
+    schemaVersion: 1 as const,
+    candidateDigest: digest,
+    verdict: 'ready' as const,
+    acceptanceAudit: {
+      uncoveredRequirements: [],
+      weakOracles: [],
+      falseGreenScenarios: [],
+    },
+    decisionChallenges: {
+      unsupportedDecisions: [],
+      counterexamples: [],
+      unresolvedCriticalAssumptions: [],
+    },
+    materialAmbiguities: [],
+  })
+
+  it('blocks dispatch on round 1 concerns when policy is gate, without work-order/prepared, child/accepted, or lease, returning finding details in tool result', async () => {
+    let reviewCalled = false
+    const { parent, coordinator, store, taskId } = await setup(
+      [delegateV3(), textResponse('Acknowledging concerns.')],
+      [edit(), report()],
+      {
+        ...options,
+        foreman: true,
+        planReview: () => ({
+          review: async candidate => {
+            reviewCalled = true
+            return {
+              kind: 'concerns',
+              assessment: testConcernsAssessment(candidate.order.candidateDigest!),
+            }
+          },
+        }),
+      },
+    )
+    parent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Correct addition.' }] }))
+    await parent.whenIdle()
+
+    expect(reviewCalled).toBe(true)
+    const events = store.events(taskId)
+    expect(events.some(e => e.type === 'work-order/prepared')).toBe(false)
+    expect(events.some(e => e.type === 'child/accepted')).toBe(false)
+    const state = coordinator.state(taskId)
+    expect(state.lease).toBeUndefined()
+    expect(state.acceptedChild).toBeUndefined()
+
+    const results = toolResults(parent)
+    const delegateResult = JSON.stringify(results)
+    expect(delegateResult).toContain('finding-1')
+    expect(delegateResult).toContain('uncovered-requirement')
+    expect(delegateResult).toContain('blocking-concern')
+    expect(delegateResult).toContain('Missing error handling coverage in requirement 0')
+    expect(delegateResult).toContain('Add explicit test for error handling')
+  })
+
+  it('dispatches worker once without calling foreman again when all round 1 findings are overridden', async () => {
+    let callCount = 0
+    const overrideDelegate = toolCallResponse('delegate-override', 'fusion_delegate', {
+      block: true,
+      requirements: ['addition'],
+      goal: 'Correct addition',
+      brief: 'Fix calc.py add and preserve the test. Submit a report after implementing.',
+      constraints: ['Do not change test_calc.py'],
+      allowedPaths: ['calc.py'],
+      checks: [{
+        id: 'addition',
+        description: 'Existing addition test passes',
+        command: py('python3 -B -m unittest -v test_calc'),
+        kind: 'test',
+        parser: 'unittest',
+        definitionPaths: ['test_calc.py'],
+      }],
+      requirementCoverage: [{
+        requirementIndex: 0,
+        implementationNotes: ['Satisfy requirement 0'],
+        acceptanceIds: ['addition'],
+      }],
+      foremanDispositions: [{
+        findingId: 'finding-1',
+        action: 'overridden',
+        reason: 'Error handling is tested separately in integration suite.',
+      }],
+    })
+
+    const { parent, coordinator, store, taskId } = await setup(
+      [delegateV3(), overrideDelegate, acceptV3(), textResponse('Verified.')],
+      [edit(), report()],
+      {
+        ...options,
+        foreman: true,
+        planReview: () => ({
+          review: async candidate => {
+            callCount++
+            return {
+              kind: 'concerns',
+              assessment: testConcernsAssessment(candidate.order.candidateDigest!),
+            }
+          },
+        }),
+      },
+    )
+    parent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Correct addition.' }] }))
+    await parent.whenIdle()
+
+    expect(callCount).toBe(1)
+    const preparedEvents = store.events(taskId).filter(e => e.type === 'work-order/prepared')
+    expect(preparedEvents).toHaveLength(1)
+    expect(coordinator.state(taskId)).toMatchObject({ phase: 'COMPLETED', verification: 'verified' })
+  })
+
+  it('calls foreman twice and dispatches once when round 1 finding is accepted with changed candidate and round 2 is ready', async () => {
+    let callCount = 0
+    const acceptedDelegate = toolCallResponse('delegate-accepted', 'fusion_delegate', {
+      block: true,
+      requirements: ['addition'],
+      goal: 'Correct addition and handle errors',
+      brief: 'Fix calc.py add and preserve test. Revised plan addressing finding-1.',
+      constraints: ['Do not change test_calc.py'],
+      allowedPaths: ['calc.py'],
+      checks: [{
+        id: 'addition',
+        description: 'Existing addition test passes',
+        command: py('python3 -B -m unittest -v test_calc'),
+        kind: 'test',
+        parser: 'unittest',
+        definitionPaths: ['test_calc.py'],
+      }],
+      requirementCoverage: [{
+        requirementIndex: 0,
+        implementationNotes: ['Satisfy requirement 0 with revised error handling'],
+        acceptanceIds: ['addition'],
+      }],
+      foremanDispositions: [{
+        findingId: 'finding-1',
+        action: 'accepted',
+        changeSummary: 'Added error handling details to brief and implementation notes.',
+      }],
+    })
+
+    const { parent, coordinator, store, taskId } = await setup(
+      [delegateV3(), acceptedDelegate, acceptV3(), textResponse('Verified.')],
+      [edit(), report()],
+      {
+        ...options,
+        foreman: true,
+        planReview: () => ({
+          review: async candidate => {
+            callCount++
+            if (callCount === 1) {
+              return {
+                kind: 'concerns',
+                assessment: testConcernsAssessment(candidate.order.candidateDigest!),
+              }
+            }
+            return {
+              kind: 'ready',
+              assessment: testReadyAssessment(candidate.order.candidateDigest!),
+            }
+          },
+        }),
+      },
+    )
+    parent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Correct addition.' }] }))
+    await parent.whenIdle()
+
+    expect(callCount).toBe(2)
+    const preparedEvents = store.events(taskId).filter(e => e.type === 'work-order/prepared')
+    expect(preparedEvents).toHaveLength(1)
+    expect(coordinator.state(taskId)).toMatchObject({ phase: 'COMPLETED', verification: 'verified' })
+  })
+
+  it('rejects accepted dispositions after round 2 concerns and dispatches on all overridden with at most 2 model calls', async () => {
+    let callCount = 0
+    const acceptedRound1 = toolCallResponse('delegate-accepted-r1', 'fusion_delegate', {
+      block: true,
+      requirements: ['addition'],
+      goal: 'Correct addition plan 2',
+      brief: 'Revised brief round 2',
+      constraints: ['Do not change test_calc.py'],
+      allowedPaths: ['calc.py'],
+      checks: [{
+        id: 'addition',
+        description: 'Existing addition test passes',
+        command: py('python3 -B -m unittest -v test_calc'),
+        kind: 'test',
+        parser: 'unittest',
+        definitionPaths: ['test_calc.py'],
+      }],
+      requirementCoverage: [{
+        requirementIndex: 0,
+        implementationNotes: ['Satisfy requirement 0 r2'],
+        acceptanceIds: ['addition'],
+      }],
+      foremanDispositions: [{
+        findingId: 'finding-1',
+        action: 'accepted',
+        changeSummary: 'Addressed r1 finding',
+      }],
+    })
+
+    const invalidAcceptedRound2 = toolCallResponse('delegate-accepted-r2-invalid', 'fusion_delegate', {
+      block: true,
+      requirements: ['addition'],
+      goal: 'Correct addition plan 3',
+      brief: 'Revised brief round 3',
+      constraints: ['Do not change test_calc.py'],
+      allowedPaths: ['calc.py'],
+      checks: [{
+        id: 'addition',
+        description: 'Existing addition test passes',
+        command: py('python3 -B -m unittest -v test_calc'),
+        kind: 'test',
+        parser: 'unittest',
+        definitionPaths: ['test_calc.py'],
+      }],
+      requirementCoverage: [{
+        requirementIndex: 0,
+        implementationNotes: ['Satisfy requirement 0 r3'],
+        acceptanceIds: ['addition'],
+      }],
+      foremanDispositions: [{
+        findingId: 'finding-1',
+        action: 'accepted',
+        changeSummary: 'Attempting another acceptance in round 2',
+      }],
+    })
+
+    const overrideRound2 = toolCallResponse('delegate-override-r2', 'fusion_delegate', {
+      block: true,
+      requirements: ['addition'],
+      goal: 'Correct addition plan 2',
+      brief: 'Revised brief round 2',
+      constraints: ['Do not change test_calc.py'],
+      allowedPaths: ['calc.py'],
+      checks: [{
+        id: 'addition',
+        description: 'Existing addition test passes',
+        command: py('python3 -B -m unittest -v test_calc'),
+        kind: 'test',
+        parser: 'unittest',
+        definitionPaths: ['test_calc.py'],
+      }],
+      requirementCoverage: [{
+        requirementIndex: 0,
+        implementationNotes: ['Satisfy requirement 0 r2'],
+        acceptanceIds: ['addition'],
+      }],
+      foremanDispositions: [{
+        findingId: 'finding-1',
+        action: 'overridden',
+        reason: 'Proceeding with current scope despite round 2 concern.',
+      }],
+    })
+
+    const { parent, coordinator, store, taskId } = await setup(
+      [delegateV3(), acceptedRound1, invalidAcceptedRound2, overrideRound2, acceptV3(), textResponse('Verified.')],
+      [edit(), report()],
+      {
+        ...options,
+        foreman: true,
+        planReview: () => ({
+          review: async candidate => {
+            callCount++
+            return {
+              kind: 'concerns',
+              assessment: testConcernsAssessment(candidate.order.candidateDigest!),
+            }
+          },
+        }),
+      },
+    )
+    parent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Correct addition.' }] }))
+    await parent.whenIdle()
+
+    expect(callCount).toBe(2)
+    const results = JSON.stringify(toolResults(parent))
+    expect(results).toContain('maximum of 2 review rounds')
+    const preparedEvents = store.events(taskId).filter(e => e.type === 'work-order/prepared')
+    expect(preparedEvents).toHaveLength(1)
+    expect(coordinator.state(taskId)).toMatchObject({ phase: 'COMPLETED', verification: 'verified' })
+  })
+
+  it('rejects missing, duplicate, and unknown disposition IDs when unresolved concerns exist', async () => {
+    const twoFindingsAssessment = (digest: any) => ({
+      schemaVersion: 1 as const,
+      candidateDigest: digest,
+      verdict: 'concerns' as const,
+      acceptanceAudit: {
+        uncoveredRequirements: [
+          {
+            id: 'finding-1',
+            category: 'uncovered-requirement' as const,
+            severity: 'blocking-concern' as const,
+            requirementIndexes: [0],
+            decisionIndexes: [0],
+            message: 'Missing error handling coverage in requirement 0',
+            suggestedCorrection: 'Add explicit test for error handling',
+          },
+          {
+            id: 'finding-2',
+            category: 'weak-oracle' as const,
+            severity: 'non-blocking-concern' as const,
+            requirementIndexes: [0],
+            decisionIndexes: [0],
+            message: 'Weak assertion in test_calc.py',
+            suggestedCorrection: 'Strengthen assertion',
+          },
+        ],
+        weakOracles: [],
+        falseGreenScenarios: [],
+      },
+      decisionChallenges: {
+        unsupportedDecisions: [],
+        counterexamples: [],
+        unresolvedCriticalAssumptions: [],
+      },
+      materialAmbiguities: [],
+    })
+
+    const missingDispDelegate = toolCallResponse('d-missing', 'fusion_delegate', {
+      block: true,
+      requirements: ['addition'],
+      goal: 'Correct addition',
+      brief: 'Fix calc.py add and preserve the test. Submit a report after implementing.',
+      constraints: ['Do not change test_calc.py'],
+      allowedPaths: ['calc.py'],
+      checks: [{
+        id: 'addition',
+        description: 'Existing addition test passes',
+        command: py('python3 -B -m unittest -v test_calc'),
+        kind: 'test',
+        parser: 'unittest',
+        definitionPaths: ['test_calc.py'],
+      }],
+      requirementCoverage: [{ requirementIndex: 0, implementationNotes: ['Satisfy requirement 0'], acceptanceIds: ['addition'] }],
+      foremanDispositions: [{ findingId: 'finding-1', action: 'overridden', reason: 'r1' }],
+    })
+
+    const unknownDispDelegate = toolCallResponse('d-unknown', 'fusion_delegate', {
+      block: true,
+      requirements: ['addition'],
+      goal: 'Correct addition',
+      brief: 'Fix calc.py add and preserve the test. Submit a report after implementing.',
+      constraints: ['Do not change test_calc.py'],
+      allowedPaths: ['calc.py'],
+      checks: [{
+        id: 'addition',
+        description: 'Existing addition test passes',
+        command: py('python3 -B -m unittest -v test_calc'),
+        kind: 'test',
+        parser: 'unittest',
+        definitionPaths: ['test_calc.py'],
+      }],
+      requirementCoverage: [{ requirementIndex: 0, implementationNotes: ['Satisfy requirement 0'], acceptanceIds: ['addition'] }],
+      foremanDispositions: [
+        { findingId: 'finding-1', action: 'overridden', reason: 'r1' },
+        { findingId: 'unknown-finding', action: 'overridden', reason: 'reason' },
+      ],
+    })
+
+    const duplicateDispDelegate = toolCallResponse('d-duplicate', 'fusion_delegate', {
+      block: true,
+      requirements: ['addition'],
+      goal: 'Correct addition',
+      brief: 'Fix calc.py add and preserve the test. Submit a report after implementing.',
+      constraints: ['Do not change test_calc.py'],
+      allowedPaths: ['calc.py'],
+      checks: [{
+        id: 'addition',
+        description: 'Existing addition test passes',
+        command: py('python3 -B -m unittest -v test_calc'),
+        kind: 'test',
+        parser: 'unittest',
+        definitionPaths: ['test_calc.py'],
+      }],
+      requirementCoverage: [{ requirementIndex: 0, implementationNotes: ['Satisfy requirement 0'], acceptanceIds: ['addition'] }],
+      foremanDispositions: [
+        { findingId: 'finding-1', action: 'overridden', reason: 'r1' },
+        { findingId: 'finding-1', action: 'overridden', reason: 'r2' },
+      ],
+    })
+
+    const validDispDelegate = toolCallResponse('d-valid', 'fusion_delegate', {
+      block: true,
+      requirements: ['addition'],
+      goal: 'Correct addition',
+      brief: 'Fix calc.py add and preserve the test. Submit a report after implementing.',
+      constraints: ['Do not change test_calc.py'],
+      allowedPaths: ['calc.py'],
+      checks: [{
+        id: 'addition',
+        description: 'Existing addition test passes',
+        command: py('python3 -B -m unittest -v test_calc'),
+        kind: 'test',
+        parser: 'unittest',
+        definitionPaths: ['test_calc.py'],
+      }],
+      requirementCoverage: [{ requirementIndex: 0, implementationNotes: ['Satisfy requirement 0'], acceptanceIds: ['addition'] }],
+      foremanDispositions: [
+        { findingId: 'finding-1', action: 'overridden', reason: 'r1' },
+        { findingId: 'finding-2', action: 'overridden', reason: 'r2' },
+      ],
+    })
+
+    const { parent, coordinator, store, taskId } = await setup(
+      [delegateV3(), missingDispDelegate, unknownDispDelegate, duplicateDispDelegate, validDispDelegate, acceptV3(), textResponse('Verified.')],
+      [edit(), report()],
+      {
+        ...options,
+        foreman: true,
+        planReview: () => ({
+          review: async candidate => ({
+            kind: 'concerns',
+            assessment: twoFindingsAssessment(candidate.order.candidateDigest!),
+          }),
+        }),
+      },
+    )
+    parent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Correct addition.' }] }))
+    await parent.whenIdle()
+
+    const messages = toolResults(parent).flatMap(r => r.message.content).filter(c => c.type === 'text').map(c => c.text).join('\n')
+    expect(messages).toContain('All findings must be addressed')
+    expect(messages).toContain('Unknown findingId "unknown-finding"')
+    expect(messages).toContain('Duplicate disposition for findingId "finding-1"')
+    expect(coordinator.state(taskId)).toMatchObject({ phase: 'COMPLETED', verification: 'verified' })
+  })
+
+  it('reviews an exploration candidate too, because a configured Foreman reviews every plan', async () => {
+    // The risk gate used to make exploration orders unreachable: they carry no user
+    // requirements, no allowed paths, no authority and no uncertainties, so no trigger
+    // could ever fire and a configured reviewer stayed silent for the whole survey
+    // (session-0a8d7fbf).
+    let callCount = 0
+    const reviewed: (string | undefined)[] = []
+    const exploreDelegate = toolCallResponse('explore-1', 'fusion_explore', {
+      goal: 'Explore addition code',
+      brief: 'Read calc.py and test_calc.py',
+      constraints: ['Do not change files'],
+      block: true,
+    })
+
+    const { parent, coordinator, store, taskId } = await setup(
+      [exploreDelegate, textResponse('Done.')],
+      [findings()],
+      {
+        ...options,
+        foreman: true,
+        planReview: () => ({
+          review: async candidate => {
+            callCount++
+            reviewed.push(candidate.order.mode)
+            return { kind: 'ready', assessment: testReadyAssessment(candidate.order.candidateDigest!) }
+          },
+        }),
+      },
+    )
+    parent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Explore addition.' }] }))
+    await parent.whenIdle()
+
+    expect(callCount).toBe(1)
+    expect(reviewed).toEqual(['explore'])
+    const requested = store.events(taskId).find(e => e.type === 'plan-review/requested')
+    expect(requested).toBeDefined()
+    expect(coordinator.state(taskId).planReviews).toHaveLength(1)
+  })
+
+  it('fails open and dispatches worker when foreman returns unavailable or times out', async () => {
+    let reviewCount = 0
+    const { parent, coordinator, store, taskId } = await setup(
+      [delegateV3(), acceptV3(), textResponse('Verified.')],
+      [edit(), report()],
+      {
+        ...options,
+        foreman: true,
+        planReview: () => ({
+          review: async () => {
+            reviewCount++
+            return { kind: 'unavailable', reason: 'model timeout' }
+          },
+        }),
+      },
+    )
+    parent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Correct addition.' }] }))
+    await parent.whenIdle()
+
+    expect(reviewCount).toBe(1)
+    const unavailable = store.events(taskId).find(e => e.type === 'plan-review/unavailable')
+    expect(unavailable).toBeDefined()
+    expect(coordinator.state(taskId)).toMatchObject({ phase: 'COMPLETED', verification: 'verified' })
+  })
+
+  it('recovers pending requested review to unavailable on coordinator restart and dispatches without re-calling foreman', async () => {
+    let callCount = 0
+    const { coordinator, store, taskId, ctx } = await setup(
+      [delegateV3(), acceptV3(), textResponse('Verified.')],
+      [edit(), report()],
+      {
+        ...options,
+        foreman: true,
+        planReview: () => ({
+          review: async candidate => {
+            callCount++
+            return { kind: 'ready', assessment: testReadyAssessment(candidate.order.candidateDigest!) }
+          },
+        }),
+      },
+    )
+
+    coordinator.append(taskId, 'plan-review/requested', {
+      workOrderId: 'wo-interrupted' as any,
+      candidateDigest: 'interrupted-digest' as any,
+      round: 1,
+      route: { provider: 'test-native', model: 'foreman' },
+      requestedAt: new Date().toISOString(),
+    })
+
+    await coordinator.close()
+    const restored = new FusionCoordinator(ctx, store, coordinator.options)
+    cleanups.push(async () => restored.close())
+
+    const state = restored.state(taskId)
+    expect(state.pendingPlanReview).toBeUndefined()
+    const unavailable = store.events(taskId).find(
+      e => e.type === 'plan-review/unavailable' && (e.payload as any).workOrderId === 'wo-interrupted',
+    )
+    expect(unavailable).toBeDefined()
+    expect((unavailable as any).payload.reason).toBe('interrupted plan review')
+  })
+
+  it('handles restart recovery across all 3 gating points without calling foreman again and dispatching exactly once', async () => {
+    /**
+     * The exact candidate the coordinator builds for one plan, so a fixture can record reviews
+     * against the digest the gate will actually compare. A revised plan is a different brief,
+     * which is what makes it a different digest.
+     */
+    const candidateFor = (ws: string, brief = 'Fix calc.py add and preserve the test. Submit a report after implementing.'): any => {
+      const base = snapshotWorkspace(ws)
+      const cand: any = {
+        schemaVersion: 1,
+        brief,
+        order: {
+          schemaVersion: 1,
+          mode: 'implement',
+          taskId: 'dummy' as any,
+          id: 'dummy' as any,
+          operationId: 'dummy' as any,
+          revision: 1,
+          goal: 'Correct addition',
+          brief,
+          constraints: [
+            { id: 'constraint-0', text: 'Do not change test_calc.py', mandatory: true, provenance: 'inferred' },
+            { id: 'requirement-0', text: 'addition', mandatory: true, provenance: 'user' },
+          ],
+          allowedPaths: ['calc.py'],
+          forbiddenActions: [
+            'Change unrelated paths',
+            'Weaken frozen acceptance checks',
+            'Bypass native tool permissions',
+            'Commit, push, tag, publish, release, open a pull request or trigger CI; report the action instead',
+          ],
+          policy: { maxWorkerSteps: 150, maxReworkRounds: 3, maxCapabilityUpgrades: 0, commandMaxSeconds: 600 },
+          requirementCoverage: [{ requirementIndex: 0, implementationNotes: ['Satisfy requirement 0'], acceptanceIds: ['addition'] }],
+          baseSnapshot: base.id,
+          evidence: [],
+          decisions: [],
+          uncertainties: [],
+        },
+        requirementCoverage: [{ requirementIndex: 0, implementationNotes: ['Satisfy requirement 0'], acceptanceIds: ['addition'] }],
+        // The user's own words are part of the semantic digest; a hand-built candidate must
+        // carry them or it hashes a different plan than the coordinator's.
+        userMessages: ['Correct addition.'],
+        checkDefinitions: [{
+          id: 'addition',
+          description: 'Existing addition test passes',
+          command: py('python3 -B -m unittest -v test_calc'),
+          kind: 'test',
+          parser: 'unittest',
+          definitionPaths: ['test_calc.py'],
+        }],
+      }
+      return candidateDigest(cand)
+    }
+
+    // Point 1: round1 override already persisted before dispatch
+    {
+      let callCount = 0
+      const { parent, coordinator, store, taskId, ctx, workspace } = await setup(
+        [delegateV3(), acceptV3(), textResponse('Verified.')],
+        [edit(), report()],
+        {
+          ...options,
+          foreman: true,
+          planReview: () => ({
+            review: async () => {
+              callCount++
+              return { kind: 'ready', assessment: testReadyAssessment('' as any) }
+            },
+          }),
+        },
+      )
+
+      const cDigest = candidateFor(workspace)
+      const wId = WorkOrderId(randomUUID())
+      const reqAt1 = new Date().toISOString()
+
+      coordinator.append(taskId, 'plan-review/requested', {
+        workOrderId: wId,
+        candidateDigest: cDigest,
+        round: 1,
+        route: { provider: 'test-native', model: 'foreman' },
+        requestedAt: reqAt1,
+      })
+      coordinator.append(taskId, 'plan-review/completed', {
+        workOrderId: wId,
+        candidateDigest: cDigest,
+        round: 1,
+        assessment: testConcernsAssessment(cDigest),
+        durationMs: 50,
+        record: {
+          schemaVersion: 1,
+          taskId,
+          workOrderId: wId,
+          candidateDigest: cDigest,
+          round: 1,
+          route: { provider: 'test-native', model: 'foreman' },
+          requestedAt: reqAt1,
+          completedAt: new Date().toISOString(),
+          outcome: 'assessment',
+          assessment: testConcernsAssessment(cDigest),
+          durationMs: 50,
+        },
+      })
+      coordinator.append(taskId, 'plan-review/resolved', {
+        workOrderId: wId,
+        candidateDigest: cDigest,
+        round: 1,
+        dispositions: [{ findingId: 'finding-1', action: 'overridden', reason: 'Override finding 1' }],
+      })
+
+      await coordinator.close()
+      const restored = new FusionCoordinator(ctx, store, coordinator.options)
+      cleanups.push(async () => restored.close())
+
+      parent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Correct addition.' }] }))
+      await parent.whenIdle()
+
+      expect(callCount).toBe(0)
+      const preparedEvents = store.events(taskId).filter(e => e.type === 'work-order/prepared')
+      expect(preparedEvents).toHaveLength(1)
+      expect(restored.state(taskId)).toMatchObject({ phase: 'COMPLETED', verification: 'verified' })
+    }
+
+    // Point 2: round2 ready/unavailable already persisted before dispatch, restart occurs
+    {
+      let callCount = 0
+      const { parent, coordinator, store, taskId, ctx, workspace } = await setup(
+        [delegateV3(), acceptV3(), textResponse('Verified.')],
+        [edit(), report()],
+        {
+          ...options,
+          foreman: true,
+          planReview: () => ({
+            review: async () => {
+              callCount++
+              return { kind: 'ready', assessment: testReadyAssessment('' as any) }
+            },
+          }),
+        },
+      )
+
+      // The Lead reviewed an earlier brief, accepted the finding and revised the plan into the
+      // candidate the coordinator is about to send; round 2 reviewed that revised candidate.
+      const cDigest = candidateFor(workspace)
+      const originalDigest = candidateFor(workspace, 'Original brief before the finding was accepted.')
+      const wId = WorkOrderId(randomUUID())
+      const reqAt1 = new Date().toISOString()
+      const reqAt2 = new Date().toISOString()
+
+      coordinator.append(taskId, 'plan-review/requested', {
+        workOrderId: wId,
+        candidateDigest: originalDigest,
+        round: 1,
+        route: { provider: 'test-native', model: 'foreman' },
+        requestedAt: reqAt1,
+      })
+      coordinator.append(taskId, 'plan-review/completed', {
+        workOrderId: wId,
+        candidateDigest: originalDigest,
+        round: 1,
+        assessment: testConcernsAssessment(originalDigest),
+        durationMs: 50,
+        record: {
+          schemaVersion: 1,
+          taskId,
+          workOrderId: wId,
+          candidateDigest: originalDigest,
+          round: 1,
+          route: { provider: 'test-native', model: 'foreman' },
+          requestedAt: reqAt1,
+          completedAt: new Date().toISOString(),
+          outcome: 'assessment',
+          assessment: testConcernsAssessment(originalDigest),
+          durationMs: 50,
+        },
+      })
+      coordinator.append(taskId, 'plan-review/resolved', {
+        workOrderId: wId,
+        candidateDigest: originalDigest,
+        round: 1,
+        dispositions: [{ findingId: 'finding-1', action: 'accepted', changeSummary: 'Accepted finding 1' }],
+        revisedCandidateDigest: cDigest,
+      })
+      coordinator.append(taskId, 'plan-review/requested', {
+        workOrderId: wId,
+        candidateDigest: cDigest,
+        round: 2,
+        route: { provider: 'test-native', model: 'foreman' },
+        requestedAt: reqAt2,
+      })
+      coordinator.append(taskId, 'plan-review/completed', {
+        workOrderId: wId,
+        candidateDigest: cDigest,
+        round: 2,
+        assessment: testReadyAssessment(cDigest),
+        durationMs: 50,
+        record: {
+          schemaVersion: 1,
+          taskId,
+          workOrderId: wId,
+          candidateDigest: cDigest,
+          round: 2,
+          route: { provider: 'test-native', model: 'foreman' },
+          requestedAt: reqAt2,
+          completedAt: new Date().toISOString(),
+          outcome: 'assessment',
+          assessment: testReadyAssessment(cDigest),
+          durationMs: 50,
+        },
+      })
+
+      await coordinator.close()
+      const restored = new FusionCoordinator(ctx, store, coordinator.options)
+      cleanups.push(async () => restored.close())
+
+      parent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Correct addition.' }] }))
+      await parent.whenIdle()
+
+      expect(callCount).toBe(0)
+      const preparedEvents = store.events(taskId).filter(e => e.type === 'work-order/prepared')
+      expect(preparedEvents).toHaveLength(1)
+      expect(restored.state(taskId)).toMatchObject({ phase: 'COMPLETED', verification: 'verified' })
+    }
+
+    // Point 3: round2 concerns override already persisted before dispatch, restart occurs
+    {
+      let callCount = 0
+      const { parent, coordinator, store, taskId, ctx, workspace } = await setup(
+        [delegateV3(), acceptV3(), textResponse('Verified.')],
+        [edit(), report()],
+        {
+          ...options,
+          foreman: true,
+          planReview: () => ({
+            review: async () => {
+              callCount++
+              return { kind: 'ready', assessment: testReadyAssessment('' as any) }
+            },
+          }),
+        },
+      )
+
+      // Same shape as point 2: round 1 reviewed an earlier brief, the Lead accepted and revised
+      // it into this candidate, and round 2 then raised one concern the Lead overrode.
+      const cDigest = candidateFor(workspace)
+      const originalDigest = candidateFor(workspace, 'Original brief before the finding was accepted.')
+      const wId = WorkOrderId(randomUUID())
+      const reqAt1 = new Date().toISOString()
+      const reqAt2 = new Date().toISOString()
+
+      coordinator.append(taskId, 'plan-review/requested', {
+        workOrderId: wId,
+        candidateDigest: originalDigest,
+        round: 1,
+        route: { provider: 'test-native', model: 'foreman' },
+        requestedAt: reqAt1,
+      })
+      coordinator.append(taskId, 'plan-review/completed', {
+        workOrderId: wId,
+        candidateDigest: originalDigest,
+        round: 1,
+        assessment: testConcernsAssessment(originalDigest),
+        durationMs: 50,
+        record: {
+          schemaVersion: 1,
+          taskId,
+          workOrderId: wId,
+          candidateDigest: originalDigest,
+          round: 1,
+          route: { provider: 'test-native', model: 'foreman' },
+          requestedAt: reqAt1,
+          completedAt: new Date().toISOString(),
+          outcome: 'assessment',
+          assessment: testConcernsAssessment(originalDigest),
+          durationMs: 50,
+        },
+      })
+      coordinator.append(taskId, 'plan-review/resolved', {
+        workOrderId: wId,
+        candidateDigest: originalDigest,
+        round: 1,
+        dispositions: [{ findingId: 'finding-1', action: 'accepted', changeSummary: 'Accepted finding 1' }],
+        revisedCandidateDigest: cDigest,
+      })
+      coordinator.append(taskId, 'plan-review/requested', {
+        workOrderId: wId,
+        candidateDigest: cDigest,
+        round: 2,
+        route: { provider: 'test-native', model: 'foreman' },
+        requestedAt: reqAt2,
+      })
+      coordinator.append(taskId, 'plan-review/completed', {
+        workOrderId: wId,
+        candidateDigest: cDigest,
+        round: 2,
+        assessment: testConcernsAssessment(cDigest),
+        durationMs: 50,
+        record: {
+          schemaVersion: 1,
+          taskId,
+          workOrderId: wId,
+          candidateDigest: cDigest,
+          round: 2,
+          route: { provider: 'test-native', model: 'foreman' },
+          requestedAt: reqAt2,
+          completedAt: new Date().toISOString(),
+          outcome: 'assessment',
+          assessment: testConcernsAssessment(cDigest),
+          durationMs: 50,
+        },
+      })
+      coordinator.append(taskId, 'plan-review/resolved', {
+        workOrderId: wId,
+        candidateDigest: cDigest,
+        round: 2,
+        dispositions: [{ findingId: 'finding-1', action: 'overridden', reason: 'Override finding 1 in round 2' }],
+      })
+
+      await coordinator.close()
+      const restored = new FusionCoordinator(ctx, store, coordinator.options)
+      cleanups.push(async () => restored.close())
+
+      parent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Correct addition.' }] }))
+      await parent.whenIdle()
+
+      expect(callCount).toBe(0)
+      const preparedEvents = store.events(taskId).filter(e => e.type === 'work-order/prepared')
+      expect(preparedEvents).toHaveLength(1)
+      expect(restored.state(taskId)).toMatchObject({ phase: 'COMPLETED', verification: 'verified' })
+    }
   })
 })

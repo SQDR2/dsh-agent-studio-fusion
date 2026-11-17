@@ -9,7 +9,7 @@ import { FUSION_MODEL, FUSION_PROVIDER, isCurrentFusionSelection, isFusionModel,
 import { modelOfProfileId } from './pairs.js'
 import type { ResolvedProfile } from '../profile/resolve.js'
 import type { FusionCoordinator } from './coordinator.js'
-import { isNativeRoutePin, recordNativeIntent, restoreNativeIntent } from './route-pin.js'
+import { isNativeRoutePin, recordNativeIntent, restoreNativeIntent, withFusionAppend } from './route-pin.js'
 
 export { FUSION_MODEL, FUSION_PROVIDER, isFusionSelection }
 
@@ -90,6 +90,14 @@ export function installNativeFusionSelection(ctx: Context, input: {
   const pending = new Map<string, Promise<void>>()
   const failures = new Map<string, string>()
   const desired = new Map<string, PhysicalRoute>()
+  /**
+   * Sessions whose newest selection this process observed as a real event.
+   *
+   * The pin/restore pair never appears here ({@link isNativeRoutePin} filters it), so any
+   * id in this set named a selection the user (or the Host) actually recorded. From then on
+   * equality with a frozen route is a choice, not a leftover pin.
+   */
+  const observed = new Set<string>()
   const selection = (agent: Agent) => desired.get(agent.id) ?? input.selection(agent)
   const binding = (agent: Agent) => input.coordinator()?.bindings.read(agent.id)?.binding
   const selected = (agent: Agent) => binding(agent)?.selected === true
@@ -98,17 +106,24 @@ export function installNativeFusionSelection(ctx: Context, input: {
     const current = binding(agent)
     return current?.selected ? modelOfProfileId(current.profile.id) ?? FUSION_MODEL : undefined
   }
+  const fusionRoute = (agent: Agent): PhysicalRoute => ({ provider: FUSION_PROVIDER, model: runningCombo(agent) ?? FUSION_MODEL })
   /**
-   * Whether a recorded route is Fusion's *own* physical route for this session's frozen pair.
+   * Whether a recorded route is a pin a *restarted* Host left behind.
    *
-   * The pin map lives in this process, so a Host restart forgets that a recorded
-   * `gz/gpt-6.1-sol` was Fusion's pin and not the user's choice. A route that is exactly the
-   * frozen Lead or Sidekick route cannot be that choice: those are the routes Fusion itself
-   * writes, and a user leaving Fusion would pick a route the pair does not name.
+   * Only a restart needs this. The map that recognises Fusion's own appends lives in this
+   * process, so after one the newest recorded selection can still be the pair's Lead or
+   * Sidekick route for a task the user never left — a durable selection with no owner
+   * (session-7f326880, turn 3 drained the task and then refused the turn). Inside one
+   * process the answer is exact instead: a pin is only what {@link withFusionAppend} is
+   * publishing, so once a real selection event has been observed for the session, a route
+   * that equals a frozen one is the user's own — `gz/gpt-6.1-sol` and
+   * `gz/deepseek-v4.1-flash` are also perfectly ordinary models to pick by hand, and
+   * reading those picks as a pin is what kept a Fusion task alive after the user left it.
    */
-  const isFrozenRoute = (agent: Agent, route: PhysicalRoute | undefined): boolean => {
+  const isRestartPin = (agent: Agent, route: PhysicalRoute | undefined): boolean => {
     const current = binding(agent)
     if (!current?.selected || route === undefined) return false
+    if (observed.has(agent.id)) return false
     return (['lead', 'worker'] as const).some(role => route.provider === current.profile[role]?.provider
       && route.model === current.profile[role]?.model)
   }
@@ -144,20 +159,25 @@ export function installNativeFusionSelection(ctx: Context, input: {
         // A session that named the combo before a rename keeps its task, but the
         // route it stored no longer has an adapter; rewrite the spelling only.
         const intent = agent.session.snapshotEvents().findLast(event => event.type === 'model/selection')
-        if (!isCurrentFusionSelection(intent?.data)) agent.session.append('model/selection', {
-          provider: FUSION_PROVIDER, model,
-        })
+        if (!isCurrentFusionSelection(intent?.data)) {
+          // Fusion's own re-statement of a combo the session already carries: the native
+          // menu needs the append, but no intent reader may record it as a user choice.
+          withFusionAppend(agent, () => agent.session.append('model/selection', {
+            provider: FUSION_PROVIDER, model,
+          }))
+        }
         failures.delete(agent.id)
       }
       return
     }
     if (!selected(agent)) return
-    if (isFrozenRoute(agent, route)) {
+    if (isRestartPin(agent, route)) {
       // Fusion's own pin, left over from a turn this Host restarted: the map that recognises
-      // pins does not survive the process. Reading it as a user choice drained the task and
-      // then blocked the next turn with "先停止当前 Fusion 任务，再切换模型。"
-      // (session-7f326880, turn 3). Re-state the combo instead; the next turn records it.
-      desired.set(agent.id, { provider: FUSION_PROVIDER, model: runningCombo(agent) ?? FUSION_MODEL })
+      // pins does not survive the process. Re-state the combo instead; the next turn records it.
+      // (session-7f326880, turn 3). Re-stating runs through this same branch, so the menu
+      // names the combo again and the task is never drained by a value Fusion wrote.
+      desired.set(agent.id, fusionRoute(agent))
+      change(agent)
       return
     }
     const transition = (async () => {
@@ -174,7 +194,10 @@ export function installNativeFusionSelection(ctx: Context, input: {
       // Fusion records the physical route as a selection so a 0.2.2 step uses it. That is
       // its own pin, not the user choosing another model: reading it as a choice would drain
       // the running task on every turn. It is also why the turn boundary restores the intent.
-      if (agent && isNativeRoutePin(agent, event.data)) return
+      // The guard is scoped to the append's own publication, so a *later* event that happens
+      // to name the same route is still the user's choice.
+      if (agent && isNativeRoutePin(agent)) return
+      observed.add(session.id)
       if (agent) recordNativeIntent(agent, event.data)
       desired.set(session.id, event.data)
       if (agent && (agent.status === 'idle' || !isFusionSelection(event.data))) change(agent)
@@ -201,7 +224,6 @@ export function installNativeFusionSelection(ctx: Context, input: {
       // `change` may have persisted the virtual selection after the scope installed its
       // physical route; the step about to be prepared reads whichever was last.
       input.coordinator()?.pinRoute(agent)
-
     }),
     ctx.on('agent/request', async (payload, next) => {
       const config = await next(), agent = payload.agent
@@ -213,7 +235,7 @@ export function installNativeFusionSelection(ctx: Context, input: {
         // its physical route is applied after this continuation returns.
         // The catalog adapter itself cannot dispatch any upstream request.
         if (!selected(agent)) throw new Error(blocked(route?.model ?? FUSION_MODEL))
-      } else if (selected(agent) && !isFrozenRoute(agent, route)) throw new Error('先停止当前 Fusion 任务，再切换模型。')
+      } else if (selected(agent) && !isRestartPin(agent, route)) throw new Error('先停止当前 Fusion 任务，再切换模型。')
       return config
     }, { prepend: true }),
   ]

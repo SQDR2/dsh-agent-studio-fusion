@@ -148,7 +148,7 @@ export class NativeCacheKeepalive {
   /** Called again after asynchronous context measurement, before spend admission. */
   assertRequest(agent: Agent, request: GenerateOptions): void {
     const extra = this.auxiliary.get(request)
-    if (!extra) return
+    if (!extra || extra.purpose !== 'cache-keepalive') return
     const row = this.#series.get(agent.id)
     if (!row || row.record.id !== extra.seriesId || row.record.attempts !== extra.iteration
       || row.record.taskId !== extra.taskId || row.record.sessionId !== extra.sessionId

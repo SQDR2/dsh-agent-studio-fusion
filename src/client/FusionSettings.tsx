@@ -5,8 +5,9 @@ import { AcpSettingsGuide } from './AcpSettingsGuide.js'
 import { STUDIO_TITLE } from './studio-brand.js'
 import { useEffect, useState } from 'react'
 import type { PhysicalRoute } from '../contracts.js'
-import type { PairChoice, SettingsCatalog } from '../host/settings.js'
+import type { PairChoice, PairRole, SettingsCatalog } from '../host/settings.js'
 import { missingRoutes } from '../host/settings.js'
+import { FOREMAN_MAX_OUTPUT_TOKENS, FOREMAN_TIMEOUT_MS } from '../profile/foreman.js'
 import { settingsChanged } from './settings-events.js'
 import { tr, useLang } from './i18n.js'
 import { FUSION_API_PATH } from '../identity.js'
@@ -47,6 +48,21 @@ const styles = `
 .fusion-settings .fusion-limits{display:flex;flex-direction:column;gap:12px;padding-top:14px}
 .fusion-settings :is(input[type=number],input[type=text]){min-width:0;width:100%;box-sizing:border-box;background-color:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);border:1px solid var(--dsw-alias-border-l2);border-radius:7px;padding:8px;font:inherit}
 .fusion-settings .fusion-consent{display:flex;align-items:flex-start;gap:8px;font-size:12px;line-height:18px}
+.fusion-optional{display:flex;flex-direction:column;gap:12px;padding-top:16px;border-top:1px solid var(--dsw-alias-border-l1)}
+/* Two classes on purpose: the shared .fusion-settings label grid (85px first
+   column) would otherwise win and push the box 85px away from its own text. */
+.fusion-settings .fusion-toggle{display:flex;align-items:flex-start;gap:10px;padding:11px 12px;border:1px solid var(--dsw-alias-border-l2);border-radius:9px;background-color:var(--dsw-alias-bg-layer-1);cursor:pointer;font-size:13px;line-height:20px;transition:border-color .15s ease,background-color .15s ease}
+.fusion-settings .fusion-toggle:hover{background-color:var(--dsw-alias-interactive-bg-hover)}
+.fusion-settings .fusion-toggle:focus-within{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:2px}
+.fusion-settings .fusion-toggle[data-on=true]{border-color:var(--dsw-alias-brand-primary);background-color:var(--dsw-alias-interactive-bg-hover-accent)}
+.fusion-settings .fusion-toggle input{flex:none;width:16px;height:16px;margin:2px 0 0;accent-color:var(--dsw-alias-brand-primary);cursor:pointer}
+.fusion-toggle-text{display:flex;flex-direction:column;gap:3px;min-width:0}
+.fusion-toggle-title{font-size:13px;font-weight:600;overflow-wrap:anywhere}
+.fusion-toggle-text small{font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary);overflow-wrap:anywhere}
+.fusion-foreman-panel{display:flex;flex-direction:column;gap:12px;padding:14px;border:1px solid var(--dsw-alias-border-l2);border-radius:9px;background-color:var(--dsw-alias-bg-module-platform)}
+.fusion-foreman-panel>p{margin:0;font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary);overflow-wrap:anywhere}
+.fusion-field-error{margin:0;font-size:12px;line-height:18px;color:var(--dsw-alias-state-error-primary);overflow-wrap:anywhere}
+.fusion-settings :is(input[type=number],input[type=text])[aria-invalid=true]{border-color:var(--dsw-alias-state-error-primary)}
 .fusion-combos{display:flex;flex-direction:column;gap:8px}
 .fusion-settings .fusion-combo{display:flex;align-items:stretch;padding:0;border:1px solid var(--dsw-alias-border-l2);border-radius:10px;background-color:var(--dsw-alias-bg-layer-1);font-size:13px;overflow:hidden;transition:border-color .15s ease,background-color .15s ease}
 .fusion-settings .fusion-combo:hover{background-color:var(--dsw-alias-interactive-bg-hover)}
@@ -61,6 +77,7 @@ const styles = `
 .fusion-settings .fusion-combo-text{display:flex;flex-direction:column;gap:2px;min-width:0}
 .fusion-settings .fusion-combo-name{font-weight:600;overflow-wrap:anywhere}
 .fusion-settings .fusion-combo-routes{color:var(--dsw-alias-label-secondary);font-size:12px;overflow-wrap:anywhere}
+.fusion-settings .fusion-combo-roles{color:var(--dsw-alias-label-secondary);font-size:12px;overflow-wrap:anywhere}
 .fusion-settings .fusion-combo-stale{color:var(--dsw-alias-state-error-primary);font-size:12px;overflow-wrap:anywhere}
 .fusion-settings .fusion-combo-actions{flex:none;align-self:stretch;display:flex;align-items:center;padding:0 14px;border:0;border-left:1px solid var(--dsw-alias-border-l1);border-radius:0;background:none;color:var(--dsw-alias-label-secondary);font:inherit;font-size:12px;cursor:pointer;transition:color .15s ease,background-color .15s ease}
 .fusion-settings .fusion-combo-actions:hover:not(:disabled){color:var(--dsw-alias-state-error-primary);background-color:var(--dsw-alias-interactive-bg-hover-danger)}
@@ -121,6 +138,10 @@ const styles = `
 .fusion-history-actions button{padding:3px 12px;font-size:12px;border-radius:14px}
 .fusion-history-actions button.fusion-btn-subtle{background:transparent;color:var(--dsw-alias-label-primary)}
 .fusion-history-confirm-text{font-size:12px;color:var(--dsw-alias-label-secondary)}
+.fusion-history-plan-review{margin-top:6px;font-size:12px;color:var(--dsw-alias-label-secondary)}
+.fusion-history-plan-review summary{cursor:pointer;overflow-wrap:anywhere}
+.fusion-history-plan-review ul{margin:6px 0 0;padding-left:18px;display:flex;flex-direction:column;gap:6px}
+.fusion-history-plan-review small{display:block;overflow-wrap:anywhere;color:var(--dsw-alias-label-secondary)}
 @media(max-width:480px){.fusion-page{padding:0 16px 32px}.fusion-settings label{grid-template-columns:1fr;gap:6px}.fusion-settings .fusion-card{padding:16px}}
 .fusion-agy{box-sizing:border-box;width:100%;border:1px solid var(--dsw-alias-border-l2);border-radius:8px;background:var(--dsw-alias-bg-module-platform);padding:16px;display:flex;flex-direction:column;gap:12px}
 .fusion-agy-summary{cursor:pointer;font-weight:600;font-size:14px;display:flex;align-items:center;justify-content:space-between;gap:12px;list-style:none;user-select:none;padding:2px 0}
@@ -141,10 +162,10 @@ const styles = `
 const key = (route: PhysicalRoute | undefined) => route ? JSON.stringify([route.provider, route.model]) : ''
 
 export function ModelChoice({ role, route, catalog, onChange }: {
-  role: 'Lead' | 'Sidekick' | 'compactor'; route?: PhysicalRoute; catalog: SettingsCatalog; onChange(route: PhysicalRoute | undefined): void
+  role: 'Lead' | 'Sidekick' | 'compactor' | 'Foreman'; route?: PhysicalRoute; catalog: SettingsCatalog; onChange(route: PhysicalRoute | undefined): void
 }) {
   const lang = useLang()
-  const name = role === 'compactor' ? tr(lang, '压缩', 'Compaction') : role
+  const name = role === 'compactor' ? tr(lang, '压缩', 'Compaction') : role === 'Foreman' ? tr(lang, '工长', 'Foreman') : role
   const model = catalog.groups.find(group => group.id === route?.provider)?.models.find(model => model.id === route?.model)
   // A saved route the catalog no longer offers would otherwise fall back to the
   // placeholder, silently reading as "nothing chosen" — and hiding which model
@@ -152,7 +173,7 @@ export function ModelChoice({ role, route, catalog, onChange }: {
   const stale = route !== undefined && model === undefined
   return <fieldset>
     <legend>{name}</legend>
-    <p>{role === 'Lead' ? tr(lang, '回答问题、制定方案并审查结果。', 'Answers, plans and reviews.') : role === 'Sidekick' ? tr(lang, '执行命令和修改，接收反馈后继续。', 'Runs commands and makes changes, then continues with feedback.') : tr(lang, '整理较早的上下文，供 Lead 或 Worker 继续工作。', 'Summarises older context so the Lead or Sidekick can continue.')}</p>
+    <p>{role === 'Lead' ? tr(lang, '回答问题、制定方案并审查结果。', 'Answers, plans and reviews.') : role === 'Sidekick' ? tr(lang, '执行命令和修改，接收反馈后继续。', 'Runs commands and makes changes, then continues with feedback.') : role === 'Foreman' ? tr(lang, '独立审查计划，发现潜在语义缺陷。', 'Independently audits plans to identify semantic gaps.') : tr(lang, '整理较早的上下文，供 Lead 或 Worker 继续工作。', 'Summarises older context so the Lead or Sidekick can continue.')}</p>
     <label>{tr(lang, '模型', 'Model')}<select aria-label={tr(lang, `${name} 模型`, `${name} model`)} value={key(route)} onChange={event => {
       if (!event.target.value) { onChange(undefined); return }
       const [provider, model] = JSON.parse(event.target.value) as [string, string]
@@ -176,6 +197,12 @@ export function ModelChoice({ role, route, catalog, onChange }: {
   </fieldset>
 }
 
+/** Same physical route, including reasoning effort: a different effort is a different arm. */
+const sameRoute = (left: { provider: string; model: string; reasoningEffort?: string },
+  right: { provider: string; model: string; reasoningEffort?: string } | undefined): boolean =>
+  right !== undefined && left.provider === right.provider && left.model === right.model
+  && left.reasoningEffort === right.reasoningEffort
+
 let draftKeys = 0
 const toDraft = (pairs: readonly SavedPairView[]): DraftCombo[] => pairs.map(({ id, name, pair }) => ({ key: id, id, name, pair }))
 
@@ -197,8 +224,8 @@ export function FusionSettings() {
   const routeName = (route?: PhysicalRoute) => route
     ? state?.catalog.groups.find(group => group.id === route.provider)?.models.find(model => model.id === route.model)?.name
       ?? `${route.provider}/${route.model}` : '—'
-  const roleLabel = (role: 'lead' | 'worker' | 'compactor') => role === 'lead' ? tr(lang, 'Lead', 'Lead')
-    : role === 'worker' ? tr(lang, 'Sidekick', 'Sidekick') : tr(lang, '压缩模型', 'Compaction model')
+  const roleLabel = (role: PairRole) => role === 'lead' ? tr(lang, 'Lead', 'Lead')
+    : role === 'worker' ? tr(lang, 'Sidekick', 'Sidekick') : role === 'foreman' ? tr(lang, '工长', 'Foreman') : tr(lang, '压缩模型', 'Compaction model')
   const update = (change: (combo: DraftCombo) => DraftCombo) => setDraft(value => value.map((combo, index) =>
     combo.key === current?.key ? change(combo) : combo))
   const chooseModel = (role: 'lead' | 'worker', route: PhysicalRoute) => update(combo => ({ ...combo, pair: { ...combo.pair, [role]: route,
@@ -224,6 +251,27 @@ export function FusionSettings() {
     if (!state) return
     const invalid = draft.findIndex(combo => !combo.pair.lead || !combo.pair.worker || !combo.name.trim())
     if (invalid >= 0) { setError(tr(lang, `第 ${invalid + 1} 个组合还不完整：需要名称、Lead 和 Sidekick。`, `Combo ${invalid + 1} is incomplete: it needs a name, a Lead and a Sidekick.`)); return }
+    const missingForeman = draft.findIndex(combo => combo.pair.foreman && (!combo.pair.foreman.route || !combo.pair.foreman.route.model || !combo.pair.foreman.route.model.trim()))
+    if (missingForeman >= 0) {
+      setError(tr(lang, `第 ${missingForeman + 1} 个组合开启了工长审查，必须选择工长模型。`, `Combo ${missingForeman + 1} has Foreman review enabled: choose a Foreman model.`))
+      return
+    }
+    // Checked here as well as on the Host so the message can name the combo, the
+    // field and the value the user typed, instead of restating every bound at once.
+    const badForeman = draft.flatMap((combo, index) => {
+      const foreman = combo.pair.foreman
+      if (!foreman) return []
+      if (!Number.isSafeInteger(foreman.maxOutputTokens) || foreman.maxOutputTokens < 1 || foreman.maxOutputTokens > FOREMAN_MAX_OUTPUT_TOKENS) {
+        return [tr(lang, `第 ${index + 1} 个组合的工长输出上限必须是 1–${FOREMAN_MAX_OUTPUT_TOKENS} 的整数 Token，现在是 ${foreman.maxOutputTokens}。`,
+          `Combo ${index + 1}: the Foreman output limit must be an integer of 1–${FOREMAN_MAX_OUTPUT_TOKENS} tokens; it is ${foreman.maxOutputTokens}.`)]
+      }
+      if (!Number.isSafeInteger(foreman.timeoutMs) || foreman.timeoutMs < FOREMAN_TIMEOUT_MS.min || foreman.timeoutMs > FOREMAN_TIMEOUT_MS.max) {
+        return [tr(lang, `第 ${index + 1} 个组合的工长超时必须 ${FOREMAN_TIMEOUT_MS.min}–${FOREMAN_TIMEOUT_MS.max} 毫秒（最多 10 分钟），现在是 ${foreman.timeoutMs}。`,
+          `Combo ${index + 1}: the Foreman timeout must be ${FOREMAN_TIMEOUT_MS.min}–${FOREMAN_TIMEOUT_MS.max} ms (up to 10 minutes); it is ${foreman.timeoutMs}.`)]
+      }
+      return []
+    })
+    if (badForeman.length) { setError(badForeman.join(tr(lang, ' ', ' '))); return }
     // A route that no longer exists cannot be saved, and the Host's own refusal
     // names only the role. Checked here so the message can name the combo too:
     // with several rows, "the Lead model is gone" does not say which row to open.
@@ -245,7 +293,13 @@ export function FusionSettings() {
       const confirmed = await fetch(`${FUSION_API_PATH}?view=settings`, { credentials: 'same-origin', cache: 'no-store' })
       if (!confirmed.ok) throw new Error(tr(lang, '配置已提交，但暂时无法确认，请刷新', 'Saved, but not confirmed yet; refresh'))
       const next = await confirmed.json() as SettingsState
-      setState(next); setDraft(toDraft(next.pairs)); setActive(0)
+      const nextDraft = toDraft(next.pairs)
+      setState(next); setDraft(nextDraft)
+      // Stay on the combo the user was editing. The Host keeps the submitted order and
+      // reuses the ids it already knew, so the saved row is still the same row; resetting
+      // to 0 hid the row just saved and looked like the save had replaced it.
+      const saved = current?.id ? nextDraft.findIndex(combo => combo.id === current.id) : -1
+      setActive(saved >= 0 ? saved : Math.min(active, nextDraft.length - 1))
       settingsChanged()
       setNotice(tr(lang, '组合已保存。模型菜单中每个组合各占一项，不同会话可以同时使用不同组合。', 'Combos saved. Each one is its own model-menu entry, so different conversations can use different combos at the same time.'))
     } catch (error) { setError(error instanceof Error ? error.message : String(error)) }
@@ -254,6 +308,14 @@ export function FusionSettings() {
   const dirty = state ? JSON.stringify(draft.map(({ id, name, pair }) => ({ id, name, pair })))
     !== JSON.stringify(state.pairs.map(({ id, name, pair }) => ({ id, name, pair }))) : false
   const blocked = state?.pairs.filter(pair => !pair.authorized) ?? []
+  // Flagged while the user types, so an out-of-range number is visible before the
+  // save round trip — the Host's refusal used to arrive as one sentence covering
+  // model, output limit and timeout together, naming none of them.
+  const foremanNow = current?.pair.foreman
+  const foremanTokensInvalid = foremanNow !== undefined
+    && (!Number.isSafeInteger(foremanNow.maxOutputTokens) || foremanNow.maxOutputTokens < 1 || foremanNow.maxOutputTokens > FOREMAN_MAX_OUTPUT_TOKENS)
+  const foremanTimeoutInvalid = foremanNow !== undefined
+    && (!Number.isSafeInteger(foremanNow.timeoutMs) || foremanNow.timeoutMs < FOREMAN_TIMEOUT_MS.min || foremanNow.timeoutMs > FOREMAN_TIMEOUT_MS.max)
   return <div className="fusion-page">
     <style>{styles}</style>
     <div className="fusion-settings">
@@ -299,6 +361,8 @@ export function FusionSettings() {
                   <span className="fusion-combo-text">
                     <span className="fusion-combo-name">{label}</span>
                     <span className="fusion-combo-routes">{`${routeName(combo.pair.lead)} → ${routeName(combo.pair.worker)}`}</span>
+                    {combo.pair.foreman && <span className="fusion-combo-roles">
+                      {tr(lang, `工长：${routeName(combo.pair.foreman.route)}`, `Foreman: ${routeName(combo.pair.foreman.route)}`)}</span>}
                     {missingRoutes(combo.pair, state.catalog).length > 0 && <span className="fusion-combo-stale">
                       {tr(lang, '有模型已不可用，需要重新选择', 'A model is no longer available; choose it again')}</span>}
                   </span>
@@ -325,11 +389,136 @@ export function FusionSettings() {
                 const { compactor, ...rest } = combo.pair
                 return { ...combo, pair: route ? { ...rest, compactor: { route, maxOutputTokens: compactor?.maxOutputTokens ?? 8192 } } : rest }
               })} />
-              {current.pair.compactor && <label>{tr(lang, '输出 Token 上限', 'Output token limit')}<input aria-label={tr(lang, '压缩输出 Token 上限', 'Compaction output token limit')} type="number" min="1" max="128000"
+              {current.pair.compactor && <label>{tr(lang, '输出上限', 'Output limit')}<input aria-label={tr(lang, '压缩输出 Token 上限', 'Compaction output token limit')} type="number" min="1" max="128000"
                 value={current.pair.compactor.maxOutputTokens} onChange={event => { const maxOutputTokens = Number(event.target.value)
                   update(combo => combo.pair.compactor ? { ...combo, pair: { ...combo.pair, compactor: { ...combo.pair.compactor, maxOutputTokens } } } : combo) }} /></label>}
             </div>
           </details>
+          <div className="fusion-optional">
+            <label className="fusion-toggle" data-on={Boolean(current.pair.foreman)}>
+              <input
+                type="checkbox"
+                aria-label={tr(lang, '启用工长审查', 'Enable Foreman review')}
+                checked={Boolean(current.pair.foreman)}
+                onChange={event => {
+                  const enabled = event.target.checked
+                  update(combo => {
+                    const { foreman: _old, ...rest } = combo.pair
+                    if (!enabled) return { ...combo, pair: rest }
+                    return {
+                      ...combo,
+                      pair: {
+                        ...rest,
+                        foreman: {
+                          route: combo.pair.lead ?? { provider: '', model: '' },
+                          // A review that finds many problems must still fit its budget, and a
+                          // slow reviewer must be allowed to finish: 4096 output tokens and 30
+                          // seconds turned real reviews into `max-tokens` and `TimeoutError`
+                          // aborts, which the gate then reads as approval.
+                          maxOutputTokens: 8192,
+                          timeoutMs: 120000,
+                        },
+                      },
+                    }
+                  })
+                }}
+              />
+              <span className="fusion-toggle-text">
+                {/* A span, not <b>: the section's only bold lead-in is the pairing tip. */}
+                <span className="fusion-toggle-title">{tr(lang, '工长计划审查', 'Foreman plan review')}</span>
+                {/* The closed row still says what it is set to: a bare checkbox left
+                    the user guessing whether a Foreman was configured at all. */}
+                <small>{current.pair.foreman
+                  ? current.pair.foreman.route.provider && current.pair.foreman.route.model
+                    ? tr(lang, `已启用 · ${routeName(current.pair.foreman.route)} · 每一份计划都先审查`,
+                      `On · ${routeName(current.pair.foreman.route)} · every plan is reviewed first`)
+                    : tr(lang, '已启用，但还没有选择工长模型：保存前必须选一个。', 'On, but no Foreman model is chosen yet; choose one before saving.')
+                  : tr(lang, '可选。开启后每一份候选计划都先由独立模型审查，发现语义缺陷；关闭时不影响任何流程。',
+                    'Optional. When on, an independent model reviews every candidate plan before it runs; when off nothing changes.')}</small>
+              </span>
+            </label>
+            {current.pair.foreman && (
+              <div className="fusion-foreman-panel">
+                <p>{tr(lang, '工长模型独立审计候选工作单，发现潜在语义缺陷。开启后模型必填，且每一份候选计划都必须先通过审查：没有“仅审查不阻断”或“只审高风险”这类开关。',
+                  'The Foreman independently audits candidate work orders for semantic gaps. The model is required while this is on, and every candidate plan must pass its review: there is no "audit only" or "high-risk only" setting.')}</p>
+                {/* The plan warns against a hard price check and for a same-model arm: the same
+                    model in a separate context is a valid experiment, so this is a hint, and
+                    saving is never refused for it. */}
+                {current.pair.foreman.route.provider && current.pair.foreman.route.model
+                  && sameRoute(current.pair.foreman.route, current.pair.lead)
+                  && <p role="status">{tr(lang, '工长与 Lead 使用同一个模型。独立上下文仍然是有效的审查，但两者会看到同样的盲区；可以换一个模型提高独立性。',
+                    'The Foreman uses the same model as the Lead. A separate context still reviews independently, but both share the same blind spots; a different model would be more independent.')}</p>}
+                {current.pair.foreman.route.provider && current.pair.foreman.route.model
+                  && sameRoute(current.pair.foreman.route, current.pair.worker)
+                  && <p role="status">{tr(lang, '工长与 Sidekick 使用同一个模型。这不阻止保存；两者职责不同，独立上下文仍是有效的审查。',
+                    'The Foreman uses the same model as the Sidekick. This does not block saving; the roles differ, so a separate context still reviews independently.')}</p>}
+                <ModelChoice
+                  role="Foreman"
+                  route={current.pair.foreman.route}
+                  catalog={state.catalog}
+                  onChange={route => {
+                    update(combo => {
+                      if (!combo.pair.foreman) return combo
+                      return {
+                        ...combo,
+                        pair: {
+                          ...combo.pair,
+                          foreman: {
+                            ...combo.pair.foreman,
+                            route: route ?? { provider: '', model: '' },
+                          },
+                        },
+                      }
+                    })
+                  }}
+                />
+                <label>
+                  {tr(lang, '输出上限', 'Output limit')}
+                  <input
+                    aria-label={tr(lang, '工长输出 Token 上限', 'Foreman output token limit')}
+                    aria-invalid={foremanTokensInvalid}
+                    type="number"
+                    min="1"
+                    max={FOREMAN_MAX_OUTPUT_TOKENS}
+                    value={current.pair.foreman.maxOutputTokens}
+                    onChange={event => {
+                      const maxOutputTokens = Number(event.target.value)
+                      update(combo =>
+                        combo.pair.foreman
+                          ? { ...combo, pair: { ...combo.pair, foreman: { ...combo.pair.foreman, maxOutputTokens } } }
+                          : combo,
+                      )
+                    }}
+                  />
+                </label>
+                {foremanTokensInvalid && <p className="fusion-field-error" role="alert">
+                  {tr(lang, `输出上限要在 1–${FOREMAN_MAX_OUTPUT_TOKENS} 之间，现在是 ${current.pair.foreman.maxOutputTokens}。`,
+                    `The output limit must be 1–${FOREMAN_MAX_OUTPUT_TOKENS}; it is ${current.pair.foreman.maxOutputTokens}.`)}</p>}
+                <label>
+                  {tr(lang, '超时 (ms)', 'Timeout (ms)')}
+                  <input
+                    aria-label={tr(lang, '工长超时毫秒', 'Foreman timeout (ms)')}
+                    aria-invalid={foremanTimeoutInvalid}
+                    type="number"
+                    min={FOREMAN_TIMEOUT_MS.min}
+                    max={FOREMAN_TIMEOUT_MS.max}
+                    value={current.pair.foreman.timeoutMs}
+                    onChange={event => {
+                      const timeoutMs = Number(event.target.value)
+                      update(combo =>
+                        combo.pair.foreman
+                          ? { ...combo, pair: { ...combo.pair, foreman: { ...combo.pair.foreman, timeoutMs } } }
+                          : combo,
+                      )
+                    }}
+                  />
+                </label>
+                {foremanTimeoutInvalid && <p className="fusion-field-error" role="alert">
+                  {tr(lang, `超时要 ${FOREMAN_TIMEOUT_MS.min}–${FOREMAN_TIMEOUT_MS.max} 毫秒（最多 10 分钟），现在是 ${current.pair.foreman.timeoutMs}。`,
+                    `The timeout must be ${FOREMAN_TIMEOUT_MS.min}–${FOREMAN_TIMEOUT_MS.max} ms (up to 10 minutes); it is ${current.pair.foreman.timeoutMs}.`)}</p>}
+              </div>
+            )}
+          </div>
         </fieldset>}
         <div className="fusion-actions"><p>{tr(lang, '已选中的会话保留原组合；新选择使用新组合。额度耗尽后要换当前任务的 Sidekick，用该会话的 Fusion 恢复面板，而不是只改这里。', 'Conversations already using Fusion keep their pair; new selections use the new one. After a quota stop, switch this conversation\'s Sidekick from its Fusion recovery panel, not only here.')}</p>
           <button disabled={saving || !dirty || !draft.length} onClick={() => { void save() }}>{saving ? tr(lang, '正在保存…', 'Saving…') : tr(lang, '保存组合', 'Save combos')}</button>
