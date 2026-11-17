@@ -20,6 +20,43 @@ own tags and releases.
 Entry format: what changed, then what was actually validated. "Not claimed" lines mark what a release did *not* test —
 read them before assuming a platform is covered.
 
+## 1.2.1 — 2026-11-17
+
+### The plugin activates in a headless composition that has no web Host
+
+- **`inject` listed `webServer` and `sessionController`, so a composition without an HTTP
+  server never activated the plugin at all.** `dsh headless`, the SDK and ACP profiles, and
+  multica-style stdio hosts have neither service; Cordis refused the entry, which took the
+  Fusion model menu, the sidebar and `/fusion` down with it — and also the built-in agy
+  capability hosted by this same plugin, even though the agy side has always tolerated a
+  missing web server (see [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md)). Both services
+  are now resolved with `ctx.get(...)`, and every use degrades instead of failing:
+  - The Fusion API routes (and the pre-rename legacy path) register only when a web server
+    exists; with none, the plugin installs no route and still activates.
+  - The model catalog falls back to `llm.listProviders()` / `llm.listModels()`, and
+    `?view=catalog` answers `{ groups: [] }` instead of throwing.
+  - `/fusion off` re-selects the Lead model only when a session controller exists.
+  - Recovering a historical task falls back to `ctx.agents.get(...)`, then reports
+    `Agent <id> not found` rather than dereferencing a service that is not there.
+  - The ACP Sidekick bridge installs no route without a web server, and `hostOrigin()` reads
+    it through `ctx.get`.
+
+### One unreadable binding no longer hides every other selection
+
+- **A binding frozen by an earlier version failed the whole `selected()` scan.** `readBinding`
+  rejects a row whose `profile` no longer re-serializes to the same digest — which is exactly
+  what happens when a profile gained a field since the row was written — and `selected()`
+  mapped over every stored id, so a single stale row took the entire selection list with it.
+  Each row is now read in its own `try`/`catch`: the unreadable one is skipped and the rest
+  still resolve.
+
+Validated: `pnpm typecheck` clean; unit suite 824 passed (81 files); host suite 326 passed,
+1 skipped, against `DSHX_HARNESS=/home/zlw/github/deepseek-harness` on dsh 0.2.2-rc.2. Not
+claimed: no headless Host was booted for this release, so "activates without a web server" is
+established by the `inject` list and the degraded code paths, not by a running headless
+process; and the 1.2.0 Foreman work this release merged over is covered only by the two
+suites above, not by a new test of the combination.
+
 ## 1.2.0 — 2026-11-17
 
 ### Saving a combo no longer jumps the settings page back to the first one
