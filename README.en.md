@@ -50,7 +50,7 @@ dsh plugin --profile web add @sqdr2/dsh-agent-studio-fusion
 Installing straight from GitHub works too (the repository ships a built `lib/`): `dsh plugin --profile web add github:SQDR2/dsh-agent-studio-fusion`. Desktop-app install, local-directory install, uninstall and migration from older packages: **[INSTALL.md](INSTALL.md)**.
 
 1. Open **Fusion** in the left sidebar (default below Memory System).
-2. In **Fusion combos**, name the combo and choose a Lead and a Sidekick. Any model you are signed in to works, including a configured Antigravity or ACP route.
+2. In **Fusion combos**, name the combo and choose a Lead and a Sidekick. Any model you are signed in to works, including a configured Antigravity or ACP route. You can also give the combo a **Foreman** reviewer model, off by default — see [Foreman review](#foreman-review-optional).
 3. Pick **Fusion · combo name** in the model menu and work as usual.
 4. Fusion's chip near the composer names the role working right now, its model and its permission: `Lead · model · Read Only` / `Sidekick · model · Full access`.
 
@@ -114,6 +114,59 @@ A task stops in one of three ways, and each continues differently:
 5. Tests that were already failing (a missing optional dependency, for instance) can be marked "no new failures".
 6. **The one exception**: a takeover the Host unlocks only when the Sidekick demonstrably cannot finish (still failing after 2 rework rounds, step limit reached, repeated stalls). The Lead may then change only the files the task allows, must pass the same acceptance, and returns to read-only afterwards.
 7. Quota or provider errors are handled per role: switch a model or schedule a continuation, with progress kept.
+
+With Foreman review on, step 1 is followed by an independent audit of the plan before the Sidekick
+sees it (see [Foreman review](#foreman-review-optional)).
+
+**Committing, pushing, tagging, publishing, opening or updating a pull request and triggering CI are
+not part of the write lease.** When you ask for one of those, the Lead grants that exact action in the
+brief; the Sidekick's other such commands stay refused by the Host
+(`FUSION_WORKER_AUTHORITY_DENIED`). Saying "commit and push" after the change was accepted works too:
+the Lead does not run git itself (it is read-only in that turn) and does not open a second work order —
+it adds that action to the same order (widen only, recorded as an amendment) and has that Sidekick run it.
+
+## Foreman review (optional)
+
+A combo can carry a third model: the **Foreman**. It does none of the work. Once the Lead has frozen a
+candidate work order and before the Sidekick receives it, the Foreman audits the plan itself in a
+**separate context** — the same order the Sidekick is about to get: your words, the acceptance commands,
+requirement coverage, the paths it may change.
+
+It looks for the "all checks green and still wrong" class of problem:
+
+- whether every hard requirement is actually covered by the plan;
+- whether a fully green acceptance can still be a false pass (weak assertions, half the cases, a test edited to always pass);
+- whether a key Lead decision has a counterexample that overthrows it;
+- whether the plan treats an unverified assumption as fact;
+- whether the brief, the constraints, the allowed paths and the acceptance commands contradict each other;
+- whether a requirement is materially ambiguous in a way that changes external behaviour.
+
+**Turning it on.** Each combo has its own "Foreman plan review" switch, off by default. Once on, a model
+is required — the same model as the Lead or Sidekick is allowed, since a separate context still reviews
+independently, and the panel only warns — and you can set reasoning effort, an output ceiling (8192 by
+default) and a timeout (2 minutes by default, up to 10). **There is no "audit only" or "high-risk only"
+policy**: while it is on, every candidate is reviewed — explore, text and implement orders alike. Turn it
+off if you do not want it; a reviewer that silently skips plans is indistinguishable from a broken one.
+
+**When it disagrees.** The dispatch is blocked and the Lead must answer every finding, in one of two ways:
+
+- **accept**: change the plan (brief, paths, acceptance) — and the revised candidate owes its own round-2 review;
+- **override**: state a reason, and the reason is recorded durably. An override covers only the candidate
+  that was actually reviewed; overriding while quietly changing the plan is refused.
+
+At most two rounds. If round 2 still disagrees, the Lead can only override, ask you, or stop — there is
+no third round.
+
+**A review that cannot finish lets the task through, and says so.** On a timeout, a quota or route
+failure or unparseable output, the review is recorded as `unavailable` and the task continues (the
+Host's own structural, path and permission checks still refuse an invalid order). A notice in the
+conversation says this plan was never audited, and the status panel's "Foreman review" section reads
+`unavailable` with the reason. The same panel shows `reviewing / ready / concerns / unavailable`, the
+round, how many findings were accepted and overridden, and the findings still open.
+
+**It is billed separately.** Foreman calls are recorded under the `foreman` purpose; the history shows
+per task how many reviews ran, how many tokens and roughly what they cost, how many findings there were
+and how each was answered. Review rounds are not counted as Sidekick rework rounds.
 
 ## The three routes
 
@@ -242,6 +295,7 @@ On Windows, put PowerShell 7 (`pwsh`), Node and Python on the test process PATH.
 | [CHANGELOG.md](CHANGELOG.md) | What each release changed, validated, and did **not** validate |
 | [docs/EVIDENCE.md](docs/EVIDENCE.md) | Measurement method, raw data, excluded attempts |
 | [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) | The DSH interfaces this depends on, and the upgrade procedure |
+| [docs/FOREMAN-WORKFLOW-PLAN.md](docs/FOREMAN-WORKFLOW-PLAN.md) | Foreman review: the design, the Host/Foreman split and the implementation phases (Chinese) |
 | [docs/WORKER-TOOLS-UNREACHABLE.md](docs/WORKER-TOOLS-UNREACHABLE.md) | Diagnosing a Sidekick that cannot reach tools, and the text-report fallback |
 | [docs/MIGRATION-AGY.md](docs/MIGRATION-AGY.md) | Moving from `dsh-agy-worker` to the built-in Antigravity |
 | [docs/MIGRATION-ACP.md](docs/MIGRATION-ACP.md) | Moving from `dsh-tauri-acp` to the built-in ACP routes |

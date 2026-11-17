@@ -51,7 +51,7 @@ dsh plugin --profile web add @sqdr2/dsh-agent-studio-fusion
 也可以直接从 GitHub 装（仓库自带构建好的 `lib/`）：`dsh plugin --profile web add github:SQDR2/dsh-agent-studio-fusion`。桌面版安装、本地目录安装、卸载、从旧包迁移见 **[INSTALL.zh.md](INSTALL.zh.md)**。
 
 1. 打开左侧边栏的 **Fusion**（默认在记忆系统下方）。
-2. 在 **Fusion 组合** 里起个名字，选 Lead 和 Sidekick。DSH 里任何已登录的模型都能选，包括已配好的 Antigravity 与 ACP 线路。
+2. 在 **Fusion 组合** 里起个名字，选 Lead 和 Sidekick。DSH 里任何已登录的模型都能选，包括已配好的 Antigravity 与 ACP 线路。还可以给这个组合加一个**工长**审查模型，默认关闭，见 [工长审查](#工长审查可选)。
 3. 在模型菜单里选 **Fusion · 组合名称**，像平时一样对话。
 4. 输入框附近的 Fusion 标签随时显示当前谁在干活：`Lead · 模型 · 仅可查看` / `Sidekick · 模型 · 完全权限`。
 
@@ -104,6 +104,36 @@ dsh plugin --profile web add @sqdr2/dsh-agent-studio-fusion
 5. 原本就失败的测试（如缺可选依赖）可以标成「只要求不新增失败」。
 6. **唯一例外**：程序判定 Sidekick 确实做不完（返工 2 轮仍失败、步数耗尽、反复卡住）才解锁 Lead 接手——只能改任务允许的文件，必须过同一套验收，结束后恢复只读。
 7. 额度用完或出错按角色分别处理：换模型继续、定时继续，进度都保留。
+
+开了工长审查的组合，第 1 步之后还要先过一遍独立审查才轮到 Sidekick（见 [工长审查](#工长审查可选)）。
+
+**提交、推送、打 tag、发版、开或更新 PR、触发 CI 不是写租约的一部分。** 你要求这类动作时，Lead 在派活时只授权那一个动作，Sidekick 执行其余未授权的同类命令会被宿主拒绝（`FUSION_WORKER_AUTHORITY_DENIED`）。改动验收之后你才说「提交推送」也可以：Lead 不会自己跑 git（它这一轮是只读的），也不会另开一张工作单，而是把那个动作补授给同一张单子（只增不减，记为工作单修订），再让那个 Sidekick 执行。
+
+## 工长审查（可选）
+
+每个组合还能配第三个模型：**工长**（Foreman）。它不干活，只在 Lead 把候选工作单定稿之后、派给 Sidekick 之前，用**独立上下文**审这份计划本身——看到的是 Sidekick 即将收到的那份单子：你的原话、验收命令、需求覆盖、允许改动的路径。
+
+它盯的是「测试全绿却还是不对」这一类问题：
+
+- 每条硬要求是否真的被计划覆盖；
+- 验收命令全绿是否仍可能假通过（弱断言、只测了半边、把测试改成永远成立）；
+- Lead 的关键决定有没有足以推翻它的反例；
+- 计划里有没有把没验证的假设当成事实；
+- brief、约束、允许路径和验收命令是否互相矛盾；
+- 有没有会产生不同外部行为的需求歧义。
+
+**怎么开关。** 每个组合各自一个「工长计划审查」开关，默认关闭。打开后必须选模型——选和 Lead / Sidekick 同一个模型也允许，独立上下文仍是有效的审查，面板只提示不拦——还能调推理强度、输出上限（默认 8192）和超时（默认 2 分钟，最多 10 分钟）。**没有「只看不拦」或「只审高风险」这类策略**：开着就每一份候选都审，explore、纯文本、实现单都算。不想审就关掉，一个开了却会静默跳过的审查跟坏掉没区别。
+
+**有分歧时会怎样。** 派发被挡住，Lead 必须逐条回应每条意见，两种做法：
+
+- **接受**：改计划（brief、路径、验收条件），改完这份新候选必须再过一次第 2 轮审查；
+- **覆盖**：写清理由，理由进持久记录。覆盖只对「被审过的那一份」有效，一边覆盖一边偷改计划会被拒。
+
+最多两轮。第 2 轮还有分歧，Lead 只能覆盖、问你、或者停下——不会有第三轮。
+
+**审不了就放行，但会说出来。** 超时、额度用完、线路不可用、输出解析不了时记成「不可用」，任务照常继续（Host 自己的结构、路径、权限校验仍然挡住不合法的单子），会话里会插一条说明这次没审成，状态面板的「工长审查」写着 `不可用` 和原因。状态面板同时显示 `审查中 / 就绪 / 有分歧 / 不可用`、第几轮、接受与覆盖各几条，以及还没处理完的意见。
+
+**花费单独记账。** 工长调用记在 `foreman` 用途下，历史里每个任务显示审了几次、多少 token、约多少钱、几条意见、接受/覆盖各几条；审查轮次不算进 Sidekick 的返工轮次。
 
 ## 三条线路
 
@@ -232,6 +262,7 @@ Windows 开发环境需把 PowerShell 7（`pwsh`）、Node 和 Python 加进跑�
 | [CHANGELOG.md](CHANGELOG.md) | 每个版本改了什么、验证了什么、**没有**验证什么 |
 | [docs/EVIDENCE.md](docs/EVIDENCE.md) | 实测方法、原始数据、被排除的尝试 |
 | [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) | 依赖的 DSH 接口、升级适配流程 |
+| [docs/FOREMAN-WORKFLOW-PLAN.md](docs/FOREMAN-WORKFLOW-PLAN.md) | 工长审查的设计、分工边界与实施阶段 |
 | [docs/WORKER-TOOLS-UNREACHABLE.md](docs/WORKER-TOOLS-UNREACHABLE.md) | Sidekick 够不到工具时的诊断与文本报告兜底 |
 | [docs/MIGRATION-AGY.md](docs/MIGRATION-AGY.md) | 从 `dsh-agy-worker` 迁到内建 Antigravity |
 | [docs/MIGRATION-ACP.md](docs/MIGRATION-ACP.md) | 从 `dsh-tauri-acp` 迁到内建 ACP 线路 |
