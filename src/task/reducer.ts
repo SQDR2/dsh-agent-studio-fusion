@@ -16,7 +16,7 @@ import type {
   ReviewResultV2,
   WorkerReport,
 } from '../contracts.js'
-import { TERMINAL_PHASES } from '../contracts.js'
+import { PUBLICATION_PROHIBITION, TERMINAL_PHASES } from '../contracts.js'
 import { digestOf } from '../digest.js'
 import { collectForemanFindings } from '../plan-review.js'
 import { assertCurrentSubject, reportSubject, reviewReadinessReceipt, sameSubject } from '../review/ticket.js'
@@ -393,6 +393,26 @@ function applyPayload(state: TaskState | undefined, event: FusionEvent): TaskSta
         throw new FusionError(WORK_ORDER_CONFLICT, 'Scope expansion requires the current quiescent implementation work order and keeps every allowed path')
       }
       return resetReviewForNewSubject({ ...next, currentWorkOrder: { ...order, allowedPaths: event.payload.allowedPaths } })
+    }
+    case 'work-order/authority-granted': {
+      // The grant is the Lead's own decision, and it is additive: a brief sent
+      // after the order was frozen may grant an action the order left out (the
+      // user asked for the commit once the change was already verified), but no
+      // event may take one back and leave the Sidekick holding an action its
+      // order no longer names.
+      const next = need(state, event), order = next.currentWorkOrder
+      const granted = event.payload.authority
+      if (!order || order.mode === 'explore' || order.mode === 'text' || order.id !== event.payload.workOrderId
+        || (order.authority ?? []).some(action => !granted.includes(action))) {
+        throw new FusionError(WORK_ORDER_CONFLICT, 'An authority grant requires the current implementation work order and keeps every action already granted')
+      }
+      return {
+        ...next,
+        currentWorkOrder: { ...order, authority: granted,
+          // The frozen prohibition described exactly the ungranted state, so it
+          // stops being true the moment the order names an action.
+          forbiddenActions: order.forbiddenActions.filter(action => action !== PUBLICATION_PROHIBITION) },
+      }
     }
     case 'child/accepted':
       return {

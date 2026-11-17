@@ -20,6 +20,42 @@ own tags and releases.
 Entry format: what changed, then what was actually validated. "Not claimed" lines mark what a release did *not* test —
 read them before assuming a platform is covered.
 
+## Unreleased
+
+### A publication the user asked for after delegation can now be granted
+
+- **A work order frozen without `authority` could never publish, and nothing could fix it.**
+  `session-3bbd03e1` split "merge origin/main and push" into stages: the first order
+  (fetch and read-only investigation) was delegated with `authority: []`, and the user only
+  said "提交推送" once the merge was verified. Then all three routes were closed — a second
+  `fusion_delegate` with the grant was refused (`A Worker already owns this task`), the
+  Lead's own `git commit` failed at the OS layer (the Lead session is read-only, so
+  `index.lock` could not be created), and `fusion_rework` had no way to grant. The Worker's
+  `git commit` was refused with `FUSION_WORKER_AUTHORITY_DENIED` on every attempt, and the
+  task could only end unfinished.
+- **The Lead can now grant an action to the current work order through `fusion_rework
+  authority`.** The grant is additive (a second grant widens, nothing takes an action back),
+  repeatable, refused for any other work order, and recorded as a `work-order/authority-granted`
+  event plus an `authority-grant:<taskId>:<uuid>` document carrying before/added/reason/cause,
+  so a replay reproduces the exact authority the Worker ran under. The frozen publication
+  prohibition is a shared constant and is removed from `forbiddenActions` when the order starts
+  granting. Unlike `addAllowedPaths` and `checks`, a grant does not wait for a Worker report:
+  the user often asks for the commit only after reading that report, and the grant is not a
+  file scope.
+- **The refusal now names the remedy.** `FUSION_WORKER_AUTHORITY_DENIED` tells the Worker that
+  the Lead can grant the action with `fusion_rework authority` and that the identical command
+  then runs, instead of leaving both roles with no next step. All four prompts say the same:
+  the Lead must not run git itself or open a second order, and the Worker must re-run the exact
+  command after the grant rather than working around the guard.
+
+Validated: unit suite 825 passed (1 new case in `tests/reducer.spec.ts`: a grant only ever
+adds, drops nothing, is refused for another work order, and removes the frozen prohibition);
+host coordinator suite 268 passed (1 new "Sidekick authority boundary" case drives a real
+Worker: `git commit` refused before the grant, `fusion_rework authority` from the Lead, then the
+same command allowed and `work-order/authority-granted` in the event log). Not claimed: the
+grant was not replayed against a live GitHub/GitLab push in this repository; the case boundary
+is the Host guard and the recorded order.
+
 ## 1.1.2 — 2026-11-16
 
 ### A combo switch no longer dies on the route it is leaving

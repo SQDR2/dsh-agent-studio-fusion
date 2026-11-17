@@ -588,6 +588,7 @@ export type FusionEvent =
   | EventEnvelope<'work-order/prepared', { order: WorkOrder; reservedChild: SessionId }>
   | EventEnvelope<'work-order/acceptance-amended', { workOrderId: WorkOrderId; acceptance: readonly AcceptanceCriterion[]; reason: string }>
   | EventEnvelope<'work-order/scope-expanded', { workOrderId: WorkOrderId; allowedPaths: readonly string[]; added: readonly string[]; reason: string }>
+  | EventEnvelope<'work-order/authority-granted', { workOrderId: WorkOrderId; authority: readonly AuthorityAction[]; added: readonly AuthorityAction[]; reason: string }>
   | EventEnvelope<'worker/rework-requested', { workOrderId: WorkOrderId; child: SessionId; ordinal: number; briefRevision: number }>
   | EventEnvelope<'child/accepted', { operationId: OperationId; child: SessionId; messageId: string }>
   | EventEnvelope<'child/claimed', { operationId: OperationId; child: SessionId }>
@@ -637,3 +638,10 @@ export interface OutboxRow {
 }
 
 export const TERMINAL_PHASES = new Set<Phase>(['COMPLETED', 'CANCELLED', 'FAILED'])
+
+/**
+ * The prohibition an implementation order carries while it grants no authority
+ * action. It is frozen text, so a later grant removes exactly this entry instead
+ * of trying to restate the actions that are still refused.
+ */
+export const PUBLICATION_PROHIBITION = 'Commit, push, tag, publish, release, open a pull request or trigger CI; report the action instead'

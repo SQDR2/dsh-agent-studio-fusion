@@ -4583,6 +4583,29 @@ describe('Sidekick authority boundary', () => {
     expect(JSON.stringify(coordinator.state(taskId).currentWorkOrder)).toContain('commit')
     expect(state, JSON.stringify(toolResults(parent))).toMatchObject({ phase: 'COMPLETED' })
   })
+
+  it('grants a publication after the report, so a refused action finishes in the same order', async () => {
+    // The order was frozen with no authority (the user asked for the commit only
+    // once the change was verified). Before the grant existed there was no way
+    // out: fusion_delegate refuses while a Worker owns the task, the Lead's own
+    // session is read-only, and fusion_rework could not grant.
+    const grant = toolCallResponse('grant', 'fusion_rework', {
+      authority: ['commit'], block: true, feedback: 'The user asked for the commit now that the change is verified. Run it.',
+    })
+    const { parent, coordinator, store, ctx, taskId } = await setup([delegateV3(), grant, acceptV3()],
+      [edit(), publication('commit-refused', 'git commit -m x'), report(), publication('commit', 'git commit -m x'), report('report-2')], options)
+    parent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Correct addition.' }] }))
+    await parent.whenIdle()
+    const state = coordinator.state(taskId)
+    const results = await persistedToolResults(ctx, state.acceptedChild!)
+    const outcome = (id: string) => results.find(result => result.message.role === 'tool' && result.message.toolCallId === id)!.message
+    expect(JSON.stringify(outcome('commit-refused')), 'refused before the grant').toContain('FUSION_WORKER_AUTHORITY_DENIED')
+    expect(JSON.stringify(outcome('commit')), 'allowed after the grant').not.toContain('FUSION_WORKER_AUTHORITY_DENIED')
+    // The grant is part of the recorded order, not a momentary permission.
+    expect(coordinator.state(taskId).currentWorkOrder?.authority).toEqual(['commit'])
+    expect(store.events(taskId).map(event => event.type)).toContain('work-order/authority-granted')
+    expect(state, JSON.stringify(toolResults(parent))).toMatchObject({ phase: 'COMPLETED' })
+  })
 })
 
 describe('enforced-v3 delegation after Lead inspection', () => {

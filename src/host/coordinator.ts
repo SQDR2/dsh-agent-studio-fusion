@@ -11,7 +11,7 @@ import { SessionId as NativeSessionId } from '@deepseek-ai/dsh-session'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ToolExecution, ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { AuthorityAction, Digest, ExplorationReport, ForemanAssessment, ForemanDisposition, ForemanFinding, ForemanPolicy, FusionEvent, PlanReviewCandidate, PlanReviewCheckDefinition, PlanReviewRecord, RequirementCoverage, Role, RuntimeHandle, TaskId, WorkerReport, WorkOrder } from '../contracts.js'
-import { EpochId, OperationId, SessionId, SnapshotId, TaskId as asTaskId, WorkOrderId } from '../contracts.js'
+import { EpochId, OperationId, PUBLICATION_PROHIBITION, SessionId, SnapshotId, TaskId as asTaskId, WorkOrderId } from '../contracts.js'
 import { candidateDigest, semanticCandidateProjection, assertValidPlanReviewCandidate, lintPlanReviewCandidate, collectForemanFindings, foremanAssessmentSchema, planReviewGateDecision, planReviewRisk, type PlanReviewRiskReason, type PlanReviewModule, type PlanReviewOutcome } from '../plan-review.js'
 import { NativePlanReviewService } from './plan-review.js'
 import { digestOf } from '../digest.js'
@@ -66,7 +66,7 @@ import { isRouteTransportName, registeredRouteTransport, withRouteTransport } fr
 import type { AcpWorkerFacts } from './acp/bridge.js'
 import { isRead, READ_TOOLS } from './read-tools.js'
 import { backgroundHandoffNeedsInspection, completedToolProblem, dispatchAwaitsInspection, gatedDispatchProblem, gatedTurnStopped, staleRecoveryGate, workerSubmittedProblem } from './task-gates.js'
-import { AUTHORITY_ACTIONS, workerAuthorityProblem } from './authority.js'
+import { AUTHORITY_ACTIONS, AUTHORITY_DENIED, workerAuthorityProblem } from './authority.js'
 
 /**
  * A bounded, factual rendering of the exploration the Lead collected: what was read, the
@@ -1792,8 +1792,9 @@ export class FusionCoordinator {
    * The authority actions this work order grants. Absent means none: the Sidekick
    * may change files inside allowedPaths, but commits, pushes, tags, publishes,
    * releases, pull requests and CI runs stay with the Lead, which owns the
-   * user-facing consequences. The grant is frozen with the order, so a rework
-   * brief cannot widen it.
+   * user-facing consequences. The grant is frozen with the order: a rework brief
+   * cannot widen it by what it says, and the Lead widens it only by naming the
+   * action explicitly, which is recorded as an amendment to the same order.
    */
   #authorityGrant(requested: readonly string[] | undefined, mode: 'explore' | 'implement' | 'text'): readonly AuthorityAction[] {
     if (!requested?.length) return []
@@ -2146,7 +2147,7 @@ export class FusionCoordinator {
       ...requirements.map((text, i) => ({ id: `requirement-${i}`, text, mandatory: true, provenance: 'user' as const,
         source: { sessionId: SessionId(agent.id), eventSeq: source.seq, messageId: source.data.id } }))], acceptance: [], allowedPaths,
       forbiddenActions: [...(mode === 'explore' ? ['Write files or run commands during read-only exploration'] : []), 'Change unrelated paths', 'Weaken frozen acceptance checks', 'Bypass native tool permissions',
-        ...(mode === 'implement' && !authority.length ? ['Commit, push, tag, publish, release, open a pull request or trigger CI; report the action instead'] : [])],
+        ...(mode === 'implement' && !authority.length ? [PUBLICATION_PROHIBITION] : [])],
       ...(authority.length ? { authority } : {}), ...(args.preserveRuntime ? { preserveRuntime: true as const } : {}), baseSnapshot: base.id,
       evidence: explored ? priorState.exploration!.sources.map(source => source.excerpt) : [],
       decisions: (args.decisions ?? []).map(text => ({ text, source: { sessionId: SessionId(agent.id), eventSeq: source.seq, messageId: source.data.id } })),
@@ -2647,7 +2648,35 @@ export class FusionCoordinator {
     return `${feedback}\n\nThe Lead amended the frozen acceptance commands. The Host will verify your next report with:\n${JSON.stringify(definitions)}`
   }
 
-  async rework(agent: Agent, feedback: string, exec: ToolRunContext, block = true, checks?: readonly CheckDefinition[], addAllowedPaths?: readonly string[]): Promise<string> {
+  /**
+   * The Lead's grant is a decision, not a file scope, so it does not wait for a
+   * report the way a scope widening does: the worker's report and its native
+   * checks say nothing about whether the user wants the change published, and the
+   * user often says so only after reading that report ("提交推送" once the merge
+   * was verified). An action is only ever added — a grant can widen the order,
+   * never take an action back — and the change is recorded as a document plus an
+   * event, so a replay reproduces the exact authority the Worker ran under.
+   * Without this, an order frozen with no authority could never publish anything:
+   * fusion_delegate refuses a new order while a Worker owns the task, the Lead's
+   * own session is read-only, and fusion_rework had no way to grant.
+   */
+  #grantAuthority(binding: SessionBinding, feedback: string, requested: readonly string[], exec: ToolRunContext): string {
+    const state = this.state(binding.taskId), order = state.currentWorkOrder!
+    if (order.mode === 'explore' || order.mode === 'text') throw new Error('Authority grants belong to implementation work: exploration and text-only orders run no shell commands')
+    if (state.control.mode === 'completed') throw new Error('This task is already complete; a grant applies to a work order that is still running')
+    const grants = this.#authorityGrant(requested, 'implement')
+    const before = order.authority ?? []
+    const added = grants.filter(action => !before.includes(action))
+    if (!added.length) return feedback
+    const authority = [...before, ...added]
+    this.store.writeDocument(`authority-grant:${binding.taskId}:${randomUUID()}`, 0, { schemaVersion: 1, taskId: binding.taskId,
+      workOrderId: order.id, causeId: exec.callId, reason: feedback, before, added, at: new Date().toISOString() })
+    this.append(binding.taskId, 'work-order/authority-granted', { workOrderId: order.id, authority, added, reason: feedback })
+    return `${feedback}\n\nThe Lead granted these authority actions for this work order: ${JSON.stringify(added)}. `
+      + `The Host now lets this Worker run them; anything not granted here is still refused with ${AUTHORITY_DENIED}.`
+  }
+
+  async rework(agent: Agent, feedback: string, exec: ToolRunContext, block = true, checks?: readonly CheckDefinition[], addAllowedPaths?: readonly string[], authority?: readonly string[]): Promise<string> {
     const binding = await this.#readyBinding(agent, 'lead', exec.signal), state = this.state(binding.taskId)
     if (!state.acceptedChild || !state.currentWorkOrder) throw new Error('No accepted Worker to continue')
     const childId = state.acceptedChild
@@ -2681,6 +2710,7 @@ export class FusionCoordinator {
       feedback = this.#amendAcceptance(binding, runtime, feedback, checks, exec)
       runtime = this.#runtime(binding.taskId)
     }
+    if (authority?.length) feedback = this.#grantAuthority(binding, feedback, authority, exec)
     const held = this.#held.get(binding.taskId)
     if (held) {
       if (held.holder !== state.acceptedChild || !this.leases.stillHeld(held)) throw new Error('Worker does not own the current writer lease')
@@ -3270,8 +3300,10 @@ export class FusionCoordinator {
       // resource deadlines, but the wait itself must not expire.
       parameters: { feedback: { type: 'string', required: true }, block: { type: 'boolean', description: 'Default true. False returns after delivery; call fusion_wait for the report and checks.' },
         addAllowedPaths: { ...optionalStringList, description: 'After a Worker report, when the task needs changes outside the frozen allowedPaths (for example an existing test elsewhere that encodes the old behaviour): workspace-relative files or directories to add. Paths are only added; the change is recorded and consumes this rework round. A file already changed before it was added cannot keep its original bytes, so its diff has no pre-image and the review must inspect it directly.' },
-        checks: { type: 'array', items: checkItem, description: 'Omit to keep the frozen acceptance checks. Only when a frozen check itself is wrong (for example its interpreter does not exist on this host), pass the complete corrected set after the Worker report. Every existing definitionPath must stay protected; the amendment is recorded and consumes this rework round.' } }, output: textOutput,
-      execute: (args, exec) => this.rework(agent, args.feedback, exec, args.block ?? true, args.checks && normalizeChecks(args.checks), args.addAllowedPaths) })))
+        checks: { type: 'array', items: checkItem, description: 'Omit to keep the frozen acceptance checks. Only when a frozen check itself is wrong (for example its interpreter does not exist on this host), pass the complete corrected set after the Worker report. Every existing definitionPath must stay protected; the amendment is recorded and consumes this rework round.' },
+        authority: { type: 'array', items: { type: 'string', enum: [...AUTHORITY_ACTIONS] },
+          description: 'Authority actions to add to this work order, for a publication the user asked for after the order was frozen (for example a commit and a push once the change is verified). Actions are only added: an action the order already grants stays granted, and anything not granted stays refused on the Sidekick\'s shell with FUSION_WORKER_AUTHORITY_DENIED. Grant only what the user actually asked for.' } }, output: textOutput,
+      execute: (args, exec) => this.rework(agent, args.feedback, exec, args.block ?? true, args.checks && normalizeChecks(args.checks), args.addAllowedPaths, args.authority) })))
     dispose.push(scope.tools.register(defineTool({ name: 'fusion_wait', description: 'Wait for the background Worker to become quiescent. Exploration returns source findings for planning; implementation runs its frozen native checks. Call sequentially after a handoff or feedback.',
       parameters: {}, output: textOutput, execute: (_args, exec) => this.wait(agent, exec) })))
     dispose.push(scope.tools.register(defineTool({ name: 'fusion_review_result', description: 'Record a completed Lead review bound to the candidate this native request received. Accept requires passing evidence.',

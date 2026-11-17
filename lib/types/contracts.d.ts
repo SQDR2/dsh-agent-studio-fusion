@@ -573,6 +573,11 @@ export type FusionEvent = EventEnvelope<'task/created', {
     allowedPaths: readonly string[];
     added: readonly string[];
     reason: string;
+}> | EventEnvelope<'work-order/authority-granted', {
+    workOrderId: WorkOrderId;
+    authority: readonly AuthorityAction[];
+    added: readonly AuthorityAction[];
+    reason: string;
 }> | EventEnvelope<'worker/rework-requested', {
     workOrderId: WorkOrderId;
     child: SessionId;
@@ -653,3 +658,9 @@ export interface OutboxRow {
     ticket?: ReviewTicket;
 }
 export declare const TERMINAL_PHASES: Set<Phase>;
+/**
+ * The prohibition an implementation order carries while it grants no authority
+ * action. It is frozen text, so a later grant removes exactly this entry instead
+ * of trying to restate the actions that are still refused.
+ */
+export declare const PUBLICATION_PROHIBITION = "Commit, push, tag, publish, release, open a pull request or trigger CI; report the action instead";

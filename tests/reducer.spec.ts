@@ -1,6 +1,6 @@
 import { acceptedResultFromTicket } from './review-fixture.js'
 import { describe, expect, it } from 'vitest'
-import { ArtifactId } from '../src/contracts.js'
+import { ArtifactId, PUBLICATION_PROHIBITION, WorkOrderId } from '../src/contracts.js'
 import type { PlanReviewRecord } from '../src/contracts.js'
 import { FusionError, REVISION_STALE } from '../src/errors.js'
 import { reviewRequestedEvent } from '../src/review/ticket.js'
@@ -59,6 +59,28 @@ describe('task reducer', () => {
     expect(widened.currentWorkOrder?.allowedPaths).toEqual([...order().allowedPaths, 'tests/extra.py'])
     expect(() => reduce(reported, envelope('work-order/scope-expanded', 8,
       { workOrderId: order().id, allowedPaths: ['tests/extra.py'], added: ['tests/extra.py'], reason: 'drops the original scope' }))).toThrowError(FusionError)
+  })
+
+  it('grants an authority action to the current work order and only ever adds', () => {
+    const reported = reduceAll(happyPath().slice(0, 7))
+    const orderWithProhibition = envelope('work-order/prepared', 4, { order: {
+      ...order(), authority: undefined, forbiddenActions: [...order().forbiddenActions, PUBLICATION_PROHIBITION],
+    }, reservedChild: CHILD })
+    const frozen = reduceAll([...happyPath().slice(0, 3), orderWithProhibition, ...happyPath().slice(4, 7)])
+    const granted = reduce(frozen, envelope('work-order/authority-granted', 8,
+      { workOrderId: order().id, authority: ['commit', 'push'], added: ['commit', 'push'], reason: 'user asked to publish' }))
+    expect(granted.currentWorkOrder?.authority).toEqual(['commit', 'push'])
+    // The prohibition described the ungranted state, so it is gone once an action is granted.
+    expect(granted.currentWorkOrder?.forbiddenActions).toEqual(order().forbiddenActions)
+    // A second grant widens; it never drops what the order already had.
+    const widened = reduce(granted, envelope('work-order/authority-granted', 9,
+      { workOrderId: order().id, authority: ['commit', 'push', 'pr'], added: ['pr'], reason: 'open the pull request too' }))
+    expect(widened.currentWorkOrder?.authority).toEqual(['commit', 'push', 'pr'])
+    expect(() => reduce(granted, envelope('work-order/authority-granted', 9,
+      { workOrderId: order().id, authority: ['commit'], added: [], reason: 'drops the push' }))).toThrowError(FusionError)
+    // A grant for another order never reaches the current one.
+    expect(() => reduce(reported, envelope('work-order/authority-granted', 8,
+      { workOrderId: WorkOrderId('wo-other'), authority: ['commit'], added: ['commit'], reason: 'wrong order' }))).toThrowError(FusionError)
   })
 
   it('replays the same events to the same state', () => {

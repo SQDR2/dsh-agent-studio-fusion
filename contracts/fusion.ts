@@ -525,6 +525,7 @@ export type FusionEvent =
   | EventEnvelope<'work-order/prepared', { order: WorkOrder; reservedChild: SessionId }>
   | EventEnvelope<'work-order/acceptance-amended', { workOrderId: WorkOrderId; acceptance: readonly AcceptanceCriterion[]; reason: string }>
   | EventEnvelope<'work-order/scope-expanded', { workOrderId: WorkOrderId; allowedPaths: readonly string[]; added: readonly string[]; reason: string }>
+  | EventEnvelope<'work-order/authority-granted', { workOrderId: WorkOrderId; authority: readonly AuthorityAction[]; added: readonly AuthorityAction[]; reason: string }>
   | EventEnvelope<'worker/rework-requested', { workOrderId: WorkOrderId; child: SessionId; ordinal: number; briefRevision: number }>
   | EventEnvelope<'child/accepted', { operationId: OperationId; child: SessionId; messageId: string }>
   | EventEnvelope<'child/claimed', { operationId: OperationId; child: SessionId }>
