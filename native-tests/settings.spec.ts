@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest'
-import { WORKER_IMPLEMENTATION_OUTPUT_TOKENS, choiceFromProfile, modelProfileFromChoice, profileFromChoice, validatePairChoice } from '../src/host/settings.js'
+import { WORKER_IMPLEMENTATION_OUTPUT_TOKENS, choiceFromProfile, missingRoutes, modelProfileFromChoice, profileFromChoice, validatePairChoice } from '../src/host/settings.js'
 import { completeProfile, resolveProfile } from '../src/profile/resolve.js'
 import { profileRoutes } from '../src/profile/compactor.js'
+import { FOREMAN_MAX_OUTPUT_TOKENS, FOREMAN_TIMEOUT_MS } from '../src/profile/foreman.js'
 import { loadModelPromptBundle, loadPromptBundle } from '../src/prompts.js'
 import { readBinding } from '../src/host/bindings.js'
 
@@ -81,6 +82,42 @@ describe('independent Fusion settings', () => {
     expect(() => validatePairChoice({ ...pair, compactor: { ...compactor, route: { provider: 'dsh-fusion', model: 'auto' } } }, catalog)).toThrow('真实模型')
     expect(() => validatePairChoice({ ...pair, compactor: { ...compactor, route: { provider: 'physical', model: 'missing' } } }, catalog)).toThrow('不可用')
     expect(() => validatePairChoice({ ...pair, compactor: { ...compactor, route: { ...pair.worker, reasoningEffort: 'high' } } }, catalog)).toThrow('推理强度')
+  })
+  it('keeps the optional foreman empty by default and freezes its route, output cap and timeout', () => {
+    const prompts = loadPromptBundle(), original = completeProfile(profileFromChoice(pair), prompts)
+    expect(original).not.toHaveProperty('foreman')
+    const foreman = { route: pair.lead, maxOutputTokens: 4000, timeoutMs: 30000 }
+    const chosen = validatePairChoice({ ...pair, foreman }, catalog)
+    const frozen = completeProfile(profileFromChoice(chosen), prompts)
+    expect(frozen.foreman).toEqual(foreman)
+    expect(choiceFromProfile(frozen)).toEqual(chosen)
+    expect(frozen.digest).not.toBe(original.digest)
+    const binding = { schemaVersion: 1, sessionId: 'frozen', taskId: 'task', selected: true, profile: frozen, prompts }
+    expect(readBinding(binding, 'frozen').profile).toEqual(frozen)
+    expect(() => readBinding({ ...binding, profile: { ...frozen, foreman: { ...foreman, maxOutputTokens: 8000 } } }, 'frozen')).toThrow('digest changed')
+    expect(profileRoutes(frozen)).toEqual([pair.lead, pair.worker, foreman.route])
+    const missing = missingRoutes({ ...pair, foreman: { route: { provider: 'physical', model: 'missing-m' }, maxOutputTokens: 4000, timeoutMs: 10000 } }, catalog)
+    expect(missing).toEqual([{ role: 'foreman', route: { provider: 'physical', model: 'missing-m' } }])
+    const third = { ...foreman, route: { provider: 'other', model: 'summary' } }
+    expect(() => resolveProfile({ ...profileFromChoice(pair), foreman: third }, prompts,
+      { authorizedRoutes: [pair.lead, pair.worker] })).toThrow('not authorized')
+  })
+  it('rejects unavailable, unsupported or out-of-bounds foreman choices', () => {
+    const foreman = { route: pair.lead, maxOutputTokens: 4000, timeoutMs: 30000 }
+    for (const invalid of [null, false, [], {}, { ...foreman, maxOutputTokens: 0 }, { ...foreman, maxOutputTokens: 1.5 },
+      { ...foreman, maxOutputTokens: FOREMAN_MAX_OUTPUT_TOKENS + 1 }, { ...foreman, timeoutMs: FOREMAN_TIMEOUT_MS.min - 1 },
+      { ...foreman, timeoutMs: FOREMAN_TIMEOUT_MS.max + 1 },
+      { ...foreman, timeoutMs: 1000.5 }, { ...foreman, extra: true }, { ...foreman, route: { ...pair.lead, token: 'not-allowed' } }]) {
+      expect(() => validatePairChoice({ ...pair, foreman: invalid }, catalog)).toThrow()
+      expect(() => completeProfile({ ...profileFromChoice(pair), foreman: invalid }, loadPromptBundle())).toThrow()
+    }
+    expect(() => validatePairChoice({ ...pair, foreman: { ...foreman, route: { provider: 'dsh-fusion', model: 'auto' } } }, catalog)).toThrow('真实模型')
+    expect(() => validatePairChoice({ ...pair, foreman: { ...foreman, route: { provider: 'physical', model: 'missing' } } }, catalog)).toThrow('不可用')
+    expect(() => validatePairChoice({ ...pair, foreman: { ...foreman, route: { ...pair.worker, reasoningEffort: 'high' } } }, catalog)).toThrow('推理强度')
+    // The timeout bound admits a multi-minute review: a slow model on a large plan
+    // used to be refused because the ceiling was two minutes.
+    expect(() => validatePairChoice({ ...pair, foreman: { ...foreman, timeoutMs: 300_000 } }, catalog)).not.toThrow()
+    expect(() => validatePairChoice({ ...pair, foreman: { ...foreman, timeoutMs: FOREMAN_TIMEOUT_MS.max } }, catalog)).not.toThrow()
   })
 })
 

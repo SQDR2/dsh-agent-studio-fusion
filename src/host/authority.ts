@@ -227,5 +227,6 @@ export function workerAuthorityProblem(text: string, granted: readonly string[] 
   const what = refused.map(action => LABELS[action]).join(', ')
   return `${AUTHORITY_DENIED}: ${what} is a Lead authority action, not part of this work order's write lease. `
     + 'Finish the code changes, submit your report with fusion_submit_result, and state that this action is still pending. '
-    + 'The Lead performs it, or grants it explicitly for this work order when the user asked for it.'
+    + 'The Lead performs it, or grants it for this work order with fusion_rework authority when the user asked for it; '
+    + 'that grant amends this order, so retry the exact command instead of working around the guard.'
 }

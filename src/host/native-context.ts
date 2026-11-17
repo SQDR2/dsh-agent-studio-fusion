@@ -23,7 +23,7 @@ interface ContextCheck {
   route: PhysicalRoute
   measurement: TokenMeasurement
   budget: number
-  purpose: GenerateOptions['purpose'] | 'conversation' | 'cache-keepalive'
+  purpose: GenerateOptions['purpose'] | 'conversation' | 'cache-keepalive' | 'foreman'
   logRevision: number
   nativeBaseline: string
   minimumRetainedInputTokens: number
@@ -43,11 +43,12 @@ export class NativeContextGuard {
   async measure(agent: Agent, owner: Owner, request: GenerateOptions): Promise<ContextCheck> {
     const meter = this.ctx.get('tokenMeter')
     if (!meter) throw new Error('Fusion requires the native tokenMeter service')
+    const foremanAux = this.auxiliary?.get(request)?.purpose === 'foreman' && owner.binding.profile.foreman
     const separateCompactor = request.purpose === 'compaction' && owner.binding.profile.compactor
-    const route = separateCompactor ? separateCompactor.route : owner.binding.profile[owner.role]
-    const policy = owner.binding.profile.context[owner.role]
+    const route = foremanAux ? foremanAux.route : (separateCompactor ? separateCompactor.route : owner.binding.profile[owner.role])
+    const policy = foremanAux ? owner.binding.profile.context.lead : owner.binding.profile.context[owner.role]
     if (request.provider !== route.provider || request.model !== route.model) {
-      throw new Error('Fusion request must use its frozen role or compactor model')
+      throw new Error('Fusion request must use its frozen role, compactor or foreman model')
     }
     const logged = isAgentLoopRequest(request) ? agent.session.requestContext() : undefined
     const capacity = logged?.provider === request.provider && logged.model === request.model

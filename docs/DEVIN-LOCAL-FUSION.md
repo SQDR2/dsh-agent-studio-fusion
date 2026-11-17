@@ -547,7 +547,7 @@ sqlite3 ~/.local/share/devin/cli/sessions.db \
 
 - 新增 `src/host/authority.ts`：把 shell 文本切成命令段，识别 `git commit/push`、创建 tag、`gh pr|release|workflow`、`npm|pnpm|yarn|bun|cargo|poetry publish`、`twine upload`、`goreleaser`。看穿常见启动器（`sudo/env/xargs/time/nice/nohup/stdbuf/command/exec`）、`VAR=value` 前缀、`git -C <dir>` 这类带值全局参数，并**递归检查** `bash -c "…"`、`sh -c '…'` 与 `$(…)`；引号里的字面文本（`grep -r 'git push' docs`）不算命令。
 - `src/host/coordinator.ts` 在 Worker 的 shell 调用上返回 `FUSION_WORKER_AUTHORITY_DENIED`，并说明"改完代码、报告里写明待办"。
-- 工作单新增可选 `authority: AuthorityAction[]`（`contracts/fusion.ts` + `src/contracts.ts`）：只有 Lead 在 `fusion_delegate` 里显式授权的动作才放行，且**冻结进工作单**，返工不能扩权；未授权时 `forbiddenActions` 里写明这条禁令。
+- 工作单新增可选 `authority: AuthorityAction[]`（`contracts/fusion.ts` + `src/contracts.ts`）：只有 Lead 显式授权的动作才放行，且**冻结进工作单**；返工简报的正文不能扩权，只有 `fusion_rework` 的 `authority` 参数能补授（见 §8.5）；未授权时 `forbiddenActions` 里写明这条禁令。
 - 边界（明确不声称）：这是命令文本守卫，不是沙箱。运行时拼接命令（`python -c`、脚本从 stdin 读）超出文本可见范围，因此 Worker 提示词同时写死规则；`run_code` 等非 shell 工具不在本次拦截范围。
 
 ### 8.2 G3/G4/G5/G7：提示词
@@ -568,6 +568,21 @@ sqlite3 ~/.local/share/devin/cli/sessions.db \
 - `authority` 授权依赖 Lead 自觉只在用户要求时使用；宿主不解析用户原话来判断"用户是否真的要求 push"，这是有意的边界（避免关键词误判）。
 
 ---
+
+### 8.5 补授：工作单冻结之后用户才要求提交/推送（2026-11-17）
+
+会话 `session-3bbd03e1-3138-46d4-868a-3a59a33a3d26` 暴露的死锁：Lead 把"合并 main 并推送"拆成两阶段，第一阶段（fetch + 只读调查）的工作单 `authority` 为空；用户随后明确要求"提交推送"时，三条路都堵死——
+
+- `fusion_delegate` 另开一张带 `authority` 的工单：被拒（`A Worker already owns this task`，同一 Worker 仍占着任务）；
+- Lead 自己跑 `git commit`：enforced-v3 下 Lead 会话是只读的，OS 层直接 `只读文件系统`（`index.lock` 无法创建）；
+- `fusion_rework`：当时没有授权参数，`authority` 被注释成"返工不能扩权"。
+
+于是一张没有 `authority` 的工作单永远发不出去，Worker 每次 `git commit` 都是 `FUSION_WORKER_AUTHORITY_DENIED`。修复：
+
+- 新事件 `work-order/authority-granted`（`src/contracts.ts` + `contracts/fusion.ts`，reducer 落到当前实施工作单）：授权**只增不减**，重复补授幂等，给别的工作单补授直接拒绝；补授后同步移除 `forbiddenActions` 里那条冻结禁令（`PUBLICATION_PROHIBITION` 常量，delegate 冻结时也复用同一常量）。
+- `fusion_rework` 新增 `authority` 参数（`#grantAuthority`）：把动作补授给同一张工作单，写一条 `authority-grant:<taskId>:<uuid>` 文档 + 事件（含 before/added/reason/causeId），并把"已补授哪些动作"写进发给 Worker 的简报。与 `addAllowedPaths`/`checks` 不同，补授不要求 Worker 已提交报告：用户的"提交推送"常常是在看到报告之后才说的，而授权本身与文件范围无关。
+- 拒绝文案指向补救路径：`FUSION_WORKER_AUTHORITY_DENIED` 现在明说 Lead 可以用 `fusion_rework authority` 补授、之后照原样重跑命令；四份提示词同步（Lead 侧：不要自己跑 git、不要另开工单；Worker 侧：补授后重跑同一条命令，不要绕过守卫）。
+- 验证：`tests/reducer.spec.ts` 新增 1 例（补授只增不减、跨工作单拒绝、禁令随授权消失）；`native-tests/coordinator.spec.ts`「Sidekick authority boundary」新增 1 例，真 Worker 先被拒、Lead 用 `fusion_rework authority` 补授后同一条 `git commit` 放行，且 `work-order/authority-granted` 落在事件日志里。全量单测 825 通过（新增 1），host coordinator 套件 268 通过。
 
 ## 9. 阶段 3：常驻进程跨 handoff —— 实测为什么做不到，以及做到了什么
 

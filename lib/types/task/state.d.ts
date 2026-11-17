@@ -1,4 +1,4 @@
-import type { ControlState, Digest, ExecutionIntent, ExplorationReport, FusionEvent, LogicalApproval, OutboxRow, Phase, ReviewGate, ReviewReadinessReceipt, ReviewResultV2, ReviewTicket, RunSelection, SessionId, SnapshotId, TaskId, VerificationLevel, WorkOrder, WorkerReport, WriteLease } from '../contracts.js';
+import type { ControlState, Digest, ExecutionIntent, ExplorationReport, ForemanAttributionRecord, ForemanDisposition, FusionEvent, LogicalApproval, OutboxRow, Phase, PhysicalRoute, PlanReviewRecord, ReviewGate, ReviewReadinessReceipt, ReviewResultV2, ReviewTicket, RunSelection, SessionId, SnapshotId, TaskId, VerificationLevel, WorkOrder, WorkOrderId, WorkerReport, WriteLease } from '../contracts.js';
 export interface AcceptedReview {
     readonly ticket: ReviewTicket;
     readonly resultDigest: Digest;
@@ -43,6 +43,33 @@ export interface TaskState {
     readonly lease?: WriteLease;
     readonly lastSnapshot?: SnapshotId;
     readonly appliedEventIds: readonly string[];
+    readonly planReviews?: readonly PlanReviewRecord[];
+    readonly latestPlanReview?: PlanReviewRecord;
+    readonly planReviewResolutions?: readonly {
+        readonly workOrderId: WorkOrderId;
+        readonly candidateDigest: Digest;
+        readonly round: number;
+        readonly dispositions: readonly ForemanDisposition[];
+        /** The revised candidate an accepted disposition produced; absent when every finding was overridden. */
+        readonly revisedCandidateDigest?: Digest;
+        readonly resolvedAt?: string;
+    }[];
+    readonly foremanAttributions?: readonly ForemanAttributionRecord[];
+    /** Lead-authored rework handoffs, in order; the authority for the rework-round metric. */
+    readonly workerReworks?: readonly {
+        readonly workOrderId: WorkOrderId;
+        readonly child: SessionId;
+        readonly ordinal: number;
+        readonly briefRevision: number;
+        readonly requestedAt: string;
+    }[];
+    readonly pendingPlanReview?: {
+        readonly workOrderId: WorkOrderId;
+        readonly candidateDigest: Digest;
+        readonly round: number;
+        readonly route: PhysicalRoute;
+        readonly requestedAt: string;
+    };
 }
 export interface PersistedTask {
     readonly state: TaskState;

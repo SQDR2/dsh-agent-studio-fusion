@@ -2,6 +2,7 @@ import { bi } from '../bilingual.js'
 import type { PairProfile, PhysicalRoute } from '../contracts.js'
 import { keepaliveChoice } from '../profile/keepalive.js'
 import { compactorChoice } from '../profile/compactor.js'
+import { foremanChoice } from '../profile/foreman.js'
 import { isFusionProvider } from '../identity.js'
 
 export interface PairChoice {
@@ -10,6 +11,7 @@ export interface PairChoice {
   outputTokens?: Partial<Record<'lead' | 'worker', number>>
   cacheKeepalive?: PairProfile['cacheKeepalive']
   compactor?: PairProfile['compactor']
+  foreman?: PairProfile['foreman']
 }
 export interface SettingsCatalog {
   groups: readonly { id: string; name: string; models: readonly {
@@ -28,7 +30,7 @@ export function savedLeadRoute(value: unknown): { provider: string; model: strin
 }
 
 /** The roles a saved pair names, in the order the settings page shows them. */
-export type PairRole = 'lead' | 'worker' | 'compactor'
+export type PairRole = 'lead' | 'worker' | 'compactor' | 'foreman'
 
 /**
  * The routes a saved choice still names that the current catalog no longer
@@ -44,7 +46,7 @@ export function missingRoutes(value: Partial<PairChoice> | undefined, catalog: S
   const stale = (role: PairRole, route: PhysicalRoute | undefined) => route !== undefined
     && !catalog.groups.find(group => group.id === route.provider)?.models.find(model => model.id === route.model)
     ? [{ role, route }] : []
-  return [...stale('lead', value.lead), ...stale('worker', value.worker), ...stale('compactor', value.compactor?.route)]
+  return [...stale('lead', value.lead), ...stale('worker', value.worker), ...stale('compactor', value.compactor?.route), ...stale('foreman', value.foreman?.route)]
 }
 
 /** Configuration chooses registered physical models; it cannot create adapters. */
@@ -76,6 +78,7 @@ export function validatePairChoice(value: unknown, catalog: SettingsCatalog, com
   }
   const cacheKeepalive = keepaliveChoice(raw.cacheKeepalive)
   const compactor = compactorChoice(raw.compactor)
+  const foreman = foremanChoice(raw.foreman)
   let outputTokens: PairChoice['outputTokens']
   if (raw.outputTokens !== undefined) {
     const value = raw.outputTokens
@@ -89,7 +92,8 @@ export function validatePairChoice(value: unknown, catalog: SettingsCatalog, com
   return { lead: route('lead', raw.lead), worker: route('worker', raw.worker),
     ...(outputTokens === undefined ? {} : { outputTokens }),
     ...(cacheKeepalive === undefined ? {} : { cacheKeepalive }),
-    ...(compactor === undefined ? {} : { compactor: { ...compactor, route: route('压缩 · Compaction', compactor.route) } }) }
+    ...(compactor === undefined ? {} : { compactor: { ...compactor, route: route('压缩 · Compaction', compactor.route) } }),
+    ...(foreman === undefined ? {} : { foreman: { ...foreman, route: route('工长 · Foreman', foreman.route) } }) }
 }
 
 /** New sessions can opt into this Worker cap. Frozen sessions keep their saved profile. */
@@ -122,5 +126,6 @@ export function choiceFromProfile(profile: PairProfile): PairChoice {
   return { lead: profile.lead, worker: profile.worker,
     ...(profile.interactionMode !== 'model-like' && Object.keys(outputTokens).length ? { outputTokens } : {}),
     ...(profile.compactor === undefined ? {} : { compactor: profile.compactor }),
+    ...(profile.foreman === undefined ? {} : { foreman: profile.foreman }),
     ...(profile.cacheKeepalive === undefined ? {} : { cacheKeepalive: profile.cacheKeepalive }) }
 }

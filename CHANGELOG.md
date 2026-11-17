@@ -20,6 +20,210 @@ own tags and releases.
 Entry format: what changed, then what was actually validated. "Not claimed" lines mark what a release did *not* test —
 read them before assuming a platform is covered.
 
+## 1.2.0 — 2026-11-17
+
+### Saving a combo no longer jumps the settings page back to the first one
+
+- **The page reset the selection to row 1 after every successful save.** `save()` re-read
+  the list from the Host and called `setActive(0)`, so a user who had edited the third combo
+  was dropped onto the first one: the row on screen changed and the row they had just saved
+  was no longer visible, which reads as "the save replaced my combo". The selection now
+  follows the saved combo by id — the Host keeps the submitted order and reuses the ids it
+  already knew — and falls back to the same position when a row was saved for the first time
+  and received its id in the reply.
+
+Validated: unit suite 821 passed (2 new cases in `tests/fusion-combos.spec.ts`: editing the
+second combo keeps it selected with what was saved, and a newly added combo stays selected
+once the Host issues its id — both fail if the selection is reset to 0). Not claimed: no
+manual click-through of the settings page in a live browser; the case boundary is the
+component's own fetch round trip.
+
+### A configured Foreman now reviews every plan, with no policy to skip it
+
+- **A configured reviewer could stay silent for an entire task.** The Foreman had three
+  policies — `shadow` (audit, never block), `gate` (block on concerns) and `risk-gated`
+  (block only when a deterministic trigger fired). Under `risk-gated`, an exploration order
+  can never trigger: `#requirements` returns nothing for `explore`, `fusion_explore` passes
+  no `allowedPaths`, grants no `authority`, offers no `uncertainties` parameter, and the
+  empty-acceptance rule only applies to `implement`. Every reason was therefore impossible,
+  and the only work order that existed during the survey was never audited. `session-0a8d7fbf`
+  showed the consequence: the combo had a Foreman configured, the Lead dispatched a
+  read-only `fusion_explore`, and no review happened at all — indistinguishable from a
+  broken reviewer, with nothing recorded to say it had been skipped. `session-3bbd03e1` had
+  `gate` on the same install, which is why the feature looked intermittent.
+- **`policy` is gone. A configured Foreman reviews every candidate plan.** Explore, text and
+  implement orders all go through the same gate: round 1 always reviews, concerns block the
+  dispatch until every finding is accepted or overridden, and a revised candidate owes its
+  own round-2 review. Skipping a candidate costs one model call, which is the price of the
+  reviewer; a user who does not want it turns the Foreman off.
+- **The setting is removed everywhere it was selectable or reported**: the profile type
+  (`PairProfile.foreman.policy`), the settings page dropdown and its "Shadow / full gate /
+  risk-gated" summary, the status and history projections, `PlanReviewRecord.policy`,
+  `triggerDecision` on `plan-review/requested`, and `planReviewRisk` itself. The benchmark
+  manifest records `on`/`off` because those are the only two arms left.
+- **An existing combo keeps its Foreman.** A stored profile still carrying `policy` is read
+  and silently upgraded rather than rejected: `foremanChoice` tolerates the retired key and
+  drops it, so the next save writes the unconditional shape instead of switching plan review
+  off as a side effect of an unknown field.
+- **The prompt covers candidates that have no acceptance checks.** A reviewer asked to audit
+  an explore order used to see empty `acceptance` and could only invent checks to complain
+  about; it is now told to audit whether the goal, brief and constraints can answer the
+  user's question and to leave the acceptance-audit arrays empty.
+- **The fail-open notice no longer talks about policies.** A review that cannot finish is
+  still recorded as `unavailable` and still lets the task continue, and the transcript
+  notice now says only that the gate did not apply.
+
+- **A frozen profile keeps the reviewer policy it was saved with, because its digest cannot
+  move.** `readBinding` re-parses the stored profile with the current code and refuses the
+  document when the result hashes differently, and every task record, checkpoint, keepalive
+  row and model-control document in the store is bound to the digest that was recorded when
+  the combo was frozen. Dropping `foreman.policy` moved that digest for every profile frozen
+  while the reviewer still had one, so `BindingRepository.selected()` — which reads *every*
+  binding at startup — threw `Frozen Fusion profile or prompt digest changed` and the plugin
+  refused to activate ("1 entry did not activate"), leaving those sessions with no way to be
+  opened and migrated. `completeProfile` now re-attaches a `foreman.policy` that the stored
+  document carries, so a frozen profile hashes to exactly what it was frozen with. Nothing
+  reads the key: `PairProfile` does not declare it, the reviewer reviews every plan
+  regardless, and a combo created now has no policy at all.
+
+Validated: unit suite 824 passed (1 new case in `tests/foreman-choice.spec.ts`: a stored
+Foreman carrying `policy: 'risk-gated'` still yields a configured reviewer and drops the key;
+3 in `tests/host-bindings.spec.ts`: a legacy binding with `policy` reads and keeps both its
+digest and the key, a rollover rewrites it without moving either, a freshly frozen combo has
+no key, and a tampered lead route is still rejected; 7 `planReviewRisk` cases and the
+shadow-mode assertions replaced); host coordinator suite 326 passed (2 new cases: an
+exploration candidate is reviewed like any other plan, and concerns from a configured Foreman
+block the dispatch with no shadow bypass). Checked against the live store: all 52 stored
+bindings read, and each still re-derives to itself and to its recorded digest. Not claimed:
+the explore review was not replayed against a live provider, and the plugin was not
+re-activated on a second Host — the case boundary is the Host gate, the recorded
+`plan-review/requested` event, and `readBinding`/`selected()`, which is the call the boot
+failure came from.
+
+### A publication the user asked for after delegation can now be granted
+
+- **A work order frozen without `authority` could never publish, and nothing could fix it.**
+  `session-3bbd03e1` split "merge origin/main and push" into stages: the first order
+  (fetch and read-only investigation) was delegated with `authority: []`, and the user only
+  said "提交推送" once the merge was verified. Then all three routes were closed — a second
+  `fusion_delegate` with the grant was refused (`A Worker already owns this task`), the
+  Lead's own `git commit` failed at the OS layer (the Lead session is read-only, so
+  `index.lock` could not be created), and `fusion_rework` had no way to grant. The Worker's
+  `git commit` was refused with `FUSION_WORKER_AUTHORITY_DENIED` on every attempt, and the
+  task could only end unfinished.
+- **The Lead can now grant an action to the current work order through `fusion_rework
+  authority`.** The grant is additive (a second grant widens, nothing takes an action back),
+  repeatable, refused for any other work order, and recorded as a `work-order/authority-granted`
+  event plus an `authority-grant:<taskId>:<uuid>` document carrying before/added/reason/cause,
+  so a replay reproduces the exact authority the Worker ran under. The frozen publication
+  prohibition is a shared constant and is removed from `forbiddenActions` when the order starts
+  granting. Unlike `addAllowedPaths` and `checks`, a grant does not wait for a Worker report:
+  the user often asks for the commit only after reading that report, and the grant is not a
+  file scope.
+- **The refusal now names the remedy.** `FUSION_WORKER_AUTHORITY_DENIED` tells the Worker that
+  the Lead can grant the action with `fusion_rework authority` and that the identical command
+  then runs, instead of leaving both roles with no next step. All four prompts say the same:
+  the Lead must not run git itself or open a second order, and the Worker must re-run the exact
+  command after the grant rather than working around the guard.
+
+Validated: unit suite 825 passed (1 new case in `tests/reducer.spec.ts`: a grant only ever
+adds, drops nothing, is refused for another work order, and removes the frozen prohibition);
+host coordinator suite 268 passed (1 new "Sidekick authority boundary" case drives a real
+Worker: `git commit` refused before the grant, `fusion_rework authority` from the Lead, then the
+same command allowed and `work-order/authority-granted` in the event log). Not claimed: the
+grant was not replayed against a live GitHub/GitLab push in this repository; the case boundary
+is the Host guard and the recorded order.
+
+### A review that cannot finish now says so, and gets room to finish
+
+- **Thirty seconds was too short, and the overrun was silent.** A live `gate` combo's review timed
+  out against Gemini 3.8 and the task dispatched as if the plan had passed, because every policy
+  read `unavailable` as approval. New Foremen now start at 8192 output tokens and 120 seconds, up
+  from 4096 and 30. The token budget had no room for a review that finds many problems, and an
+  overrun discarded the assessment whole rather than keeping what it produced.
+- **The prompt bounds its own output.** It asks for at most 8 findings, most material first
+  (`FOREMAN_MAX_FINDINGS`), so an assessment fits its budget by construction instead of relying on
+  the cap to cut it off.
+- **A candidate with no verdict is announced in the conversation.** One notice per candidate and
+  round, keyed by both so a replay stays silent: it names the reason, says the plan was never
+  independently audited, and says the task continued under the fail-open policy. The status panel
+  already carried the reason, but there a skipped review looked exactly like a passed one.
+- **Fail-open is unchanged**: a review that cannot run still does not block the task. What changed
+  is that the conversation records that no audit happened.
+
+Validated: unit suite 824 passed (the settings defaults are asserted in
+`tests/fusion-combos.spec.ts` — `maxOutputTokens: 8192`, `timeoutMs: 120000` — and
+`tests/plan-review.spec.ts` asserts the prompt asks for no more findings than
+`FOREMAN_MAX_FINDINGS`); host coordinator suite green (the fail-open case in
+`native-tests/coordinator.spec.ts` now also requires exactly one `notice`-form message carrying
+the reason and the fail-open sentence). Not claimed: no live provider timed out during the
+change — the case boundary is an injected `unavailable` outcome and a thrown exception, not a
+real 120-second ceiling.
+
+### Picking a model by hand leaves Fusion, and the chip survives a pinned turn
+
+- **An explicit pick was read as Fusion's own note to itself.** Fusion recognised its pin by
+  comparing the recorded route with the route it last wrote, and `gz/gpt-6.1-sol` /
+  `gz/deepseek-v4.1-flash` are also ordinary models to pick by hand: choosing one left the task
+  undrained and the combo re-stated over the pick, which is how a DeepSeek session turned back
+  into a Fusion task. The guard is now scoped to Fusion's own append, so a later event that
+  happens to name the same route stays a user choice; restart recovery survives, but only until
+  this process has observed a real selection.
+- **The composer names the combo while the pin is in force.** A step on 0.2.2 reads its route
+  before any listener runs, so a pinned turn legitimately records the pair's Lead. The inline
+  label now names the bound combo for the trigger and the menu's current value, while option rows
+  and every unbound session keep the catalog's own name and badge.
+- **The role and permission chip no longer disappears for the whole turn.** It read the
+  composer's selection, which a pin replaces, so it vanished for exactly the turn it is wanted
+  in; it now follows the durable task and names the active role, its model and its mode beside
+  the native `Custom` control.
+- **Known limit, unchanged:** a switch onto one of the pair's own routes can still read as the
+  combo for one poll (2 s while a stage runs, 15 s while it waits). Only the Host knows a
+  selection was a user choice, and the client keeps no second copy of it.
+
+Validated: unit suite 824 passed (`tests/route-pin.spec.ts` drains on a hand-picked Lead or
+Sidekick route while Fusion's own pin keeps the turn, and stops reading a frozen route as Fusion
+once a real choice was seen; `tests/fusion-permission.spec.ts` names the bound combo on the
+trigger and in the menu value, keeps option rows on their own model, and keeps the chip visible
+while the pin is in force). Not claimed: no live 0.2.2 click-through — the case boundary is the
+recorded selection event and the rendered slots.
+
+### A combo can name a Foreman that audits the plan before the Sidekick runs
+
+- **A third, optional route on the pair: `foreman`.** It audits the candidate work order in a
+  separate context — no agent, no tool table, no write lease — after the order and its checks
+  exist and before `work-order/prepared` and the dispatch, so it reviews exactly what the
+  Sidekick is about to receive. A missing `foreman` means off, with no separate flag, and it is
+  frozen with the profile like the other roles.
+- **What it audits:** whether every hard requirement is covered, whether green checks can still
+  be a false pass, whether a Lead decision has a counterexample, whether an unverified assumption
+  is treated as fact, whether brief, constraints, allowed paths and acceptance contradict each
+  other, and whether a requirement is materially ambiguous. Deterministic checks (fields,
+  verbatim requirements, path legality, parsers, authority) stay in the Host, which lints the
+  candidate before any model call.
+- **Concerns block the dispatch** until the Lead answers every finding: accept and revise — the
+  revised candidate owes its own round-2 review — or override with a reason that is recorded. An
+  override covers only the candidate that was reviewed, so overriding while quietly changing the
+  plan is refused, and a round-1 acceptance is not an approval of whatever candidate arrives
+  later.
+- **Every failure mode fails open** (timeout, quota, unavailable route, unparseable output) and is
+  recorded as `unavailable`, while the Host's own validation still fails closed.
+- **The settings page carries it per combo**: a switch, a required model (the same model as the
+  Lead or Sidekick is allowed, and only warned about), reasoning effort, output ceiling and
+  timeout, each validated as it is typed. A saved Foreman survives the read that follows a save;
+  the combo reader rebuilt each role one by one and silently dropped it there, which read as "I
+  enabled it and it disappeared".
+- **It is attributed and reported**: calls carry the `foreman` usage purpose with their own tokens
+  and cost, the history panel shows each task's review outcome and findings, and review rounds are
+  deliberately not counted as Sidekick rework rounds.
+
+Validated: unit suite 824 passed (`tests/plan-review.spec.ts` covers the candidate digest, the
+deterministic lint, strict assessment parsing and the gate decision; `tests/foreman-choice.spec.ts`
+the profile shape; `tests/status-index.spec.ts` the per-task review rows and metrics;
+`tests/fusion-combos.spec.ts` and `tests/fusion-settings-layout.spec.ts` the settings switch and its
+validation; `tests/benchmark-foreman.spec.ts` the on/off arm). Not claimed: the reviewer was not
+compared against a held-out defect corpus, so its hit rate on real plans is unmeasured.
+
 ## 1.1.2 — 2026-11-16
 
 ### A combo switch no longer dies on the route it is leaving

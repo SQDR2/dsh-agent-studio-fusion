@@ -5,6 +5,7 @@ export interface PairChoice {
     outputTokens?: Partial<Record<'lead' | 'worker', number>>;
     cacheKeepalive?: PairProfile['cacheKeepalive'];
     compactor?: PairProfile['compactor'];
+    foreman?: PairProfile['foreman'];
 }
 export interface SettingsCatalog {
     groups: readonly {
@@ -29,7 +30,7 @@ export declare function savedLeadRoute(value: unknown): {
     model: string;
 } | undefined;
 /** The roles a saved pair names, in the order the settings page shows them. */
-export type PairRole = 'lead' | 'worker' | 'compactor';
+export type PairRole = 'lead' | 'worker' | 'compactor' | 'foreman';
 /**
  * The routes a saved choice still names that the current catalog no longer
  * offers: a provider that was renamed or removed, or a model that was retired.

@@ -25,7 +25,7 @@ export interface ProjectedTools<T extends NamedTool> {
  * silently smaller catalog.
  */
 export function projectRoleTools<T extends NamedTool>(input: {
-  assembled: readonly T[]
+  assembled?: readonly T[]
   allowlist: readonly string[] | undefined
   registry: readonly T[]
   /** Names this role keeps even when the allowlist omits them. */
@@ -33,7 +33,8 @@ export function projectRoleTools<T extends NamedTool>(input: {
 }): ProjectedTools<T> {
   const always = input.always ?? []
   const permitted = (name: string) => input.allowlist === undefined || input.allowlist.includes(name) || always.includes(name)
-  const tools = input.allowlist === undefined ? [...input.assembled] : input.assembled.filter(tool => permitted(tool.name))
+  const assembled = input.assembled ?? []
+  const tools = input.allowlist === undefined ? [...assembled] : assembled.filter(tool => permitted(tool.name))
   const present = new Set(tools.map(tool => tool.name))
   const owned = input.registry.filter(tool => tool.name.startsWith('fusion_'))
   const registered = new Set(input.registry.map(tool => tool.name))
