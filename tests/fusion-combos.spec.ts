@@ -37,6 +37,25 @@ function stub(posts: unknown[]) {
   }))
 }
 
+/** A Host that stores exactly what it was sent, issuing an id to every new row. */
+function echoStub(posts: unknown[]) {
+  let saved: unknown
+  vi.stubGlobal('fetch', vi.fn(async (url: string, init?: { method?: string; body?: string }) => {
+    if (init?.method === 'POST') {
+      const body = JSON.parse(init.body ?? '{}') as { pairs: { id?: string }[] }
+      posts.push(body)
+      let issued = 0
+      saved = { ...settings(), revision: 4, pairs: body.pairs.map(item => ({ ...item, id: item.id ?? `pair-new${++issued}`, authorized: true })) }
+      return { ok: true, json: async () => ({ ok: true, revision: 4 }) }
+    }
+    if (url.includes('view=cache')) return { ok: true, json: async () => ({ checked: '2026-11-01', models: [] }) }
+    if (url.includes('view=history')) return { ok: true, json: async () => ({ totalTasks: 0,
+      totals: { calls: 0, final: 0, provisional: 0, unreported: 0, input: { known: 0, reported: 0 }, output: { known: 0, reported: 0 }, reasoning: { known: 0, reported: 0 }, totalOutput: { known: 0, reported: 0 }, cacheRead: { known: 0, reported: 0 } },
+      tasks: [], groups: [] }) }
+    return { ok: true, json: async () => saved ?? settings() }
+  }))
+}
+
 const rows = (root: ReactTestRenderer) => root.root.findAllByProps({ className: 'fusion-combo' })
 const button = (root: ReactTestRenderer, label: string) => root.root.findAllByType('button')
   .find(node => String(node.children.join('')).includes(label))!
@@ -114,6 +133,50 @@ describe('FusionSettings combo list', () => {
 
     expect(posts).toHaveLength(1)
     expect(posts[0]).toMatchObject({ action: 'configure', revision: 3, pairs: [{ id: 'auto', name: '快' }] })
+  })
+
+  // The save re-reads the whole list from the Host. Resetting the selection to the first
+  // row dropped the user out of the combo they had just edited, which reads as "the save
+  // replaced my combo": the row on screen changed and the one they saved was not visible.
+  it('keeps the combo the user was editing selected after a successful save', async () => {
+    pinLanguage('zh-CN')
+    const posts: unknown[] = []
+    echoStub(posts)
+    let root!: ReactTestRenderer
+    await act(async () => { root = create(React.createElement(FusionSettings)) })
+    roots.push(root)
+
+    // Edit the second combo, not the first: the first row is the one the old bug fell back to.
+    await act(async () => { main(root, 1).props.onClick() })
+    await act(async () => { nameInput(root).props.onChange({ target: { value: '稳二号' } }) })
+    await act(async () => { button(root, '保存组合').props.onClick() })
+
+    expect(posts).toHaveLength(1)
+    expect((posts[0] as any).pairs[1]).toMatchObject({ id: 'pair-a1b2c3d4', name: '稳二号' })
+    // Still on the saved row, and its editor shows what was saved.
+    expect(selected(root)).toEqual([false, true])
+    expect(nameInput(root).props.value).toBe('稳二号')
+  })
+
+  // A row that has never been saved carries no id: the Host issues one in the reply, so the
+  // selection falls back to the position that row was saved at instead of jumping to the top.
+  it('stays on a newly added combo after the Host issues it an id', async () => {
+    pinLanguage('zh-CN')
+    const posts: unknown[] = []
+    echoStub(posts)
+    let root!: ReactTestRenderer
+    await act(async () => { root = create(React.createElement(FusionSettings)) })
+    roots.push(root)
+
+    await act(async () => { button(root, '新增组合').props.onClick() })
+    const model = (role: string) => root.root.findAllByProps({ 'aria-label': `${role} 模型` })[0]!
+    await act(async () => { model('Lead').props.onChange({ target: { value: JSON.stringify(['llm-deepseek', 'deepseek-v4']) } }) })
+    await act(async () => { model('Sidekick').props.onChange({ target: { value: JSON.stringify(['llm-deepseek', 'deepseek-v4-mini']) } }) })
+    await act(async () => { button(root, '保存组合').props.onClick() })
+
+    expect(posts).toHaveLength(1)
+    expect((posts[0] as any).pairs[2]).not.toHaveProperty('id')
+    expect(selected(root)).toEqual([false, false, true])
   })
 
   it('flags a saved route the catalog dropped and refuses to save until it is replaced', async () => {

@@ -293,7 +293,13 @@ export function FusionSettings() {
       const confirmed = await fetch(`${FUSION_API_PATH}?view=settings`, { credentials: 'same-origin', cache: 'no-store' })
       if (!confirmed.ok) throw new Error(tr(lang, '配置已提交，但暂时无法确认，请刷新', 'Saved, but not confirmed yet; refresh'))
       const next = await confirmed.json() as SettingsState
-      setState(next); setDraft(toDraft(next.pairs)); setActive(0)
+      const nextDraft = toDraft(next.pairs)
+      setState(next); setDraft(nextDraft)
+      // Stay on the combo the user was editing. The Host keeps the submitted order and
+      // reuses the ids it already knew, so the saved row is still the same row; resetting
+      // to 0 hid the row just saved and looked like the save had replaced it.
+      const saved = current?.id ? nextDraft.findIndex(combo => combo.id === current.id) : -1
+      setActive(saved >= 0 ? saved : Math.min(active, nextDraft.length - 1))
       settingsChanged()
       setNotice(tr(lang, '组合已保存。模型菜单中每个组合各占一项，不同会话可以同时使用不同组合。', 'Combos saved. Each one is its own model-menu entry, so different conversations can use different combos at the same time.'))
     } catch (error) { setError(error instanceof Error ? error.message : String(error)) }

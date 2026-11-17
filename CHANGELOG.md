@@ -22,6 +22,22 @@ read them before assuming a platform is covered.
 
 ## Unreleased
 
+### Saving a combo no longer jumps the settings page back to the first one
+
+- **The page reset the selection to row 1 after every successful save.** `save()` re-read
+  the list from the Host and called `setActive(0)`, so a user who had edited the third combo
+  was dropped onto the first one: the row on screen changed and the row they had just saved
+  was no longer visible, which reads as "the save replaced my combo". The selection now
+  follows the saved combo by id — the Host keeps the submitted order and reuses the ids it
+  already knew — and falls back to the same position when a row was saved for the first time
+  and received its id in the reply.
+
+Validated: unit suite 821 passed (2 new cases in `tests/fusion-combos.spec.ts`: editing the
+second combo keeps it selected with what was saved, and a newly added combo stays selected
+once the Host issues its id — both fail if the selection is reset to 0). Not claimed: no
+manual click-through of the settings page in a live browser; the case boundary is the
+component's own fetch round trip.
+
 ### A configured Foreman now reviews every plan, with no policy to skip it
 
 - **A configured reviewer could stay silent for an entire task.** The Foreman had three
@@ -70,7 +86,7 @@ read them before assuming a platform is covered.
   reads the key: `PairProfile` does not declare it, the reviewer reviews every plan
   regardless, and a combo created now has no policy at all.
 
-Validated: unit suite 822 passed (1 new case in `tests/foreman-choice.spec.ts`: a stored
+Validated: unit suite 824 passed (1 new case in `tests/foreman-choice.spec.ts`: a stored
 Foreman carrying `policy: 'risk-gated'` still yields a configured reviewer and drops the key;
 3 in `tests/host-bindings.spec.ts`: a legacy binding with `policy` reads and keeps both its
 digest and the key, a rollover rewrites it without moving either, a freshly frozen combo has
