@@ -8,6 +8,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { ModelModality } from '@deepseek-ai/dsh-llm'
+import type { ModelCatalog } from '@deepseek-ai/dsh-api-session-controller'
 import type {} from '@deepseek-ai/dsh-api-session-controller'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import type {} from '@deepseek-ai/dsh-commands'
@@ -44,7 +45,7 @@ import { prepareToolSeam } from './host/tool-seam.js'
 export * from './index.js'
 
 export const name = 'dsh-agent-studio-fusion'
-export const inject = ['agents', 'sessions', 'llm', 'tools', 'subagents', 'systemPrompt', 'webServer', 'sessionController', 'sessionQuery', 'commands', 'agentDefaultModel', 'tokenMeter']
+export const inject = ['agents', 'sessions', 'llm', 'tools', 'subagents', 'systemPrompt', 'sessionQuery', 'commands', 'agentDefaultModel', 'tokenMeter']
 // The ACP route set is part of this plugin's own config: `acp.agents` maps a provider
 // route to the agent command that serves it. An absent block means no ACP routes.
 export interface Config {
@@ -95,9 +96,22 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
   const cachePolicy = new CachePolicy(store)
   backfillHistory(store)
   const budget = new NativeRequestBudget(store, config.authorizationPath)
-  const physicalCatalog = async () => {
-    const catalog = await ctx.sessionController.modelCatalog()
-    return { ...catalog, groups: catalog.groups.filter(group => !isFusionProvider(group.id)) }
+  const physicalCatalog = async (): Promise<ModelCatalog> => {
+    const sessionController = ctx.get('sessionController') as { modelCatalog: () => Promise<ModelCatalog> } | undefined
+    if (sessionController) {
+      const catalog = await sessionController.modelCatalog()
+      return { ...catalog, groups: catalog.groups.filter((group: ModelCatalog['groups'][number]) => !isFusionProvider(group.id)) }
+    }
+    const llm = ctx.llm
+    const groups: any[] = []
+    for (const p of llm.listProviders()) {
+      if (isFusionProvider(p.id)) continue
+      try {
+        const models = await llm.listModels(p.id)
+        groups.push({ id: p.id, name: p.name, models: models.map(m => ({ id: m.id, name: m.name })) })
+      } catch { /* ignore */ }
+    }
+    return { groups, default: { provider: '', model: '' }, routableProviders: [], failures: [] } as unknown as ModelCatalog
   }
   /**
    * The combos to resolve: the saved list, or the one profile file a benchmark
@@ -294,7 +308,10 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
           } catch (error) { if (!abort.signal.aborted) throw error; return }
           finally { res.off('close', disconnected) }
         }
-        if (url.searchParams.get('view') === 'catalog') return json(res, 200, await ctx.sessionController.modelCatalog())
+        if (url.searchParams.get('view') === 'catalog') {
+          const sessionController = ctx.get('sessionController') as { modelCatalog: () => Promise<any> } | undefined
+          return json(res, 200, sessionController ? await sessionController.modelCatalog() : { groups: [] })
+        }
         if (url.searchParams.get('view') === 'cache') {
           let pairs: { lead: { provider: string; model: string }; worker: { provider: string; model: string }; cacheKeepalive?: PairChoice['cacheKeepalive'] }[] = []
           try { pairs = [...(await knownCombos()).profiles.values()].map(profile => ({ lead: profile.profile.lead,
@@ -444,10 +461,13 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
       throw new Error(bi('请使用原模型菜单选择 Fusion 或切换普通模型', 'Use the model menu to select Fusion or another model'))
     } catch (error) { return json(res, 409, { error: error instanceof Error ? error.message : String(error) }) }
   }
-  ctx.effect(() => ctx.webServer.register({ kind: 'exact', path: FUSION_API_PATH, handler: apiHandler }))
-  // A tab still running the pre-rename bundle asks the old path until it is
-  // reloaded. Keep answering it from the same handler; nothing new uses it.
-  ctx.effect(() => ctx.webServer.register({ kind: 'exact', path: LEGACY_FUSION_API_PATH, handler: apiHandler }))
+  const webServer = ctx.get('webServer') as { register: (spec: unknown) => () => void } | undefined
+  if (webServer) {
+    ctx.effect(() => webServer.register({ kind: 'exact', path: FUSION_API_PATH, handler: apiHandler }))
+    // A tab still running the pre-rename bundle asks the old path until it is
+    // reloaded. Keep answering it from the same handler; nothing new uses it.
+    ctx.effect(() => webServer.register({ kind: 'exact', path: LEGACY_FUSION_API_PATH, handler: apiHandler }))
+  }
   ctx.effect(() => ctx.commands.register({ name: 'fusion', description: bi('Fusion 状态、暂停、恢复与退出（不调用模型）', 'Fusion status, pause, resume and exit (no model call)'),
     input: { hint: bi('status | pause | resume | recover [--effects-stopped] <检查记录> | off', 'status | pause | resume | recover [--effects-stopped] <inspection note> | off') },
     handler: async invocation => {
@@ -483,7 +503,10 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
           effectsStopped: note[0] === '--effects-stopped', note: (note[0] === '--effects-stopped' ? note.slice(1) : note).join(' ') })
         else if (action === 'off') {
           await controller.clear(invocation.agent)
-          await ctx.sessionController.selectModel({ sessionId: SessionId(invocation.agent.id), ...binding.profile.lead })
+          const sessionController = ctx.get('sessionController') as { selectModel: (opts: unknown) => Promise<any> } | undefined
+          if (sessionController) {
+            await sessionController.selectModel({ sessionId: SessionId(invocation.agent.id), ...binding.profile.lead })
+          }
         }
         else throw new Error(bi('使用 /fusion status、pause、resume、recover <检查记录> 或 off', 'Use /fusion status, pause, resume, recover <inspection note> or off'))
         return { kind: 'success', text: action === 'resume' ? binding.profile.interactionMode === 'model-like' ? bi('已通过原生收件箱提交一次继续操作。', 'One continuation was submitted through the native inbox.') : bi('Fusion 已恢复。发送下一条消息继续当前任务。', 'Fusion resumed. Send a message to continue the task.') : bi(`Fusion ${action} 已完成。`, `Fusion ${action} done.`) }
