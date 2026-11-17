@@ -598,9 +598,13 @@ export class FusionCoordinator {
       resolve: async id => {
         const live = ctx.agents.get(NativeSessionId(id))
         if (live) return live
-        const result = await ctx.sessionController.resolveAgent(NativeSessionId(id))
-        if ('error' in result) throw new Error(result.error.message)
-        return result.agent
+        const sessionController = ctx.get('sessionController') as { resolveAgent: (id: unknown) => Promise<any> } | undefined
+        if (sessionController) {
+          const result = await sessionController.resolveAgent(NativeSessionId(id))
+          if ('error' in result) throw new Error(result.error.message)
+          return result.agent
+        }
+        throw new Error(`Agent ${id} not found`)
       },
       pause: agent => this.pause(agent), resume: agent => this.resume(agent, options.resumeAuthorization?.(this.bindings.read(agent.id)!.binding) ?? 'native-account'),
       settled: binding => { const state = this.state(binding.taskId); return !this.effects.pending(binding.taskId).length

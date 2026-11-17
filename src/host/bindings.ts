@@ -86,6 +86,15 @@ export class BindingRepository {
   }
 
   selected(): readonly SessionBinding[] {
-    return this.store.listDocumentIds('binding:').map(id => this.read(id.slice('binding:'.length))!.binding).filter(row => row.selected)
+    const result: SessionBinding[] = []
+    for (const id of this.store.listDocumentIds('binding:')) {
+      try {
+        const item = this.read(id.slice('binding:'.length))
+        if (item?.binding.selected) result.push(item.binding)
+      } catch {
+        // ignore stale or incompatible binding digests from previous versions
+      }
+    }
+    return result
   }
 }

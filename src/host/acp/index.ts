@@ -71,7 +71,7 @@ interface WebServerOrigin {
 
 /** Resolve the Host origin at declaration time; throws when the Host cannot name one. */
 function hostOrigin(ctx: Context): string {
-  const server = ctx.webServer as unknown as WebServerOrigin | undefined
+  const server = ctx.get('webServer') as unknown as WebServerOrigin | undefined
   const origin = server?.getOrigin?.()
   if (typeof origin !== 'string' || origin.trim().length === 0)
     throw new Error(`${PLUGIN_ID}: the Host web server reports no origin; an ACP Sidekick bridge cannot be addressed`)
