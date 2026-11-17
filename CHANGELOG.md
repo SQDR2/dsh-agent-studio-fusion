@@ -20,7 +20,7 @@ own tags and releases.
 Entry format: what changed, then what was actually validated. "Not claimed" lines mark what a release did *not* test —
 read them before assuming a platform is covered.
 
-## Unreleased
+## 1.2.0 — 2026-11-17
 
 ### Saving a combo no longer jumps the settings page back to the first one
 
@@ -133,6 +133,96 @@ Worker: `git commit` refused before the grant, `fusion_rework authority` from th
 same command allowed and `work-order/authority-granted` in the event log). Not claimed: the
 grant was not replayed against a live GitHub/GitLab push in this repository; the case boundary
 is the Host guard and the recorded order.
+
+### A review that cannot finish now says so, and gets room to finish
+
+- **Thirty seconds was too short, and the overrun was silent.** A live `gate` combo's review timed
+  out against Gemini 3.8 and the task dispatched as if the plan had passed, because every policy
+  read `unavailable` as approval. New Foremen now start at 8192 output tokens and 120 seconds, up
+  from 4096 and 30. The token budget had no room for a review that finds many problems, and an
+  overrun discarded the assessment whole rather than keeping what it produced.
+- **The prompt bounds its own output.** It asks for at most 8 findings, most material first
+  (`FOREMAN_MAX_FINDINGS`), so an assessment fits its budget by construction instead of relying on
+  the cap to cut it off.
+- **A candidate with no verdict is announced in the conversation.** One notice per candidate and
+  round, keyed by both so a replay stays silent: it names the reason, says the plan was never
+  independently audited, and says the task continued under the fail-open policy. The status panel
+  already carried the reason, but there a skipped review looked exactly like a passed one.
+- **Fail-open is unchanged**: a review that cannot run still does not block the task. What changed
+  is that the conversation records that no audit happened.
+
+Validated: unit suite 824 passed (the settings defaults are asserted in
+`tests/fusion-combos.spec.ts` — `maxOutputTokens: 8192`, `timeoutMs: 120000` — and
+`tests/plan-review.spec.ts` asserts the prompt asks for no more findings than
+`FOREMAN_MAX_FINDINGS`); host coordinator suite green (the fail-open case in
+`native-tests/coordinator.spec.ts` now also requires exactly one `notice`-form message carrying
+the reason and the fail-open sentence). Not claimed: no live provider timed out during the
+change — the case boundary is an injected `unavailable` outcome and a thrown exception, not a
+real 120-second ceiling.
+
+### Picking a model by hand leaves Fusion, and the chip survives a pinned turn
+
+- **An explicit pick was read as Fusion's own note to itself.** Fusion recognised its pin by
+  comparing the recorded route with the route it last wrote, and `gz/gpt-6.1-sol` /
+  `gz/deepseek-v4.1-flash` are also ordinary models to pick by hand: choosing one left the task
+  undrained and the combo re-stated over the pick, which is how a DeepSeek session turned back
+  into a Fusion task. The guard is now scoped to Fusion's own append, so a later event that
+  happens to name the same route stays a user choice; restart recovery survives, but only until
+  this process has observed a real selection.
+- **The composer names the combo while the pin is in force.** A step on 0.2.2 reads its route
+  before any listener runs, so a pinned turn legitimately records the pair's Lead. The inline
+  label now names the bound combo for the trigger and the menu's current value, while option rows
+  and every unbound session keep the catalog's own name and badge.
+- **The role and permission chip no longer disappears for the whole turn.** It read the
+  composer's selection, which a pin replaces, so it vanished for exactly the turn it is wanted
+  in; it now follows the durable task and names the active role, its model and its mode beside
+  the native `Custom` control.
+- **Known limit, unchanged:** a switch onto one of the pair's own routes can still read as the
+  combo for one poll (2 s while a stage runs, 15 s while it waits). Only the Host knows a
+  selection was a user choice, and the client keeps no second copy of it.
+
+Validated: unit suite 824 passed (`tests/route-pin.spec.ts` drains on a hand-picked Lead or
+Sidekick route while Fusion's own pin keeps the turn, and stops reading a frozen route as Fusion
+once a real choice was seen; `tests/fusion-permission.spec.ts` names the bound combo on the
+trigger and in the menu value, keeps option rows on their own model, and keeps the chip visible
+while the pin is in force). Not claimed: no live 0.2.2 click-through — the case boundary is the
+recorded selection event and the rendered slots.
+
+### A combo can name a Foreman that audits the plan before the Sidekick runs
+
+- **A third, optional route on the pair: `foreman`.** It audits the candidate work order in a
+  separate context — no agent, no tool table, no write lease — after the order and its checks
+  exist and before `work-order/prepared` and the dispatch, so it reviews exactly what the
+  Sidekick is about to receive. A missing `foreman` means off, with no separate flag, and it is
+  frozen with the profile like the other roles.
+- **What it audits:** whether every hard requirement is covered, whether green checks can still
+  be a false pass, whether a Lead decision has a counterexample, whether an unverified assumption
+  is treated as fact, whether brief, constraints, allowed paths and acceptance contradict each
+  other, and whether a requirement is materially ambiguous. Deterministic checks (fields,
+  verbatim requirements, path legality, parsers, authority) stay in the Host, which lints the
+  candidate before any model call.
+- **Concerns block the dispatch** until the Lead answers every finding: accept and revise — the
+  revised candidate owes its own round-2 review — or override with a reason that is recorded. An
+  override covers only the candidate that was reviewed, so overriding while quietly changing the
+  plan is refused, and a round-1 acceptance is not an approval of whatever candidate arrives
+  later.
+- **Every failure mode fails open** (timeout, quota, unavailable route, unparseable output) and is
+  recorded as `unavailable`, while the Host's own validation still fails closed.
+- **The settings page carries it per combo**: a switch, a required model (the same model as the
+  Lead or Sidekick is allowed, and only warned about), reasoning effort, output ceiling and
+  timeout, each validated as it is typed. A saved Foreman survives the read that follows a save;
+  the combo reader rebuilt each role one by one and silently dropped it there, which read as "I
+  enabled it and it disappeared".
+- **It is attributed and reported**: calls carry the `foreman` usage purpose with their own tokens
+  and cost, the history panel shows each task's review outcome and findings, and review rounds are
+  deliberately not counted as Sidekick rework rounds.
+
+Validated: unit suite 824 passed (`tests/plan-review.spec.ts` covers the candidate digest, the
+deterministic lint, strict assessment parsing and the gate decision; `tests/foreman-choice.spec.ts`
+the profile shape; `tests/status-index.spec.ts` the per-task review rows and metrics;
+`tests/fusion-combos.spec.ts` and `tests/fusion-settings-layout.spec.ts` the settings switch and its
+validation; `tests/benchmark-foreman.spec.ts` the on/off arm). Not claimed: the reviewer was not
+compared against a held-out defect corpus, so its hit rate on real plans is unmeasured.
 
 ## 1.1.2 — 2026-11-16
 
