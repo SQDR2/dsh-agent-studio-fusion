@@ -1,5 +1,7 @@
 import { readModelControl } from './native-model-control.js'
 import { readSandboxIntent, roleSeparated } from './native-role-sandbox.js'
+import { FUSION_MODEL, FUSION_PROVIDER } from '../identity.js'
+import { modelOfProfileId } from './pairs.js'
 import type { Phase, Role } from '../contracts.js'
 import type { TaskState } from '../task/state.js'
 import type { SqliteFusionStore } from '../task/sqlite-store.js'
@@ -94,7 +96,14 @@ export function readFusionStatusAsync(store: SqliteFusionStore, sessionId: strin
 
 function readStatus(store: SqliteFusionStore, sessionId: string, index: StatusIndex): FusionStatus {
   const binding = new BindingRepository(store).read(sessionId)?.binding
-  const base: FusionStatus = { schemaVersion: 1, sessionId, selected: Boolean(binding?.selected), observedAt: new Date().toISOString() }
+  // The combo the frozen profile belongs to, spelled as the model menu spells it: the
+  // composer names the physical route while a turn is pinned, so the UI needs the virtual
+  // one to show what the user actually picked. Legacy ids fall back to the historical combo.
+  const selection = binding?.selected
+    ? { provider: FUSION_PROVIDER, model: modelOfProfileId(binding.profile.id) ?? FUSION_MODEL }
+    : undefined
+  const base: FusionStatus = { schemaVersion: 1, sessionId, selected: Boolean(binding?.selected),
+    ...(selection ? { selection } : {}), observedAt: new Date().toISOString() }
   if (!binding?.selected) return base
   const taskId = binding.taskId, state = store.load(taskId)
   if (!state || state.parent !== sessionId || state.profileDigest !== binding.profile.digest) throw new Error('Fusion 任务记录不一致，请检查存档')

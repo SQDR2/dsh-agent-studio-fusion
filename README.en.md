@@ -52,11 +52,19 @@ Installing straight from GitHub works too (the repository ships a built `lib/`):
 1. Open **Fusion** in the left sidebar (default below Memory System).
 2. In **Fusion combos**, name the combo and choose a Lead and a Sidekick. Any model you are signed in to works, including a configured Antigravity or ACP route.
 3. Pick **Fusion · combo name** in the model menu and work as usual.
-4. Fusion's chip near the composer names the role working right now: `Lead · Read Only` / `Sidekick · Full access`.
+4. Fusion's chip near the composer names the role working right now, its model and its permission: `Lead · model · Read Only` / `Sidekick · model · Full access`.
 
 **Up to 6 combos** can coexist — a cheap "fast" one and a strong "thorough" one, each its own model-menu entry. With several conversations open, each can pick a different combo; a conversation freezes the combo it picked, so later edits or other conversations never change it. A pre-combo installation is migrated into one combo named "自动" whose model id stays `auto`, so existing conversations keep working.
 
 The composer's permission control reads `Custom` once a task is dispatched: the Lead's session is pinned to read-only, and "read-only plus your approval policy" usually matches no configured preset. That control still sets the **Sidekick's** permission — change it and the Sidekick's next step uses that mode, while the Lead stays read-only. If you would rather it read a name instead of `Custom`, add a preset to your profile's `presets` with `sandbox: read-only` and `approval: never` — pure configuration, this plugin does not depend on it.
+
+### Model display inside one task
+
+While a task runs, DSH requires the *physical* route to be the session's recorded model selection before a step is prepared — the combo's Lead (or Sidekick). So:
+
+- **The model menu** still names the combo you picked (e.g. `Fusion · 6.1 --> Gemini 3.8 --> V4.1 Flash`) throughout the turn, and each row in it keeps its own model name; once the turn ends and the Agent is idle, the recorded selection itself is the combo again. The label is this plugin's contribution — the route stays the Host's decision, and no client state is rewritten.
+- **The model really does change**: the Lead's model answers while the Lead works, the Sidekick's while the Sidekick works. The Fusion chip beside the composer polls with the task and names **who is working, with which model, under which permission**; it follows the bound combo, so it does not disappear during a pinned turn.
+- **Leaving Fusion is not undone**: picking any *concrete* model by hand — even the exact model this combo's Lead or Sidekick uses — means "not Fusion". The current Fusion task drains, the binding is cleared and the chip goes away. Picking *another combo* drains the old task first and starts the next one under the new combo.
 
 ## Commands and states
 

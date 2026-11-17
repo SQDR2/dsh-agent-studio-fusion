@@ -49,7 +49,16 @@ describe('read-only Fusion status', () => {
     bindings.clear(PARENT); write.mockClear()
     expect(readFusionStatus(store, PARENT)).toMatchObject({ selected: false })
     expect(readFusionStatus(store, PARENT)).not.toHaveProperty('task')
+    expect(readFusionStatus(store, PARENT)).not.toHaveProperty('selection')
     expect(write).not.toHaveBeenCalled()
+  })
+
+  it('names the bound combo so the UI can show it while the physical route is pinned', () => {
+    // The session's own frozen profile is `fusion-auto`; the menu spells that combo
+    // `dsh-fusion/auto`, and the composer shows the pair's Lead while a turn is pinned.
+    expect(readFusionStatus(setup().store, PARENT)).toMatchObject({
+      selected: true, selection: { provider: 'dsh-fusion', model: 'auto' },
+    })
   })
 
   it('projects authoritative usage without summing partial snapshots, and keeps missing fields unknown', () => {

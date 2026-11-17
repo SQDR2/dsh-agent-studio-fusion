@@ -5,6 +5,18 @@ export interface FusionStatus {
     schemaVersion: 1;
     sessionId: string;
     selected: boolean;
+    /**
+     * The combo this session is frozen to, in the model menu's own spelling
+     * (`dsh-fusion/<combo>`), while a Fusion task is bound to it.
+     *
+     * Read-only, and the only virtual route the status carries: the composer's menu names
+     * the *physical* route while a turn is pinned, so the UI reads this to name the combo the
+     * user actually picked instead. Absent on an unselected session and on older records.
+     */
+    selection?: {
+        provider: string;
+        model: string;
+    };
     observedAt: string;
     task?: {
         id: string;
