@@ -9,23 +9,21 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import { installExactRoutes } from '../http.js'
 
 export type AcpBridgeHandler = (req: IncomingMessage, res: ServerResponse) => Promise<void>
 
 /** Mount `handler` at exactly `path`; the disposer removes exactly this route. */
 export function installAcpBridgeRoute(ctx: Context, path: string, handler: AcpBridgeHandler): () => void {
-  const webServer = ctx.get('webServer') as { register: (spec: { kind: 'exact'; path: string; handler: (req: IncomingMessage, res: ServerResponse) => void }) => () => void } | undefined
-  if (!webServer) return () => {}
-  return webServer.register({
-    kind: 'exact',
-    path,
-    handler: (req: IncomingMessage, res: ServerResponse) => {
-      void handler(req, res).catch((error: unknown) => {
-        if (!res.writableEnded) {
-          res.writeHead(500, { 'content-type': 'application/json; charset=utf-8' })
-          res.end(JSON.stringify({ error: error instanceof Error ? error.message : String(error) }))
-        }
-      })
-    },
-  })
+  // Reactive registration: `webServer` can appear after this plugin loads on
+  // `dsh web`, and the old one-shot `ctx.get('webServer')` then dropped the
+  // bridge route for the rest of the process lifetime.
+  return installExactRoutes(ctx, [{ path, handler: (req: IncomingMessage, res: ServerResponse) => {
+    void handler(req, res).catch((error: unknown) => {
+      if (!res.writableEnded) {
+        res.writeHead(500, { 'content-type': 'application/json; charset=utf-8' })
+        res.end(JSON.stringify({ error: error instanceof Error ? error.message : String(error) }))
+      }
+    })
+  } }])
 }

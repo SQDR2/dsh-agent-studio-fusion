@@ -30,7 +30,7 @@ import { SqliteFusionStore } from './task/sqlite-store.js'
 import { BindingRepository, type SessionBinding } from './host/bindings.js'
 import { FusionCoordinator } from './host/coordinator.js'
 import { authorizeConfiguredPair, NativeRequestBudget } from './host/native-budget.js'
-import { json, readJson, trustedRequest } from './host/http.js'
+import { installExactRoutes, json, readJson, trustedRequest } from './host/http.js'
 import { readFusionStatus, readFusionStatusAsync } from './host/status.js'
 import { readHistoricalFusionActivity } from './host/native-activity.js'
 import { nativeShellTool } from './host/shell.js'
@@ -461,13 +461,16 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
       throw new Error(bi('请使用原模型菜单选择 Fusion 或切换普通模型', 'Use the model menu to select Fusion or another model'))
     } catch (error) { return json(res, 409, { error: error instanceof Error ? error.message : String(error) }) }
   }
-  const webServer = ctx.get('webServer') as { register: (spec: unknown) => () => void } | undefined
-  if (webServer) {
-    ctx.effect(() => webServer.register({ kind: 'exact', path: FUSION_API_PATH, handler: apiHandler }))
+  // Mounted reactively, not through one `ctx.get('webServer')`: on `dsh web` the
+  // service can become active after this plugin, and in headless compositions it
+  // never appears. The one-shot read lost these routes whenever it raced the
+  // server startup, so the panel's requests went unanswered with no Host error.
+  installExactRoutes(ctx, [
+    { path: FUSION_API_PATH, handler: apiHandler },
     // A tab still running the pre-rename bundle asks the old path until it is
     // reloaded. Keep answering it from the same handler; nothing new uses it.
-    ctx.effect(() => webServer.register({ kind: 'exact', path: LEGACY_FUSION_API_PATH, handler: apiHandler }))
-  }
+    { path: LEGACY_FUSION_API_PATH, handler: apiHandler },
+  ])
   ctx.effect(() => ctx.commands.register({ name: 'fusion', description: bi('Fusion 状态、暂停、恢复与退出（不调用模型）', 'Fusion status, pause, resume and exit (no model call)'),
     input: { hint: bi('status | pause | resume | recover [--effects-stopped] <检查记录> | off', 'status | pause | resume | recover [--effects-stopped] <inspection note> | off') },
     handler: async invocation => {

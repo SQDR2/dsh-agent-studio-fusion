@@ -230,10 +230,22 @@ export function FusionSettings() {
     combo.key === current?.key ? change(combo) : combo))
   const chooseModel = (role: 'lead' | 'worker', route: PhysicalRoute) => update(combo => ({ ...combo, pair: { ...combo.pair, [role]: route,
     ...(combo.pair.cacheKeepalive ? { cacheKeepalive: { ...combo.pair.cacheKeepalive, [role]: role === 'lead' ? 'auto' : false } } : {}) } }))
+  // One reader for both the first load and the post-save confirmation. A refusal
+  // from the Host names the reason (stale revision, missing credential, a check
+  // that threw); reporting only "cannot read settings" left nothing to act on,
+  // which is exactly how a missing API route used to look from this page.
+  const readSettings = async (signal?: AbortSignal): Promise<SettingsState> => {
+    const response = await fetch(`${FUSION_API_PATH}?view=settings`, { credentials: 'same-origin', cache: 'no-store', ...(signal ? { signal } : {}) })
+    if (!response.ok) {
+      const body = await response.json().catch(() => null) as { error?: string } | null
+      throw new Error(tr(lang, '无法读取 Fusion 设置', 'Cannot read Fusion settings')
+        + tr(lang, '：', ': ') + (body?.error ?? `HTTP ${response.status}`))
+    }
+    return await response.json() as SettingsState
+  }
   useEffect(() => {
     const abort = new AbortController()
-    void fetch(`${FUSION_API_PATH}?view=settings`, { credentials: 'same-origin', cache: 'no-store', signal: abort.signal })
-      .then(async response => { if (!response.ok) throw new Error(tr(lang, '无法读取 Fusion 设置', 'Cannot read Fusion settings')); return response.json() as Promise<SettingsState> })
+    void readSettings(abort.signal)
       .then(value => { setState(value); setDraft(toDraft(value.pairs)); setActive(0) })
       .catch(error => { if (!abort.signal.aborted) setError(String(error)) })
     return () => abort.abort()
@@ -290,9 +302,9 @@ export function FusionSettings() {
         headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action: 'configure', revision: state.revision, pairs }) })
       const result = await response.json() as { revision: number; error?: string }
       if (!response.ok) throw new Error(result.error ?? tr(lang, '保存失败，请刷新后重试', 'Save failed; refresh and try again'))
-      const confirmed = await fetch(`${FUSION_API_PATH}?view=settings`, { credentials: 'same-origin', cache: 'no-store' })
-      if (!confirmed.ok) throw new Error(tr(lang, '配置已提交，但暂时无法确认，请刷新', 'Saved, but not confirmed yet; refresh'))
-      const next = await confirmed.json() as SettingsState
+      const confirmed = await readSettings().catch(error => { throw new Error(tr(lang, '配置已提交，但暂时无法确认，请刷新', 'Saved, but not confirmed yet; refresh')
+        + tr(lang, '：', ': ') + (error instanceof Error ? error.message : String(error))) })
+      const next = confirmed
       const nextDraft = toDraft(next.pairs)
       setState(next); setDraft(nextDraft)
       // Stay on the combo the user was editing. The Host keeps the submitted order and
