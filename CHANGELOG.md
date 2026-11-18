@@ -20,6 +20,44 @@ own tags and releases.
 Entry format: what changed, then what was actually validated. "Not claimed" lines mark what a release did *not* test —
 read them before assuming a platform is covered.
 
+## 1.2.2 — 2026-11-18
+
+### The Fusion API mounts even when the web server starts after this plugin
+
+- **On `dsh web` the panel's own `/api/fusion` route could be missing for the whole process,
+  with no error on the terminal.** 1.2.1 dropped `webServer` from `inject` (correctly — a
+  headless Host never provides it) and registered the routes through one
+  `ctx.get('webServer')` read at load time. `dsh web` can activate `webServer` *after* this
+  plugin's entry, and `ctx.get` then answers `undefined`: the registration was skipped and
+  never retried. Requests fell through to the Host's `/api` transport prefix (401
+  `unauthorized`, or its own 404 for an admitted browser session), so the settings page showed
+  only “无法读取 Fusion 设置” / “Cannot read Fusion settings” while the Host logged nothing.
+  The routes — the pre-rename `/api/model-fusion` path included — now mount through a reactive
+  `ctx.inject(['webServer'])` sub-fiber that starts when the service appears and is torn down
+  with it; a headless composition still installs no route, and the plugin still activates
+  without a web server. The ACP Sidekick bridge had the same one-shot read and was losing
+  `/api/fusion/acp-mcp` the same way; both now mount through `installExactRoutes`
+  (`src/host/http.ts`), whose disposer removes its routes synchronously so a caller can mount
+  the same path again immediately.
+- **The settings page now says why a read failed.** A non-2xx reply was replaced by the
+  generic sentence above, discarding the Host's `{ error }` body. The reason (or the HTTP
+  status when the body carries none) is now appended, so a stale revision, a missing
+  credential and an unanswered route no longer look identical.
+
+Validated: `pnpm typecheck` clean; unit suite 827 passed (82 files), including
+`tests/http-routes.spec.ts` (routes mount only once `webServer` appears; the disposer removes
+them synchronously so the same path can be mounted again right away; the helper stays dormant
+in a composition that never provides the service). Host suite 326 passed, 1 skipped, against
+`DSHX_HARNESS=/home/zlw/github/deepseek-harness` on dsh 0.2.2-rc.2, including the real
+`WebServer` cases in `native-tests/acp-bridge-route.spec.ts` (a disposed bridge frees exactly
+its path) and `native-tests/agy-routes.spec.ts`. Live check: a `dsh web` instance started from
+this checkout answered `200` with the settings document on `/api/fusion?view=settings` and on
+the legacy path, where the previously running process on the same profile answered `401` for
+both and `401` for the ACP bridge route. Not claimed: the load-order race itself is not
+reproduced by a test (it depends on Host entry ordering); the regression test proves
+registration waits for the service, and the live check proves the fixed build serves the
+route.
+
 ## 1.2.1 — 2026-11-17
 
 ### The plugin activates in a headless composition that has no web Host
