@@ -1125,3 +1125,113 @@ describe('plan review gate decision', () => {
       .toMatchObject({ approved: true })
   })
 })
+
+describe('foreman review budgets: a stall is not the same answer as a slow reviewer', () => {
+  const candidate = makeCandidate()
+  candidate.order.candidateDigest = candidateDigest(candidate)
+  const readyBody = JSON.stringify({
+    schemaVersion: 1,
+    candidateDigest: candidate.order.candidateDigest,
+    verdict: 'ready',
+    acceptanceAudit: { uncoveredRequirements: [], weakOracles: [], falseGreenScenarios: [] },
+    decisionChallenges: { unsupportedDecisions: [], counterexamples: [], unresolvedCriticalAssumptions: [] },
+    materialAmbiguities: [],
+  })
+
+  function serviceFor(
+    streamFn: (options: GenerateOptions) => AsyncIterable<StreamChunk>,
+    foreman: { route: { provider: string; model: string; reasoningEffort?: string }; maxOutputTokens: number; timeoutMs: number },
+  ) {
+    const ctx = { llm: { stream: (opts: GenerateOptions) => streamFn(opts) } } as unknown as Context
+    const binding = {
+      sessionId: 'agent-1',
+      taskId: TaskId('task-1'),
+      profile: { digest: 'profile-digest', foreman },
+    } as unknown as SessionBinding
+    return new NativePlanReviewService(ctx, { id: 'agent-1' } as Agent, binding, new NativeAuxiliaryRequests())
+  }
+
+  // The observed failure: the route produced no chunk at all and the call was ended by one
+  // flat `TimeoutError` after the whole budget, which reads as approval. A stall must be
+  // reported as a stall — the remedy is a different route — and it must not be confused with
+  // a reviewer that was still answering when its total budget ran out.
+  it('reports a route that never answered as a stall, and names the route', async () => {
+    const service = serviceFor(
+      async function* () { await new Promise(() => { /* never answers */ }) },
+      { route: { provider: 'gz', model: 'slow-flash', reasoningEffort: 'high' }, maxOutputTokens: 8192, timeoutMs: 4_000 },
+    )
+    const outcome = await service.review(candidate)
+    expect(outcome.kind).toBe('unavailable')
+    if (outcome.kind !== 'unavailable') return
+    expect(outcome.reason).toContain('gz/slow-flash')
+    expect(outcome.reason).toContain('never started answering')
+    // Both attempts are accounted for: silence is the one case worth retrying.
+    expect(outcome.reason).toContain('two attempts')
+  }, 20_000)
+
+  it('does not retry once the route has started answering', async () => {
+    let calls = 0
+    const service = serviceFor(
+      async function* () {
+        calls += 1
+        yield { type: 'text-delta', index: 0, text: readyBody.slice(0, 10) } as StreamChunk
+        await new Promise(() => { /* stalls after the first chunk */ })
+      },
+      { route: { provider: 'gz', model: 'chatty', reasoningEffort: 'high' }, maxOutputTokens: 8192, timeoutMs: 4_000 },
+    )
+    const outcome = await service.review(candidate)
+    expect(outcome.kind).toBe('unavailable')
+    // One call: a partial answer is not a stall, and repeating it would double the wait.
+    expect(calls).toBe(1)
+  }, 20_000)
+
+  it('keeps a slow but responsive review inside the total budget', async () => {
+    const service = serviceFor(
+      async function* () {
+        // Each chunk arrives well after the no-progress budget would have fired had it not
+        // been cleared by the first one.
+        for (const piece of [readyBody.slice(0, 20), readyBody.slice(20)]) {
+          await new Promise(resolve => setTimeout(resolve, 30))
+          yield { type: 'text-delta', index: 0, text: piece } as StreamChunk
+        }
+        yield { type: 'finish', reason: { kind: 'stop' } } as StreamChunk
+      },
+      { route: { provider: 'gz', model: 'steady' }, maxOutputTokens: 8192, timeoutMs: 30_000 },
+    )
+    const outcome = await service.review(candidate)
+    expect(outcome.kind).toBe('ready')
+  }, 20_000)
+
+  it('says the total budget was spent while streaming, not that the route was silent', async () => {
+    const service = serviceFor(
+      async function* () {
+        yield { type: 'text-delta', index: 0, text: '{"schemaVersion":1' } as StreamChunk
+        await new Promise(resolve => setTimeout(resolve, 200))
+      },
+      { route: { provider: 'gz', model: 'crawler' }, maxOutputTokens: 8192, timeoutMs: 150 },
+    )
+    const outcome = await service.review(candidate)
+    expect(outcome.kind).toBe('unavailable')
+    if (outcome.kind !== 'unavailable') return
+    expect(outcome.reason).toContain('150ms')
+    expect(outcome.reason).toContain('while still streaming')
+  }, 20_000)
+
+  it('keeps a caller cancellation out of the retry path', async () => {
+    const controller = new AbortController()
+    let calls = 0
+    const service = serviceFor(
+      async function* () {
+        calls += 1
+        controller.abort('User cancelled')
+        await new Promise(() => { /* ends on the signal */ })
+      },
+      { route: { provider: 'gz', model: 'any' }, maxOutputTokens: 8192, timeoutMs: 4_000 },
+    )
+    const outcome = await service.review(candidate, controller.signal)
+    expect(outcome.kind).toBe('unavailable')
+    if (outcome.kind !== 'unavailable') return
+    expect(outcome.reason).toContain('User cancelled')
+    expect(calls).toBe(1)
+  }, 20_000)
+})

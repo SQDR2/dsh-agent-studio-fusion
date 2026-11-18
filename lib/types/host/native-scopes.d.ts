@@ -55,6 +55,8 @@ export declare class NativeFusionScopes {
         binding: SessionBinding;
         role: Role;
     } | undefined;
+    /** Whether this generation owns a ready scope for that exact Agent object. */
+    ready(agent: Agent): boolean;
     assertReady(agent: Agent, readOnly?: boolean): void;
     install(agent: Agent, binding: SessionBinding, role: Role): void;
     /**

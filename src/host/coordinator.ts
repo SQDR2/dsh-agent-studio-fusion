@@ -529,6 +529,23 @@ export class FusionCoordinator {
     // An observer exception is contained by native AgentRegistry. Root backstops
     // prevent a partially installed child from reaching either tools or an LLM.
     this.#dispose.push(ctx.on('agent/created', async ({ agent }) => { this.#attachKnown(agent); }))
+    // A scope belongs to the plugin generation that installed it, and `agent/created` is the
+    // only edge that installs one for a resumed session. A module reload passes that edge for
+    // an already-live Agent: the old generation cancels its turn as "Fusion runtime is
+    // unloading" and the new one starts without a scope, so the very next turn died in two
+    // milliseconds with "Fusion Agent scope is not ready" and no way out the user could read
+    // (session-8d577e34). Rebuild it at the running reservation, which is the documented place
+    // to select a route and the last point before prompt assembly reads the role. An Agent
+    // whose stale entry cannot be detached keeps it; `#assertScope` names that failure and the
+    // command that retries it under quiescence.
+    this.#dispose.push(ctx.on('agent/status', ({ agent, status }) => {
+      if (status === 'idle' || this.scopes.ready(agent) || !this.owner(agent)) return
+      try { this.scopes.detach(agent) } catch { /* a running Agent keeps its stale entry */ }
+      this.#attachKnown(agent)
+      // The running reservation is the documented place to select a route, and the listener
+      // this install just registered cannot run for the turn already starting.
+      this.scopes.pinRoute(agent)
+    }))
     this.#dispose.push(ctx.tools.guard(exec => {
       if (!exec.agent) return undefined
       const owner = this.owner(exec.agent)
@@ -542,7 +559,7 @@ export class FusionCoordinator {
       if (!this.#isTransportReplay(exec, owner.binding, owner.role)) {
         // A gated Lead may still read; only effects are closed, so pass that through.
         const readOnly = this.#readOnlyDispatch(exec, owner.role)
-        try { this.scopes.assertReady(exec.agent, readOnly) } catch (error) {
+        try { this.#assertScope(exec.agent, readOnly) } catch (error) {
           this.#noteGatedEffect(exec, owner.binding, owner.role, readOnly)
           return String(error)
         }
@@ -587,7 +604,7 @@ export class FusionCoordinator {
       options.reserveRequest?.(request, owner.binding, owner.role)
     }, (agent, request) => {
       // A request is not an effect: a gated Lead keeps reading and answering.
-      this.scopes.assertReady(agent, this.owner(agent)?.role === 'lead')
+      this.#assertScope(agent, this.owner(agent)?.role === 'lead')
       this.keepalive.assertRequest(agent, request)
       const owner = this.owner(agent)
       if (owner && owner.binding.profile.interactionMode !== 'model-like') this.taskContext.assertPresent(agent, owner.binding, owner.role, request)
@@ -857,6 +874,25 @@ export class FusionCoordinator {
     if (!row || row.parent !== agent.session.header.parentSession || typeof row.parent !== 'string') return undefined
     const binding = this.bindings.read(row.parent)?.binding
     return binding?.selected && binding.taskId === row.taskId ? { binding, role: 'worker' } : undefined
+  }
+
+  /**
+   * Refuse a dispatch this Agent has no ready Fusion scope for, and say what to do about it.
+   *
+   * The bare "scope is not ready" named nothing a user could act on: in session-8d577e34 a
+   * module reload left the resumed Agent without a scope, the turn ended two milliseconds
+   * after it started, and the only repair (`/fusion resume`) was mentioned nowhere. The
+   * recorded install failure is the actual cause when there is one; `#installErrors` held it
+   * while `assertReady` answered first with the generic refusal.
+   */
+  #assertScope(agent: Agent, readOnly = false): void {
+    if (!this.scopes.ready(agent)) {
+      const failed = this.#installErrors.get(agent.id)
+      throw new Error('Fusion Agent scope is not ready; execution is blocked'
+        + (failed === undefined ? '' : ` — the scope install failed: ${failed}`)
+        + '. Run /fusion resume to install a new Fusion scope, or select another model and come back to this combo.')
+    }
+    this.scopes.assertReady(agent, readOnly)
   }
 
   /**
@@ -1878,7 +1914,7 @@ export class FusionCoordinator {
   #binding(agent: Agent, role: Role): SessionBinding {
     const owner = this.owner(agent)
     if (!owner || owner.role !== role) throw new Error('Fusion role identity mismatch')
-    this.scopes.assertReady(agent)
+    this.#assertScope(agent)
     return owner.binding
   }
 
@@ -1999,7 +2035,7 @@ export class FusionCoordinator {
     }
     this.#release(binding.taskId)
     exec.signal.throwIfAborted()
-    this.scopes.assertReady(agent)
+    this.#assertScope(agent)
     return this.#validate(agent, binding, exec)
   }
 
@@ -2013,7 +2049,7 @@ export class FusionCoordinator {
       const settled = await this.transport.settle(agent, childId, exec.signal, true)
       if (!settled) {
         exec.signal.throwIfAborted()
-        this.scopes.assertReady(agent)
+        this.#assertScope(agent)
         // The native inbox remains authoritative. Return this tool so the Lead
         // can consume steering, retaining the exact Worker and its write lease.
         this.#saveRuntime({ ...this.#runtime(binding.taskId), background: true })
@@ -2045,7 +2081,7 @@ export class FusionCoordinator {
     this.#release(binding.taskId)
     exec.signal.throwIfAborted()
     this.#rememberWorkerFailure(agent, binding)
-    this.scopes.assertReady(agent)
+    this.#assertScope(agent)
     return this.#validate(agent, binding, exec)
   }
 
@@ -2305,7 +2341,17 @@ export class FusionCoordinator {
           }
         } else {
           if (args.foremanDispositions && args.foremanDispositions.length > 0) {
-            throw new Error('Unexpected foremanDispositions: no unresolved Foreman concerns exist for this task.')
+            // Reaching here means no concern is open: every reviewed candidate is either
+            // approved or already answered. The flat "unexpected" sentence that used to stand
+            // here told the Lead nothing it could act on — in the session that prompted this,
+            // it burned a whole delegation round on finding ids copied from an earlier round.
+            // Name the ids and the way out instead.
+            const ids = [...new Set((args.foremanDispositions as { findingId?: unknown }[])
+              .map(item => String(item?.findingId)))]
+            throw new Error(`foremanDispositions cannot be submitted: no Foreman concern is open for this candidate, `
+              + `so the finding ids ${JSON.stringify(ids)} belong to no live review. Findings from an earlier round `
+              + `or an earlier candidate are already settled. Resubmit without foremanDispositions and the candidate `
+              + `is reviewed on its own merits.`)
           }
 
           // `decision.round` is 2 exactly when an accepted round-1 resolution revised the
@@ -2350,7 +2396,7 @@ export class FusionCoordinator {
     // only the verified Lead writer before acquiring the Worker's generation.
     if (directHandoff) {
       exec.signal.throwIfAborted()
-      this.scopes.assertReady(agent)
+      this.#assertScope(agent)
       if (mode !== 'text' && held.workspaceId !== base.root || !this.leases.stillHeld(held) || this.effects.pending(binding.taskId).length) {
         throw new Error('Direct preparation must be quiescent under its current workspace lease before delegation')
       }
@@ -3158,7 +3204,7 @@ export class FusionCoordinator {
           else if (state.lease) throw new Error('Absent Worker still owns a recorded lease; reconcile first')
         }
         exec.signal.throwIfAborted()
-        this.scopes.assertReady(agent)
+        this.#assertScope(agent)
         if (this.effects.pending(binding.taskId).length) throw new Error('Inspect unfinished Worker effects before takeover')
         this.#release(binding.taskId)
         const base = snapshotWorkspace(agent.session.header.cwd!)

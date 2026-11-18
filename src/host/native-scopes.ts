@@ -78,6 +78,12 @@ export class NativeFusionScopes {
     return entry?.agent === agent ? { binding: entry.binding, role: entry.role } : undefined
   }
 
+  /** Whether this generation owns a ready scope for that exact Agent object. */
+  ready(agent: Agent): boolean {
+    const entry = this.#entries.get(agent.id)
+    return entry !== undefined && entry.agent === agent && entry.ready
+  }
+
   assertReady(agent: Agent, readOnly = false): void {
     const entry = this.#entries.get(agent.id)
     if (!entry || entry.agent !== agent || !entry.ready) throw new Error('Fusion Agent scope is not ready; execution is blocked')

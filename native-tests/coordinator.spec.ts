@@ -378,6 +378,54 @@ describe('legacy status readiness before coordinator actions', () => {
   })
 })
 
+describe('Agent scope across a plugin generation', () => {
+  /** The Lead's own request, as the model received it. */
+  const leadRequest = (adapter: MockAdapter, index: number) => adapter.requests[index]!
+  /** The Fusion-owned part of a request's tool table, which only a live scope registers. */
+  const fusionTools = (request: GenerateOptions) =>
+    request.tools!.map(tool => tool.name).filter(name => name.startsWith('fusion_')).sort()
+
+  it('rebuilds a lost scope at turn start, before the prompt is assembled', async () => {
+    const { parent, coordinator, adapter } = await setup([textResponse('Ready.'), textResponse('Still here.')])
+    parent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Hello.' }] }))
+    await parent.whenIdle()
+    expect(leadRequest(adapter, 0).tools!.map(tool => tool.name)).toContain('fusion_delegate')
+    // A module reload disposed the generation that owned the scope; `agent/created` already
+    // passed for this live Agent, so nothing else in the Host reinstalls it.
+    coordinator.scopes.detach(parent)
+    expect(coordinator.scopes.ready(parent)).toBe(false)
+    parent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Continue.' }] }))
+    await parent.whenIdle()
+    expect(coordinator.scopes.ready(parent)).toBe(true)
+    const repaired = leadRequest(adapter, 1)
+    // The whole turn is owned again: the rebuilt scope registered the same Fusion table the
+    // healthy turn had, and the frozen physical route is the one step preparation read.
+    expect(fusionTools(repaired)).not.toHaveLength(0)
+    expect(fusionTools(repaired)).toEqual(fusionTools(leadRequest(adapter, 0)))
+    expect(repaired).toMatchObject({ provider: 'test-native', model: 'lead' })
+  })
+
+  it('names the install failure and the repair command instead of a bare refusal', async () => {
+    const { parent, coordinator, adapter } = await setup([textResponse('Ready.'), textResponse('Unused.')])
+    parent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Hello.' }] }))
+    await parent.whenIdle()
+    coordinator.scopes.detach(parent)
+    // What an overlapping generation looks like from here: the scope cannot be installed.
+    const install = vi.spyOn(coordinator.scopes, 'install').mockImplementation(() => {
+      throw new Error('a tool presentation is already selected for this scope')
+    })
+    cleanups.push(async () => install.mockRestore())
+    parent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Continue.' }] }))
+    await parent.whenIdle()
+    // Nothing reaches the model, and the refusal carries the cause and the way out.
+    expect(adapter.requests).toHaveLength(1)
+    expect(parent.session.snapshotEvents().at(-1)).toMatchObject({ type: 'turn/end', data: {
+      reason: { kind: 'error', error: { message: expect.stringContaining('a tool presentation is already selected for this scope') } },
+    } })
+    expect(parent.session.snapshotEvents().at(-1)).toMatchObject({ data: { reason: { kind: 'error', error: { message: expect.stringContaining('/fusion resume') } } } })
+  })
+})
+
 describe('delegation preflight and direct preparation', () => {
   const withDefinitions = (paths: string[]) => toolCallResponse('invalid-delegate', 'fusion_delegate', {
     goal: 'Correct addition', brief: 'Fix calc.py and add regression tests when needed.',

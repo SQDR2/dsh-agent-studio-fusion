@@ -20,6 +20,64 @@ own tags and releases.
 Entry format: what changed, then what was actually validated. "Not claimed" lines mark what a release did *not* test —
 read them before assuming a platform is covered.
 
+## 1.2.3 — 2026-11-18
+
+### A Foreman review that never started is no longer reported as a generic timeout
+
+- **A configured Foreman could burn its whole budget on a route that never answered, and the
+  gate then read that as approval.** One implement candidate on a `reasoningEffort: high`
+  route was ended by a single flat `TimeoutError` after 120 006 ms having produced no stream
+  at all (one usage snapshot, zero input and output tokens), so the plan reached the Sidekick
+  unaudited with only a transcript notice to say so. The review now runs under two budgets:
+  a stall budget for the wait before the first chunk, and the configured total. A route that
+  said nothing is reported as silent — naming the route and how many attempts it consumed —
+  instead of as one undifferentiated timeout, and silence is the one case worth a retry,
+  taken out of the configured budget rather than added to it.
+- **A stall can no longer hang the delegation.** The deadline is now observed by the code
+  that owns the budget, by racing the stream against it, rather than only signalled to the
+  adapter: an adapter that ignores its abort no longer leaves the review pending for ever.
+- **A new reviewer starts at five minutes, not two.** `FOREMAN_DEFAULT_TIMEOUT_MS` is
+  300 000 ms; enabling the reviewer in the panel seeds it. A reasoning reviewer spends tens
+  of seconds before its first token on a two-word request, and a candidate plan is far
+  larger, so two minutes sat one queue stall away from discarding the review.
+- **`foremanDispositions` rejected for a reason the Lead can act on.** The sentence
+  "Unexpected foremanDispositions: no unresolved Foreman concerns exist for this task." cost
+  a whole delegation round in the session that prompted this: the error now names the finding
+  ids that belong to no live review and says to resubmit without dispositions.
+
+### A conversation no longer dies when a plugin reload outlives its Fusion scope
+
+- **A module reload during a running turn left the conversation permanently unusable, and the
+  refusal named neither the cause nor a way out.** In session-8d577e34 a reload disposed the
+  generation that owned the scope 1.9 s into the first model request (the turn was cancelled
+  as "Fusion runtime is unloading"); the next generation restored the session's combo but
+  never installed a scope, because `agent/created` — the only edge that installs one for a
+  resumed session — had already passed for that live Agent. The next turn ran on the Host's
+  own prompt and tool table, and was refused four milliseconds after it started with
+  "Fusion Agent scope is not ready; execution is blocked". Nothing said that `/fusion resume`
+  existed, and the recorded install failure sat in memory unread: `assertReady` answers the
+  readiness question before any gate that would have reported it.
+- **The scope is now rebuilt at the running reservation.** A turn whose Agent has a binding
+  but no ready scope of this generation gets one before prompt assembly reads the role, from
+  the persisted binding, and the frozen physical route is pinned at the same point — the
+  documented place to select a route, since step preparation reads it before any waterfall.
+  An Agent whose stale entry cannot be detached keeps it, and says so.
+- **Every scope refusal now carries the cause and the repair.** The message appends the
+  recorded install error when there is one and names both `/fusion resume` and switching away
+  from the combo and back.
+
+Validated: full unit suite 832 passed (5 new cases in `tests/plan-review.spec.ts` covering a
+silent route, the retry that silence earns, a responsive-but-slow review staying inside its
+total budget, the streaming-deadline wording, and caller cancellation staying out of the
+retry path; `tests/fusion-combos.spec.ts` now asserts the new default). Two new cases in
+`native-tests/coordinator.spec.ts` drop a live Agent's scope the way a reload does and assert
+that the next turn gets the same Fusion tool table back with the frozen route pinned, and that
+an install that still fails produces a turn error naming the failure and `/fusion resume`.
+Not claimed: no live review was run against a real slow route — the two-budget split is
+exercised against a fake stream, and the five-minute default is a value change, not a
+measurement of any one gateway. The scope repair is exercised against a detach that stands in
+for a reload, not against a real HMR recompose of this plugin inside `dsh web`.
+
 ## 1.2.2 — 2026-11-18
 
 ### The Fusion API mounts even when the web server starts after this plugin

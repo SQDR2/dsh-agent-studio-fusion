@@ -3,6 +3,7 @@ import { describe, expect, it, vi, afterEach } from 'vitest'
 import { create, act, type ReactTestRenderer } from 'react-test-renderer'
 import { FusionSettings } from '../src/client/FusionSettings.js'
 import { pinLanguage } from './client-locale.js'
+import { FOREMAN_DEFAULT_TIMEOUT_MS } from '../src/profile/foreman.js'
 
 const roots: ReactTestRenderer[] = []
 afterEach(async () => {
@@ -276,11 +277,11 @@ describe('FusionSettings combo list', () => {
 
     await act(async () => { root.root.findByProps({ 'aria-label': '启用工长审查' }).props.onChange({ target: { checked: true } }) })
     expect(root.root.findByProps({ 'aria-label': '工长输出 Token 上限' }).props.value).toBe(8192)
-    expect(root.root.findByProps({ 'aria-label': '工长超时毫秒' }).props.value).toBe(120000)
+    expect(root.root.findByProps({ 'aria-label': '工长超时毫秒' }).props.value).toBe(FOREMAN_DEFAULT_TIMEOUT_MS)
 
     await act(async () => { button(root, '保存组合').props.onClick() })
     expect(root.root.findAllByProps({ role: 'alert' })).toHaveLength(0)
-    expect((posts[0] as any).pairs[0].pair.foreman).toMatchObject({ maxOutputTokens: 8192, timeoutMs: 120000 })
+    expect((posts[0] as any).pairs[0].pair.foreman).toMatchObject({ maxOutputTokens: 8192, timeoutMs: FOREMAN_DEFAULT_TIMEOUT_MS })
   })
 
   // A five-minute review timeout was refused with one sentence that listed the

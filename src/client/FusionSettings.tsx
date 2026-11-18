@@ -7,7 +7,7 @@ import { useEffect, useState } from 'react'
 import type { PhysicalRoute } from '../contracts.js'
 import type { PairChoice, PairRole, SettingsCatalog } from '../host/settings.js'
 import { missingRoutes } from '../host/settings.js'
-import { FOREMAN_MAX_OUTPUT_TOKENS, FOREMAN_TIMEOUT_MS } from '../profile/foreman.js'
+import { FOREMAN_DEFAULT_TIMEOUT_MS, FOREMAN_MAX_OUTPUT_TOKENS, FOREMAN_TIMEOUT_MS } from '../profile/foreman.js'
 import { settingsChanged } from './settings-events.js'
 import { tr, useLang } from './i18n.js'
 import { FUSION_API_PATH } from '../identity.js'
@@ -426,9 +426,11 @@ export function FusionSettings() {
                           // A review that finds many problems must still fit its budget, and a
                           // slow reviewer must be allowed to finish: 4096 output tokens and 30
                           // seconds turned real reviews into `max-tokens` and `TimeoutError`
-                          // aborts, which the gate then reads as approval.
+                          // aborts, which the gate then reads as approval. Two minutes hit the
+                          // same wall on an implement candidate that produced no stream at all,
+                          // so a new reviewer starts at `FOREMAN_DEFAULT_TIMEOUT_MS`.
                           maxOutputTokens: 8192,
-                          timeoutMs: 120000,
+                          timeoutMs: FOREMAN_DEFAULT_TIMEOUT_MS,
                         },
                       },
                     }
