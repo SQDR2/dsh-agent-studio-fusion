@@ -20,7 +20,7 @@ own tags and releases.
 Entry format: what changed, then what was actually validated. "Not claimed" lines mark what a release did *not* test —
 read them before assuming a platform is covered.
 
-## Unreleased
+## 1.3.0 — 2026-11-19
 
 ### The Lead runs with your permissions; the Foreman audits the code, not the plan text
 
