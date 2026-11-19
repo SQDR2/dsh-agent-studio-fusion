@@ -1,277 +1,181 @@
-# DSH Agent Studio With Fusion
+# DSH Agent Studio
 
-[English](README.en.md) · [安装](INSTALL.zh.md) · [更新日志](CHANGELOG.md) · [文档索引](#文档索引)
+一个 DeepSeekRuntime 插件，把三个东西放进同一个侧边栏条目：**Fusion 组合**（贵模型判断、便宜模型干活）、**Antigravity**（agy CLI 的模型线路）和 **ACP 代理线路**。
 
-<img src="assets/icon.svg" width="72" alt="">
+> 包名 `@sqdr2/dsh-agent-studio-fusion`，插件 id `dsh-agent-studio-fusion`。
+> 需要 **Node 24 或更新版本** 与 **DeepSeekRuntime `>=0.2.1-rc.5 <0.2.2-0 || >=0.2.2-rc.2 <0.3.0-0`**。
+> 安装步骤见 [INSTALL.zh.md](INSTALL.zh.md)，改动记录见 [CHANGELOG.md](CHANGELOG.md)。
 
-**贵的模型只动脑，便宜的模型动手 —— 一个插件，把这件事做成 DSH 里的普通模型。**
+## 一句话说清 Fusion
 
-装好之后，左侧边栏多一个 **Fusion** 入口，页面里三块：**Fusion 组合**、**Antigravity**（`agy` CLI）、**ACP 线路**。
-不再需要 `dsh-agy-worker`、`dsh-tauri-acp` 或任何配套包。
+一个 **Fusion 组合** = 你自己挑的两个模型：
 
-任务停下来不知道怎么办、或者想暂停/换 Sidekick/退出 Fusion，先看 **[命令与状态](#命令与状态)**（`/fusion status|pause|resume|recover|off`）。
+- **Lead**：前沿模型。定方案、写任务说明、验收结果、和用户对话、做提交推送这类权威动作。
+- **Sidekick**：便宜得多的模型。改文件、跑命令、跑测试，把报告交回来。
 
-| | |
-|---|---|
-| 包名 | `@sqdr2/dsh-agent-studio-fusion` |
-| 插件 id | `dsh-agent-studio-fusion`（配置行、状态目录、日志标记都用它） |
-| 模型菜单里的线路 | `dsh-fusion`，显示为 **Fusion · 组合名称** |
-| 运行要求 | DSH `>=0.2.1-rc.5 <0.2.2-0 || >=0.2.2-rc.2 <0.3.0-0`，Node 24+ |
+省下的钱来自两者价差，所以 Sidekick 要比 Lead 便宜得多；价差越小，省得越少。组合最多 **6 个**，每个在模型菜单里各占一项，同时开多个会话时可以各选各的。
 
-## 它解决什么
+**两个角色用同一套用户权限。** 插件不再把 Lead 钉成只读——它和普通会话一样能读、能搜、能跑命令、也能改文件。分工靠提示词约束：实现和验证默认交给 Sidekick，一两轮就能做完或者正确性上不能转手时才自己做，但不许留下改了一半的工作区。宿主只保证一件程序层面的事：**同一个工作区同时只有一个写者**。
 
-每个 **Fusion 组合**背后是你自己选的两个模型：
-
-- **Lead**：一个强的前沿模型。读需求、看代码、写任务说明、验收结果、打回重做。它**不写代码**——没有写文件的工具，shell 命令跑在 DSH 的只读沙盒里，由程序保证，不靠提示词约束。
-- **Sidekick**：一个便宜得多的模型。改文件、跑命令、跑测试，然后把结果交回来。
-- **目标只有一个**：前沿模型的效果，打折的价钱。省钱靠价差——Sidekick 要比 Lead 便宜得多（最好 5 倍以上），两者价格越接近越省不了。
-
-思路受 Cognition 在 Devin 里做的 Fusion 启发；这里是独立实现，与 Cognition 无关。
-
-## 实测
-
-9 道真实开源项目的题（SWE-rebench，Python），每题跑 2 次，隐藏测试判对错。Lead 为 GPT-6 Astra（high），Sidekick 为 GLM-5.3-Flash（high）：
-
-| | 做对 | 总花费（按 API 公开价估算） |
-|---|---|---|
-| GPT-6 Astra 单独 | 9/18 | $39.17 |
-| **Fusion：Astra + GLM-5.3-Flash** | **11/18** | **$18.07（省 54%）** |
-| Fusion：Astra + Grok 4.6 | 13/18 | $41.27（不省钱） |
-
-对照 Devin 自己的 Fusion——同一对模型（Lead GPT-6 Astra，Sidekick SWE-2）、同题、同工作区、同隐藏测试。排除被污染的尝试后，四组都干净的题剩 4 道：本插件 **4/4、$2.73**；Devin Fusion 3/4、$4.81；Devin 单独 Astra 3/4、$8.13。本插件耗时约为 Devin 的 3.4 倍。
-
-样本小（4 道题 1 次；另一组 9 题 2 次）、只测了 Python、公开题目可能出现在训练数据里，所以这**不是**排名，也不是与 Devin 同等水平的声明。方法、原始数据、每轮结论和被排除的尝试：**[docs/EVIDENCE.md](docs/EVIDENCE.md)**。
-
-## 上手
+## 装
 
 ```sh
 dsh plugin --profile web add @sqdr2/dsh-agent-studio-fusion
 ```
 
-也可以直接从 GitHub 装（仓库自带构建好的 `lib/`）：`dsh plugin --profile web add github:SQDR2/dsh-agent-studio-fusion`。桌面版安装、本地目录安装、卸载、从旧包迁移见 **[INSTALL.zh.md](INSTALL.zh.md)**。
+装完重新打开一次 Web 服务（或 DSH Studio），刷新页面。模型菜单里就会出现你保存过的组合。完整的 npm / GitHub / 本地目录 / 桌面版几种安装方式、以及从 `dsh-fusion` 旧包迁移的步骤，都在 [INSTALL.zh.md](INSTALL.zh.md)。
 
-1. 打开左侧边栏的 **Fusion**（默认在记忆系统下方）。
-2. 在 **Fusion 组合** 里起个名字，选 Lead 和 Sidekick。DSH 里任何已登录的模型都能选，包括已配好的 Antigravity 与 ACP 线路。还可以给这个组合加一个**工长**审查模型，默认关闭，见 [工长审查](#工长审查可选)。
-3. 在模型菜单里选 **Fusion · 组合名称**，像平时一样对话。
-4. 输入框附近的 Fusion 标签随时显示当前谁在干活：`Lead · 模型 · 仅可查看` / `Sidekick · 模型 · 完全权限`。
+## 配
 
-**最多 6 个组合**，可以同时存在——「快」用便宜组合、「稳」用强组合，各是模型菜单里的一项。同时开多个会话时每个会话可以选不同组合；选定后该会话冻结这个组合，之后改设置或换别的会话都不影响它。旧版只有一个组合的配置会自动迁成名为「自动」的组合（模型 id 仍是 `auto`），已有会话照常继续。
+侧边栏 **Fusion** → **Fusion 组合**：点「新增」，选 Lead、选 Sidekick、保存。可选地给这个组合配一个工长（见下一节）。
 
-输入框的「权限」控件在下发任务后会显示 `Custom`：Lead 的会话被固定在只读，而「只读 + 你的确认策略」通常匹配不上任何已配置预设。那个控件仍然决定 **Sidekick** 的权限——在那里换一项，Sidekick 下一轮就用那一项，Lead 始终只读。想让它显示名字而不是 `Custom`，在你 profile 的 `presets` 里加一条 `sandbox: read-only` + `approval: never` 的预设即可（纯配置，本插件不依赖它）。
-
-### 一轮任务里的模型显示
-
-一轮任务跑起来的时候，DSH 要求在准备每一步之前就把「物理线路」写进会话的模型选择——也就是这个组合的 Lead（或 Sidekick）。所以：
-
-- **模型菜单**在这一轮里仍显示你选的组合名（如 `Fusion · 6.1 --> Gemini 3.8 --> V4.1 Flash`），菜单里的每一行仍然是它自己的模型名；这一轮结束、Agent 空闲时，会话记录的选择本身就回到这个组合。显示由本插件补，线路仍是 Host 决定的，前端不改会话状态。
-- **模型确实在换**：Lead 干活时是 Lead 的模型，Sidekick 干活时是 Sidekick 的模型。输入框旁那个 Fusion 标签跟着阶段轮询，显示**当前是谁在干、用哪个模型、什么权限**；它按任务绑定的组合显示，所以在这一轮里也不会消失。
-- **自己退出 Fusion 不会被拉回来**：在模型菜单里手选任何一个**具体模型**（哪怕正好是这个组合的 Lead 或 Sidekick 用的那个）就是明确的「不跑 Fusion」，当前 Fusion 任务会排空、绑定解除，标签随之消失。反过来，手选**另一个组合**会先排空旧任务、再按新组合开新任务。
-
-## 命令与状态
-
-`/fusion` 一族的命令直接读写本地状态，**不调用模型**，所以任务停住时它们照样能用。
-
-| 命令 | 作用 |
-|---|---|
-| `/fusion status` | 当前任务 id、阶段、控制状态、未收尾的原生操作、花费 |
-| `/fusion pause` | 暂停当前任务（进度、工作区、Sidekick 会话都保留） |
-| `/fusion resume` | 放行一次，继续跑当前任务 |
-| `/fusion recover [--effects-stopped] <检查记录>` | 中断核对：确认上次 Host 退出时启动的命令与子进程都已停止，然后解锁 |
-| `/fusion off` | 退出 Fusion，会话恢复成普通模型（任务记录保留） |
-
-任务会以三种方式停下来，继续的办法各不相同：
-
-1. **模型暂停**（额度、鉴权、超时、连续无进展）：换一条能用的线路，或者直接再发一条消息；也可以 `/fusion resume`。
-2. **需要核对中断的操作**（`/fusion status` 里 `control.recovering` 为 `true`）：Host 退出**不会**结束它启动过的命令和子进程，所以 Fusion 先锁住"效果"。这种状态下：
-
-   - **你新发的一条消息仍然会被处理**：Lead 会读取记录、看文件和状态，告诉你它看到了什么、建议怎么办；但委派、写文件、跑命令一律被拒，并且它一旦尝试这类动作，这一轮就到此结束（不会反复重试、白烧 token）。
-   - 想真正继续干活，先提交核对记录，再恢复：
-     ```
-     /fusion recover 我核对过，相关命令与子进程都已停止
-     /fusion resume
-     ```
-     检查记录至少 12 个字符；如果它提示还有未收尾的命令，就加 `--effects-stopped`（表示你已经把它们停掉）。核对会写一条带时间戳的证据（工作区快照 + 你的检查记录），事后可查。
-3. **任务完成**：直接发下一条消息，Fusion 会自动开一个新任务；旧任务的记录仍留在本地。
-
-> 启动检查只在**确实发现**未收尾的东西（租约、已准备未投递的派发、不确定的验收、待批审批、未完成的压缩、未收尾的原生操作、可能仍在跑的交接）时才上锁；如果它上锁后发现已经没有东西要核对，下次启动会自动解除并在证据里写清原因。
+- **模型来源**：Lead 和 Sidekick 都可以选普通 provider 模型，也可以选 Antigravity / ACP 线路。
+- **上下文与压缩**：每个角色有独立的上下文预算和压缩模型，可以在组合里调；不调就用默认。
+- **价格**：面板会按记录的用量折算成钱。价格没配的模型按「未知」计，不会假装便宜。
 
 ## 一次任务怎么跑
 
-1. Lead 判断要改代码，把活交给 Sidekick。任务说明里带用户需求的原话和验收命令。
-2. Sidekick 改完交回，DSH 在真实工作区跑验收命令。
-3. Lead 逐条审用户的硬性要求，每条都要给结论和证据，缺一条不能过；Sidekick 改写过的原有测试会单独标出来，必须 Lead 确认。
-4. 不过就把具体问题打回同一个 Sidekick 继续改。发现可改文件范围不够（例如另一个测试文件还写着旧行为），Lead 只能在返工时往里**加**、不能减，每次加都留记录。
-5. 原本就失败的测试（如缺可选依赖）可以标成「只要求不新增失败」。
-6. **唯一例外**：程序判定 Sidekick 确实做不完（返工 2 轮仍失败、步数耗尽、反复卡住）才解锁 Lead 接手——只能改任务允许的文件，必须过同一套验收，结束后恢复只读。
-7. 额度用完或出错按角色分别处理：换模型继续、定时继续，进度都保留。
+```
+用户请求
+  │
+  ├─ 需要先讨论的 skill（如 /grill-me）→ Lead 先和你讨论，讨论没完成不许定稿
+  │
+Lead 亲自读代码 / 跑命令形成判断 → 定稿计划
+  │
+  ├─► 工长审查（可选，独立上下文，读真实代码）
+  │      ├─ 有意见 → Lead 改 → 再送审（最多 3 轮）
+  │      └─ 无意见（且引用能对上真实文件）→ 放行
+  │
+  └─► 派给 Sidekick 执行 → 宿主在真实工作区跑验收 → Lead 验收
+```
 
-开了工长审查的组合，第 1 步之后还要先过一遍独立审查才轮到 Sidekick（见 [工长审查](#工长审查可选)）。
+**宿主跑验收，不是 Sidekick 自己报。** 定稿时你写下 agent 要满足的要求原话和验收命令，Sidekick 交回后由 DSH 在真实工作区执行这些命令；报告和检查结果物理分离，「测试全绿」和「真的对」不是同一句话。Sidekick 改写了原有测试会被单独标出来，需要 Lead 确认。
 
-**提交、推送、打 tag、发版、开或更新 PR、触发 CI 不是写租约的一部分。** 你要求这类动作时，Lead 在派活时只授权那一个动作，Sidekick 执行其余未授权的同类命令会被宿主拒绝（`FUSION_WORKER_AUTHORITY_DENIED`）。改动验收之后你才说「提交推送」也可以：Lead 不会自己跑 git（它这一轮是只读的），也不会另开一张工作单，而是把那个动作补授给同一张单子（只增不减，记为工作单修订），再让那个 Sidekick 执行。
+**验收命令怎么写.** 测试用 `test` + 对应计数解析器（unittest、pytest、vitest、jest、mocha、tap、go 需 `go test -v`、cargo）；没有解析器的检查用 `static-check` + `exit-code`。几条互不共享状态的检查可以标 `independent` 并发跑；同一个测试框架的两条命令通常不独立（共享缓存目录）。对「本来就可能失败」的大回归套件用 `baseline: no-new-failures`。
+
+**权限：Lead 也会写，但同时只有一个写者。** 谁持有写租约谁写；Worker 持有租约期间 Lead 的写入会被拒绝（`FUSION_LEAD_WRITE_CONFLICT`），读和搜索照常。程序判定 Sidekick 确实做不完（返工 2 轮仍失败、步数耗尽、反复卡住）时解锁 Lead 接管：只能改任务允许的文件，必须过同一套验收。
+
+**权威动作不归写租约管.** 提交、推送、打 tag、发版、开或更新 PR、触发 CI 都要在派活时用 `authority` 明确授权那一个动作，否则 Sidekick 执行会被拒绝（`FUSION_WORKER_AUTHORITY_DENIED`）。改动验收之后你才说「提交推送」也可以：Lead 不自己跑 git（Worker 还占着写租约），而是把那个动作补授给同一张工作单（只增不减，记为修订），再让同一个执行者去跑。
+
+**取整取证默认由 Lead 亲自做。** 只有你执行 `/fusion allow-explore <范围>` 明确授权后，才允许一次限定范围的 Sidekick 只读调查；这种调查不送工长、不派工，关键证据仍由 Lead 核验。
 
 ## 工长审查（可选）
 
-每个组合还能配第三个模型：**工长**（Foreman）。它不干活，只在 Lead 把候选工作单定稿之后、派给 Sidekick 之前，用**独立上下文**审这份计划本身——看到的是 Sidekick 即将收到的那份单子：你的原话、验收命令、需求覆盖、允许改动的路径。
+组合可以额外配第三个模型：**工长**（Foreman）。它不干活，只在 Lead 定稿之后、Sidekick 开始之前，用**独立上下文**对着**真实工作区**审这份计划。
 
-它盯的是「测试全绿却还是不对」这一类问题：
+**它读代码，不是读描述。** 工长可以用 `read` / `grep` / `glob` 打开文件，也可以用宿主的 shell 跑验收里写明的命令（测试、lint、构建），从而自己确认「这条要求真被覆盖了」「这个检查真会失败」。它拿到的权限就是你选的模式；「只审不改」是提示词条款：不改方案、不修代码、不跑会改工作区的命令，坏了就报告而不是顺手修。
 
-- 每条硬要求是否真的被计划覆盖；
-- 验收命令全绿是否仍可能假通过（弱断言、只测了半边、把测试改成永远成立）；
-- Lead 的关键决定有没有足以推翻它的反例；
-- 计划里有没有把没验证的假设当成事实；
-- brief、约束、允许路径和验收命令是否互相矛盾；
-- 有没有会产生不同外部行为的需求歧义。
+**每条结论都挂在代码上。** `blocking-concern` 必须带 `path:startLine-endLine` 引用，判 `ready` 必须列出它读过的范围。宿主逐个核对：路径必须在这个工作区内、文件真的存在、行号真的在文件里；任何一条对不上，整份结论作废并按「不可用」处理。核对通过的引用会附上文件摘要，记录里因此能证明确切读过哪一版字节。
 
-**怎么开关。** 每个组合各自一个「工长计划审查」开关，默认关闭。打开后必须选模型——选和 Lead / Sidekick 同一个模型也允许，独立上下文仍是有效的审查，面板只提示不拦——还能调推理强度、输出上限（默认 8192）和超时（默认 2 分钟，最多 10 分钟）。**没有「只看不拦」或「只审高风险」这类策略**：开着就每一份候选都审，explore、纯文本、实现单都算。不想审就关掉，一个开了却会静默跳过的审查跟坏掉没区别。
+它盯的是「测试全绿却还是不对」：没被任何检查覆盖的硬要求、太弱的验收判据、会假绿的具体场景、没有依据的设计决定、反例、尚未解决的关键假设、会改变外部行为的歧义。
 
-**有分歧时会怎样。** 派发被挡住，Lead 必须逐条回应每条意见，两种做法：
+**有分歧会怎样.** 派发被挡住，Lead 必须逐条回应：
 
-- **接受**：改计划（brief、路径、验收条件），改完这份新候选必须再过一次第 2 轮审查；
-- **覆盖**：写清理由，理由进持久记录。覆盖只对「被审过的那一份」有效，一边覆盖一边偷改计划会被拒。
+- **接受**：改计划（brief、路径、验收条件），改完这份新候选再送下一轮审查；
+- **覆盖**：**只有 `warning` 可以覆盖**，写清理由，理由进持久记录；一边覆盖一边偷改计划会被拒；
+- **`blocking-concern` 不能覆盖**：它的意思是「这份计划会做出错的东西」，作者不同意不算证据。只能改到它不再成立，或者问你。
 
-最多两轮。第 2 轮还有分歧，Lead 只能覆盖、问你、或者停下——不会有第三轮。
+最多三轮。第 2 轮的意见被接受后还有第 3 轮；三轮之后仍不让步时，Lead 只能问你或停下。
 
-**审不了就放行，但会说出来。** 超时、额度用完、线路不可用、输出解析不了时记成「不可用」，任务照常继续（Host 自己的结构、路径、权限校验仍然挡住不合法的单子），会话里会插一条说明这次没审成，状态面板的「工长审查」写着 `不可用` 和原因。状态面板同时显示 `审查中 / 就绪 / 有分歧 / 不可用`、第几轮、接受与覆盖各几条，以及还没处理完的意见。
+**审不了就不派工.** 超时、额度用完、线路不可用、输出解析失败、引用核对不上、或撞上防跑飞保险（一次审查最多 40 次工具调用），都会记成「不可用」并写明原因，**不会**有候选计划在没被审过的情况下派出去。你从 `/fusion` 里三选一：
 
-**花费单独记账。** 工长调用记在 `foreman` 用途下，历史里每个任务显示审了几次、多少 token、约多少钱、几条意见、接受/覆盖各几条；审查轮次不算进 Sidekick 的返工轮次。
-
-## 三条线路
-
-### Fusion 组合
-
-上面那套 Lead/Sidekick。Lead 和 Sidekick 都可以是 DSH 自带线路、订阅登录线路、Antigravity 或 ACP 线路。
-
-### Antigravity（`agy` CLI，已内建）
-
-1.0.0 起整块内建，移植自 [`dsh-agy-worker`](https://github.com/SQDR2/dsh-agy-worker) 0.6.3（MIT，见 [docs/ATTRIBUTION-AGY.md](docs/ATTRIBUTION-AGY.md)）：`antigravity` 线路、`/agy` 命令族、`agy_ask` / `agy_tool`、`/plugins/agy-worker/*` 路由、带额度跟踪的账号池。管理控制台在页面的 **Antigravity** 区域；`/agy status | pool | models | doctor` 在输入框里回答同一批问题。
-
-当 Sidekick 用这条路时，**三个条件必须同时成立**，缺一条都会静默失败：
-
-| 条件 | 作用 | 缺了会怎样 |
-|---|---|---|
-| `mcpBridge: true` | agy 要能真的**执行** DSH 工具 | 工具看得见，但调不动 |
-| `permissionMode: 'skip'` | headless 下 MCP 调用要被自动允许 | agy 直接拒绝：`a tool required the "mcp" permission that headless mode cannot prompt for` |
-| 白名单里有 `fusion_*` | Sidekick 要能**交回结果** | 只能诊断，永远交不回 |
-
-回传通道 `agy_tool` 不用你手写：检测到 `antigravity` 线路已注册时，本插件会把它自动并进 Lead 和 Sidekick 的工具面（`src/host/route-transport.ts`）。
-
-```yaml
-- id: dsh-agent-studio-fusion
-  config:
-    agy:
-      mcpBridge: true
-      permissionMode: skip
-      mcpConfigScope: global
-      mcpToolAllowlist: "fusion_submit_result,fusion_read_state,fusion_read_evidence,bash,read,write,edit,glob,grep,job_output,job_kill"
+```
+/fusion foreman-retry                  同一份方案、同一条线路再试一次
+/fusion foreman-model <provider/model> 换一条线路重审这份方案
+/fusion foreman-skip <理由>            明确同意这份方案不经审查就派工
 ```
 
-旧 `dsh-agy-worker` 的键（`enabled`、`agyBin`、`workspaceRoot`、`defaultModel`、`hiddenModels`、`quotaPollIntervalMs`、`autoWarmup`……）原样写在 `agy` 块里，`DSH_AGY_*` 环境变量仍然优先。`enabled: false` 是**安装期**开关：去掉 `antigravity` 线路与全部后台能力（额度轮询、预热、MCP 反桥、媒体清扫），但 `/agy` 与管理路由仍挂着供你查看状态；改配置后重启 DSH，它不是运行期开关。
+决定只绑定当前失败的那一份候选和那一轮。跳过不是审查通过；宿主自己的结构、路径、权限校验仍然生效。记录之后 Lead 会调用 `fusion_resume_plan` 用**原样保存**的那份方案继续，不会另写一份新方案来绕过。
 
-> Windows 把 `bash` 换成 `pwsh`，改过 `workerTools` 就跟着改。启用前**先**停用或移除 `dsh-agy-worker`：同一套路由前缀、同一个 `antigravity` provider、同一个 `/agy`、同一组工具卡键，同时启用会在加载时失败（`duplicate exact route`、`DUPLICATE_ADAPTER`、`already registered`）。步骤、配置搬家与唯一需要手动复制的账号池见 [docs/MIGRATION-AGY.md](docs/MIGRATION-AGY.md)。
+**花费单独记账.** 工长调用记在 `foreman` 用途下，历史里每个任务能看到审了几次、多少 token、约多少钱、几条意见、接受/覆盖各几条。审查轮次不算 Sidekick 的返工轮次。
 
-### ACP 线路（内建 `deepseek-harness-acp`）
+**开关.** 每个组合各自一个开关，默认关闭。打开后必须选一条**能跑工具的**模型线路，可以调推理强度、输出上限（默认 8192，上限 128000）和超时（默认 5 分钟，上限 10 分钟）。
 
-Host 实现以 MIT 许可并入（[docs/ATTRIBUTION-ACP.md](docs/ATTRIBUTION-ACP.md)），**不必再单独安装 `dsh-tauri-acp`**。页面 **ACP 线路** 区域有最小示例、重启要求与迁移步骤；键就是模型选择器里的 provider 路由名：
+**别把 ACP / Antigravity 线路配成工长.** 这两类线路在审查请求上直接 fail-closed（`AUX_DISABLED`：Antigravity 没有可验证的无工具模式、ACP 线路无法交回工具循环），所以每次审查都会变成「不可用」，而不可用不派工——等于把整条派工路径堵死。它们仍然可以当 Lead 或 Sidekick。
 
-```yaml
-- id: dsh-agent-studio-fusion
-  config:
-    acp:
-      agents:
-        codex:
-          displayName: Codex (ACP)
-          command: /absolute/path/to/codex-acp   # 必填；绝对路径更稳，PATH 上的命令也可用
-          args: []
-          models:                                 # 可整段省略：省略时按 discoverModels 询问
-            - id: default
-          permission: ask
-```
+## 命令与工具
 
-配置在 Host 启动时读取一次，改完需要重启。以前装着独立 `dsh-tauri-acp` 的，**先手动停用它**再把同名 provider 搬到这里，否则重复注册直接加载失败（[docs/MIGRATION-ACP.md](docs/MIGRATION-ACP.md)）。
+你在输入框里能用的：
 
-ACP 线路当 Sidekick 时，本插件只在那一个会话的 ACP `session/new` 里挂 MCP 工具桥：本机 Web 服务自己的公开 origin 加固定路径 `/api/fusion/acp-mcp`，32 字节随机令牌**只放在 `Authorization: Bearer` 头里、不进 URL**，请求按这个 origin 校验 `Host` / `Origin` / 对端必须在本机、跨站一律拒绝，不看任何转发头。令牌绑定「这条任务的 Worker 会话 + 当前工作单及 revision + brief revision + implement/explore 模式 + 该线路的 provider 与 model + `workerTools`」，每次调用重核；任务暂停/重跑/恢复/完成、待审批、额度阻断、交报告、运行时关闭、改配置、换会话、超时或中断时立即撤销并中断在途调用。只放行 `workerTools` ∩ 该 Agent 可见工具（explore 单再与只读工具取交集，只收窄不放大），全部走 DSH 的 `tools.guard`、审批与 Fusion 的路径/租约检查。Lead 的 ACP 会话、普通线路调用、模型发现与压缩请求、text 单、别的 Fusion 任务都拿不到它（`mcpServers` 为空）。
-
-### 其它 agent 线路
-
-上面那套 `mcpBridge` / `permissionMode` / `agy_tool` 是 **agy 专属**的，因为那条线路由本插件的桥接层接管。别的适配器（不是本插件内置 ACP 线路的那些）可能在自己的会话里根本不带 MCP servers，**本插件没有任何设置能替它补上这座桥**。这种线路做纯文本问答时，Fusion 接受一份严格限定的文本报告（`fusionTextReport` 块，绑定当前 `workOrderId` + `revision`，字段与 `fusion_submit_result` 同构；散文、旧单、错 revision、多余字段一律拒绝，仍由 Lead 审查）；要读写文件、跑命令的活仍然需要真实工具调用。细节见 [docs/WORKER-TOOLS-UNREACHABLE.md](docs/WORKER-TOOLS-UNREACHABLE.md)。
-
-## 缓存保活
-
-Lead 等 Sidekick 干活时可能要等好几分钟，模型的输入缓存一过期，下一次请求就得按全价重读整段对话。保活的做法是：等待期间定时把 Lead 上一次的请求原样再发一遍，末尾只加一句 `Reply OK`。前缀完全相同，厂商就从缓存读，缓存的寿命顺势续上；模型只回 5 个 token，回复直接丢弃，不进对话，也不执行工具调用。
-
-- **默认值**取自各家官方文档，覆盖 Artificial Analysis 前 20 的厂商，按模型名匹配（`gpt-*`、`claude-*`、`gemini-*`、`glm-*`、`grok-*`、`kimi-*`、`deepseek-*`……）。按请求次数计费的订阅套餐（[dsh-oauth-login](https://github.com/aa2246740/dsh-oauth-login) 的线路）默认关闭，因为每次保活都算一次请求。
-- **自动开启**：模型真的返回过缓存命中之后才开始，不支持缓存的模型不会白花钱。
-- 每个模型都能在 Fusion 面板里调：开关、续命间隔、恢复默认。面板同时显示实际效果——等待后缓存还在不在、发了几次、读了多少 token、避免了多少 token 按全价重发。
-- **实测**（ChatGPT 订阅线路、gpt-6-astra、约 2 万 token 上下文）：缓存空闲 10 分钟仍在、15 分钟后过期，每次保活重新计时，所以这条线路默认 8 分钟一次。
-- **自动调整**：当前间隔下最近 5 次保活有 3 次没命中才会缩短间隔（偶发随机淘汰不算）；只缩短，不自动拉长，想放宽时给建议、由你决定。
-
-## 支持范围
-
-| | |
+| 命令 | 作用 |
 |---|---|
-| DSH | `>=0.2.1-rc.5 <0.2.2-0 || >=0.2.2-rc.2 <0.3.0-0`，桌面版与 Web 版都支持；0.2.0 系列不再支持 |
-| Node | 24 或更新（`engines.node` 为 `>=24.0.0`） |
-| 模型 | DSH 自带线路、[dsh-oauth-login](https://github.com/aa2246740/dsh-oauth-login) 与 dsh-antigravity-oauth 的订阅线路、内建 Antigravity 线路；其它第三方模型插件未测试 |
-| macOS | 已验证（Seatbelt 沙盒） |
-| Windows | `v0.2.1` 起支持原生 `pwsh`，在 Windows Server 2022 / PowerShell 7.6.6 上通过；Windows 10/11 未验证。ACL 隔离是部分的：能限制普通路径写入，读取与网络不在该限制内 |
-| Linux | 未验证 |
+| `/fusion status` | 任务阶段、控制状态、模型调用数、未收尾的操作、花费、工长审查状态（含原因） |
+| `/fusion pause` / `resume` | 暂停 / 恢复当前任务 |
+| `/fusion recover <检查记录>` | Host 重启后核对中断的工具操作；确认命令与子进程都已停止时加 `--effects-stopped` |
+| `/fusion allow-explore <范围>` | 授权一次限定范围的只读调查（不送审、不派工） |
+| `/fusion foreman-retry` | 重试失败的那次工长审查 |
+| `/fusion foreman-model <provider/model>` | 换线路重审同一份方案 |
+| `/fusion foreman-skip <理由>` | 明确跳过这次失败的审查 |
+| `/fusion off` | 退出 Fusion，恢复成普通单模型会话 |
 
-<details>
-<summary>Linux 自检步骤</summary>
+Lead 在会话里能调用的（Sidekick 只有其中一部分）：
 
-1. 在一个测试目录里选 Fusion，对它说：「这是一次只读沙盒测试，被拒绝是预期结果。请你自己直接调用 bash 工具执行 `echo test > fusion-probe.txt`（不要委派、不要换别的写法），把工具返回的原文贴给我。」
-2. 正确结果：工具返回的原文写着被沙盒拒绝（如 `Operation not permitted` / `read-only`），目录里没有生成 `fusion-probe.txt`。Lead 只口头拒绝、没真调工具的，这次不算，再说一遍「请实际调用工具」。
-3. 文件真被创建出来，说明你这个系统上 Lead 的只读限制没生效，别用，并反馈给我们。
+| 工具 | 作用 |
+|---|---|
+| `fusion_plan_discussion` | 开启 / 结束一次需要和用户讨论的规划（`/grill-me` 会自动开启） |
+| `fusion_delegate` / `fusion_delegate_text` | 把定稿方案交给 Sidekick（需要工作区 / 纯文本） |
+| `fusion_rework` | 继续同一个 Sidekick，可以补授 `authority`、追加 `allowedPaths`、修正 `checks` |
+| `fusion_explore` | 在你授权范围后发起一次只读调查 |
+| `fusion_wait` | 读取已保存的报告和验收结果（不会把已结束的执行者再跑起来） |
+| `fusion_review_result` | 记录验收结论（accept / rework / needs-decision） |
+| `fusion_takeover` | 宿主解锁后接管修复 |
+| `fusion_submit_result` | 交回结果（接管时由 Lead 用，平时是 Sidekick 用） |
+| `fusion_read_state` / `fusion_read_evidence` | 读任务记录 / 读证据（diff、检查回执） |
+| `fusion_resume_plan` | 用户记录恢复决定后，用原样保存的方案继续 |
+| `fusion_finish_direct` | 结束整个直接任务（讨论或审查未完成时会拒绝） |
+| `fusion_declare_runtime` | Sidekick 声明需要保留的后台进程 |
 
-DSH 在你系统上没有沙盒时，Lead 的 shell 命令会被全部拒绝（安全地失败），它仍然能用读文件和搜索工具看代码。
+## 状态与数据
 
-</details>
+- **状态面板**：侧边栏 Fusion → 当前任务的阶段、验收、花费、工长审查（`审查中 / 就绪 / 有分歧 / 不可用` + 第几轮 + 接受/覆盖条数）。
+- **数据位置**：默认 `$DSH_HOME/plugins/dsh-agent-studio-fusion/state.sqlite`（`DSH_HOME` 默认 `~/.dsh`）。用 `databasePath` 可以改。旧包 `dsh-fusion` / `dsh-model-fusion` 的数据在首次启动时自动迁移。
+- **历史与花费**：历史里每个任务都能看到两个角色各自的 token、按价目折算的花费，以及相对「全用 Lead」的省下多少。
 
-## 数据在哪
+## 常见报错
 
-- **Fusion 自己的记录**：任务说明、检查结果、用量、缓存统计和设置都在 `$DSH_HOME/plugins/dsh-agent-studio-fusion/state.sqlite`（`DSH_HOME` 默认是 `~/.dsh`）。
-- **从旧名字升级**：`dsh-fusion`、`dsh-model-fusion`、`dsh-agent-studio` 的数据目录会在首次启动时整体迁到新名字，已有的任务、用量和设置都还在。跨文件系统时退化成复制数据库和它的 `-wal`/`-shm`/`-journal`，只删除自己复制过的文件。
-- **内建 Antigravity**：工作状态沿用独立插件原来的位置——覆盖项、会话绑定、媒体缓存与预热历史在 `$DSH_HOME/agy-worker/`。账号池是本插件的 `$DSH_HOME/agy-accounts/pool.json`，每个账号独立的 HOME 在 `$DSH_HOME/agy-accounts/<id>/`；上游从 `DSH_STATE_DIR` 取账号池，所以只有设置过它的安装才需要 [docs/MIGRATION-AGY.md](docs/MIGRATION-AGY.md) 里的一次性复制。**不会**自动搬迁，卸载本包也不删这两个目录。
-- **会话本身**由 DSH 保存，Fusion 不另外上传任何数据。想清空记录：退出 DSH 后删掉那个 sqlite 文件（设置会一起清掉）。
+| 报错 | 意思与处理 |
+|---|---|
+| `FUSION_LEAD_WRITE_CONFLICT` | 另一个角色正持有写租约。这是并发保护，不是权限缺失：读和搜索照常，等它交回或走 `fusion_takeover` |
+| `FUSION_LEAD_TAKEOVER_LOCKED` | 接管还没解锁：需要返工轮次 + 检查仍失败、步数耗尽或反复卡住 |
+| `FUSION_LEAD_DELEGATE_FIRST` | 这个工作流要求把执行交给 Sidekick；先 `fusion_delegate` |
+| `FUSION_SIDEKICK_PROTOCOL` | Lead 试图伪造「交报告 / 直接结束任务」这类只有 Sidekick 该发的动作 |
+| `FUSION_WORKER_AUTHORITY_DENIED` | 提交/推送/发布这类动作没有被工作单授权。用 `fusion_rework` 的 `authority` 补授 |
+| `FUSION_TAKEOVER_REQUIRES_REWORK` | 接管前需要先有一份实现报告和一条 rework 审查结论 |
+| 工长审查「不可用」 | 见上一节的三个 `/fusion` 命令；不会派工 |
 
-## 已知限制
+## 限制（写清楚，别猜）
 
-- **比单独用前沿模型慢**：GPT-6 + Flash 的总耗时约为 GPT-6 单独的 5 倍，主要花在 Sidekick 身上。换更快的 Sidekick 会好很多。
-- **Lead 接手**：72 次实测里一次都没触发，目前只有自动化测试覆盖。
-- **macOS 桌面版的 PATH**：从程序坞打开的 DSH Studio 只有系统默认 PATH，Homebrew（`/opt/homebrew/bin`）、nvm 等装的 `node`、`npm`、`cargo` 在 shell 里找不到。这是 DSH 的运行环境，所有模型一样。Fusion 在派活前会检查验收命令用到的程序，找不到时告诉 Lead 它实际装在哪（例如 `/opt/homebrew/bin/node`），Lead 改用完整路径。
-- **Windows 10/11 与 Linux 未验证**：见上表。
+- **Lead 和 Sidekick 同时改同一个文件的窗口仍然存在。** 程序只挡住「另一个角色持租约时的写入」；两者都空闲时，靠提示词。
+- **Code Mode 下 `run_code` 不受写租约约束。** Code Mode 把所有工具调用都包进 `run_code`，租约看不到程序内部，所以只能靠提示词约束。
+- **ACP / Antigravity 线路做不了工长。** 它们会在审查请求上直接拒绝（见上一节）；配成工长会让每次审查都不可用，从而不派工。
+- **工长跑命令可能有副作用**（例如测试写缓存或快照）。它被要求不修改工作区；宿主在审查结束后会比对工作区快照，快照变了就拒绝派工（`The workspace changed during plan review`），但不会逐文件报告漂移。
+- **验收命令由宿主执行，失败重试策略有限**：同一份检查连续失败会被退回一次，之后交给 Lead 判断。
 
 ## 开发
 
 ```sh
-corepack pnpm@9.15.9 install --frozen-lockfile
-node scripts/link-host.mjs /path/to/deepseek-harness-0.2.1-rc.5   # 支持的基线；开发时链接 DSH 源码
-DSHX_HARNESS=/path/to/deepseek-harness-0.2.1-rc.5 pnpm build
-pnpm test && DSHX_HARNESS=/path/to/deepseek-harness-0.2.1-rc.5 pnpm test:host
+pnpm install
+pnpm typecheck                            # tsc --noEmit
+pnpm exec vitest run                      # 单元测试
+DSHX_HARNESS=<dsh 源码 checkout> pnpm test:host   # 用真实 Host 包跑的 native 测试
+DSHX_HARNESS=<dsh 源码 checkout> pnpm build        # 重建 lib/（Host 模块 + Web 客户端包）
 ```
 
-Windows 开发环境需把 PowerShell 7（`pwsh`）、Node 和 Python 加进跑测试的进程 PATH。原生测试通过 `DSHX_HARNESS` 读取已构建的指定 Host，不需要改 Host 源码。
+`lib/` 是随仓库一起发布的构建产物；改了 `src/` 之后要重建它，否则运行中的 Host 加载的还是旧代码。发布流程见 [RELEASING.zh.md](RELEASING.zh.md)。
 
-`lib/` 是随源码一起提交的构建产物（`lib/dsh-agent-studio-fusion.js`、`lib/client.js`、`lib/bridge.mjs`、`lib/assets/mermaid.min.js`、`lib/types/**`），改 `src/` 后要 `pnpm build` 并一起提交。插件只用 DSH 公开的插件接口，不改 DSH 源码；适配新版本见 [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)。发版（改版本号、重建 `lib/`、打 tag、CI 经 OIDC 发 npm）见 [RELEASING.zh.md](RELEASING.zh.md)。
-
-## 文档索引
+## 文档
 
 | 文档 | 内容 |
 |---|---|
-| [INSTALL.zh.md](INSTALL.zh.md) | 安装、卸载、从旧包迁移 |
-| [CHANGELOG.md](CHANGELOG.md) | 每个版本改了什么、验证了什么、**没有**验证什么 |
-| [docs/EVIDENCE.md](docs/EVIDENCE.md) | 实测方法、原始数据、被排除的尝试 |
-| [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) | 依赖的 DSH 接口、升级适配流程 |
-| [docs/FOREMAN-WORKFLOW-PLAN.md](docs/FOREMAN-WORKFLOW-PLAN.md) | 工长审查的设计、分工边界与实施阶段 |
-| [docs/WORKER-TOOLS-UNREACHABLE.md](docs/WORKER-TOOLS-UNREACHABLE.md) | Sidekick 够不到工具时的诊断与文本报告兜底 |
-| [docs/MIGRATION-AGY.md](docs/MIGRATION-AGY.md) | 从 `dsh-agy-worker` 迁到内建 Antigravity |
-| [docs/MIGRATION-ACP.md](docs/MIGRATION-ACP.md) | 从 `dsh-tauri-acp` 迁到内建 ACP 线路 |
-| [docs/ATTRIBUTION-AGY.md](docs/ATTRIBUTION-AGY.md) · [docs/ATTRIBUTION-ACP.md](docs/ATTRIBUTION-ACP.md) | 并入代码的来源、改动与许可 |
-| [docs/DEVIN-LOCAL-FUSION.md](docs/DEVIN-LOCAL-FUSION.md) | Devin CLI 的 Fusion 二进制取证与本项目逐项对比 |
-| [RELEASING.zh.md](RELEASING.zh.md) | 发版流程 |
+| [INSTALL.zh.md](INSTALL.zh.md) | 安装、迁移、桌面版 |
+| [CHANGELOG.md](CHANGELOG.md) | 每个版本改了什么、验证了什么、没验证什么 |
+| [RELEASING.zh.md](RELEASING.zh.md) | 发版步骤 |
+| [docs/PLAN-LEAD-FOREMAN-V2.md](docs/PLAN-LEAD-FOREMAN-V2.md) | Lead / 工长流程改造的计划与阶段状态 |
+| [docs/FOREMAN-WORKFLOW-PLAN.md](docs/FOREMAN-WORKFLOW-PLAN.md) | 工长工作流的历史设计提案（现行规则以本文为准） |
+| [docs/DEVIN-LOCAL-FUSION.md](docs/DEVIN-LOCAL-FUSION.md) | Devin CLI 的 Fusion 二进制取证与本仓库逐项对比 |
+| [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) | 支持的 Host 版本与兼容性说明 |
+| [docs/EVIDENCE.md](docs/EVIDENCE.md) | 证据链说明 |
 
 ## 许可
 
-Apache-2.0。fork 自 [`aa2246740/dsh-model-fusion`](https://github.com/aa2246740/dsh-model-fusion)，同样以 Apache-2.0 发布。
-
-并入的第三方成果保留各自许可：ACP provider 移植为 MIT（[docs/ATTRIBUTION-ACP.md](docs/ATTRIBUTION-ACP.md)）；内建 Antigravity（agy）能力为 MIT，移植自 [`SQDR2/dsh-agy-worker`](https://github.com/SQDR2/dsh-agy-worker)（其上游为 [`amlyczz/dsh-agy-link`](https://github.com/amlyczz/dsh-agy-link)），见 [docs/ATTRIBUTION-AGY.md](docs/ATTRIBUTION-AGY.md)——那份文档同时列出随包的 `mermaid.min.js` 里各库的许可。
+Apache-2.0，见 [LICENSE](LICENSE)。Antigravity 与 ACP 的归属说明见 [docs/ATTRIBUTION-AGY.md](docs/ATTRIBUTION-AGY.md)、[docs/ATTRIBUTION-ACP.md](docs/ATTRIBUTION-ACP.md)。

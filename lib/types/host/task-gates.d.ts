@@ -37,17 +37,17 @@ export declare function workerSubmittedProblem(submitted: boolean, replayed: boo
  * Lead answer "unverified" from memory about a fact one directory read would have settled
  * (session-a1899929).
  *
- * So the completed Lead keeps the ceiling it already had while running read-only — read
- * tools, and a shell the role sandbox still confines to read-only — and nothing else. The
- * remaining guard is unchanged: a shell that is not provably read-only is refused here, and
- * `#separatedLeadGuard` re-checks it at execution time.
- * @param input - the role asking, and whether this dispatch is a read or a confined shell.
+ * So the completed Lead keeps the two things that cannot change the work: read tools, and the
+ * shell it uses to check a claim (the user's own sandbox mode, like any other command). Its
+ * writer tools stay closed: the work is accepted, and changing the workspace after acceptance
+ * is a new task.
+ * @param input - the role asking, and whether this dispatch reads or runs a command.
  * @returns the refusal to show the model, or undefined when the dispatch may proceed.
  */
 export declare function completedToolProblem(input: {
     readonly role: GateRole;
     readonly read: boolean;
-    readonly confinedShell: boolean;
+    readonly shell: boolean;
 }): string | undefined;
 /**
  * Whether a boot-time `runtime.background` flag is evidence of work this Host must inspect.

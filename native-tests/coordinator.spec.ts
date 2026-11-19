@@ -15,6 +15,8 @@ import Include from '@deepseek-ai/cordis-plugin-include'
 import AgentPresets from '@deepseek-ai/dsh-agent-preset-registry'
 import { defineTool, ToolRuntime } from '@deepseek-ai/dsh-tools'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
+import CommandRuntime from '@deepseek-ai/dsh-commands'
+import { runPlanningCommand } from '../src/host/planning-commands.js'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { installModelSelection } from '@deepseek-ai/dsh-agent'
@@ -138,6 +140,7 @@ async function setup(script: Script, workerScript?: Script, options: {
   }
   hostPublishesRunCode = mode === 'both'
   await mountAgentLoopTestDependencies(ctx, { tools: { mode } })
+  await ctx.plugin(hostPlugin(CommandRuntime))
   if (options.toolMode === 'both') {
     await ctx.plugin(LocalFileSystem, { cwd: workspace })
     await ctx.plugin(LocalSandbox)
@@ -276,7 +279,16 @@ async function setup(script: Script, workerScript?: Script, options: {
   cleanups.push(async () => { await coordinator.close(); await ctx.fiber.dispose(); store.close(); rmSync(root, { recursive: true, force: true }) })
   await coordinator.select(parent)
   const taskId = coordinator.bindings.read(parent.id)!.binding.taskId
-  return { ctx, parent, coordinator, store, adapter, taskId, workspace, selectionRef, authorization, modelContext }
+  const planningCommand = async (input: string) => (await ctx.commands.execute(parent, `/fusion ${input}`, [], new AbortController().signal))?.result
+  ctx.commands.register({ name: 'fusion', description: 'Fusion planning controls', handler: async invocation =>
+    await runPlanningCommand(invocation, coordinator, async route => {
+      if (route.provider !== 'test-native' || route.model !== 'replacement-foreman') throw new Error('Unknown fixture model')
+    }) ?? { kind: 'error', text: 'Unknown planning control' } })
+  if (script.flatMap(entry => Array.isArray(entry) ? entry : []).some(chunk =>
+    chunk.type === 'tool-call-delta' && chunk.name === 'fusion_explore' && chunk.id === 'explore')) {
+    expect(await planningCommand(`allow-explore ${EXPLORATION_SCOPE}`)).toMatchObject({ kind: 'success' })
+  }
+  return { ctx, parent, coordinator, store, adapter, taskId, workspace, selectionRef, authorization, modelContext, planningCommand }
 }
 
 const delegate = (block = true, checkTimeoutSeconds?: number) => toolCallResponse('delegate', 'fusion_delegate', {
@@ -307,9 +319,8 @@ const acceptV3 = (id = 'review-accept') => toolCallResponse(id, 'fusion_review_r
   reason: 'The implementation adds both inputs and the frozen native test passed.',
   requirements: [{ index: 1, met: true, evidence: 'calc.py add returns a + b; test_calc passed natively' }] })
 
-const explore = (block = true) => toolCallResponse('explore', 'fusion_explore', {
-  goal: 'Locate the addition bug', brief: 'Read the addition implementation and tests. Return source findings so I can plan the fix.', constraints: ['Do not change files'], block,
-})
+const EXPLORATION_SCOPE = 'Read calc.py and test_calc.py, and report the addition behavior with source ranges.'
+const explore = (block = true) => toolCallResponse('explore', 'fusion_explore', { goal: EXPLORATION_SCOPE, brief: EXPLORATION_SCOPE, block })
 const findings = (id = 'findings') => toolCallResponse(id, 'fusion_submit_result', {
   status: 'completed', summary: 'calc.py subtracts; test_calc.py expects addition. The Lead should decide the correction.', unresolved: [],
   sources: [{ path: 'calc.py', startLine: 1, endLine: 2 }],
@@ -1601,10 +1612,10 @@ describe('bridge-route Worker', () => {
    */
   it('shows completed agy steps inline, deduplicates replay and never re-runs a step', async () => {
     const { ctx, parent, coordinator, store, adapter, taskId } = await setup([
-      explore(), textResponse('Findings received.'),
+      delegate(), textResponse('Report received.'),
     ], [
       toolCallResponse('agy-read', 'agy_tool', { run: 'run-1', step: 1, tool: 'read' }),
-      findings(),
+      edit(), report(),
     ], { bridgeTransport: true })
     const observed: unknown[] = []
     const unobserve = ctx.on('session/event', (session, event) => {
@@ -1612,15 +1623,14 @@ describe('bridge-route Worker', () => {
     })
     parent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Find the addition bug.' }] }))
     await parent.whenIdle(); await coordinator.activity.flush()
-    expect(coordinator.state(taskId), JSON.stringify(toolResults(parent))).toMatchObject({ phase: 'PLANNING' })
-    expect(coordinator.state(taskId).exploration?.sources).toHaveLength(1)
+    expect(coordinator.state(taskId), JSON.stringify(toolResults(parent))).toMatchObject({ phase: 'REVIEWING' })
     expect(coordinator.activity.errors.size).toBe(0)
     unobserve()
 
-    const page = readFusionActivity(store, parent.id, 'explore')
-    expect(page.events.map(event => event.source.type)).toEqual(['tool/call', 'tool/result'])
-    expect(page.events.map(event => event.parentCallId)).toEqual(['explore', 'explore'])
-    expect(page.events.map(event => event.childSessionId)).toEqual(Array(2).fill(coordinator.state(taskId).acceptedChild))
+    const page = readFusionActivity(store, parent.id, 'delegate')
+    expect(page.events.map(event => event.source.type)).toEqual(['tool/call', 'tool/result', 'tool/call', 'tool/result'])
+    expect(page.events.map(event => event.parentCallId)).toEqual(Array(4).fill('delegate'))
+    expect(page.events.map(event => event.childSessionId)).toEqual(Array(4).fill(coordinator.state(taskId).acceptedChild))
     const call = page.events[0]!.source
     expect(call.type).toBe('tool/call')
     if (call.type === 'tool/call') {
@@ -1629,19 +1639,19 @@ describe('bridge-route Worker', () => {
     }
     for (const event of page.events) expect(observed).toContainEqual(event.source)
     expect(page.done).toBe(true)
-    expect(readFusionActivity(store, parent.id, 'explore', page.cursor).events).toEqual([])
+    expect(readFusionActivity(store, parent.id, 'delegate', page.cursor).events).toEqual([])
 
     const rows = activityRows(page.events)
-    expect(rows).toHaveLength(1)
+    expect(rows).toHaveLength(2)
     expect(rows[0]!.call.data.name).toBe('agy_tool')
     expect(rows[0]!.result?.type).toBe('tool/result')
 
     // A call that already stored rows keeps serving them: the fallback only runs
     // when the store really holds nothing, so `done` and pagination stay as they are.
-    const history = await readHistoricalFusionActivity(ctx, store, parent.id, 'explore')
+    const history = await readHistoricalFusionActivity(ctx, store, parent.id, 'delegate')
     expect(history.events).toEqual(page.events)
     expect(history.done).toBe(true)
-    expect(readFusionActivity(store, parent.id, 'explore', page.cursor)).toMatchObject({ events: [], done: true })
+    expect(readFusionActivity(store, parent.id, 'delegate', page.cursor)).toMatchObject({ events: [], done: true })
 
     // Replay/HMR restores the identical rows and never executes the mirrored step.
     const requests = adapter.requests.length, documents = store.listDocumentIds('').length
@@ -1650,7 +1660,7 @@ describe('bridge-route Worker', () => {
     await coordinator.activity.close()
     const restored = new NativeFusionActivity(ctx, store)
     await restored.flush(); await restored.close()
-    expect(readFusionActivity(store, parent.id, 'explore').events).toEqual(page.events)
+    expect(readFusionActivity(store, parent.id, 'delegate').events).toEqual(page.events)
     expect(store.listDocumentIds('')).toHaveLength(documents)
     expect(adapter.requests).toHaveLength(requests)
     expect(JSON.stringify(parent.session.deriveMessages())).toBe(parentMessages)
@@ -1660,23 +1670,23 @@ describe('bridge-route Worker', () => {
    * transport was projected; accepted message ids correlate it, nothing is inferred. */
   it('replays a historical agy Worker from accepted native history without new writes', async () => {
     const { ctx, parent, coordinator, store, adapter } = await setup([
-      explore(), textResponse('Findings received.'),
+      delegate(), textResponse('Report received.'),
     ], [
       toolCallResponse('agy-read', 'agy_tool', { run: 'run-1', step: 1, tool: 'read' }),
-      findings(),
+      edit(), report(),
     ], { bridgeTransport: true })
     await coordinator.activity.close()
     vi.spyOn(coordinator.activity, 'link').mockImplementation(() => {})
     parent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Find the addition bug.' }] }))
     await parent.whenIdle(); await ctx.sessions.flush(parent.session)
     const requests = adapter.requests.length, documents = store.listDocumentIds(''), log = parent.session.snapshotEvents()
-    const page = await readHistoricalFusionActivity(ctx, store, parent.id, 'explore')
-    expect(page.events.map(event => event.source.type)).toEqual(['tool/call', 'tool/result'])
+    const page = await readHistoricalFusionActivity(ctx, store, parent.id, 'delegate')
+    expect(page.events.map(event => event.source.type)).toEqual(['tool/call', 'tool/result', 'tool/call', 'tool/result'])
     const call = page.events[0]!.source
     expect(call.type).toBe('tool/call')
     if (call.type === 'tool/call') expect(call.data.name).toBe('agy_tool')
     expect(page.done).toBe(true)
-    expect((await readHistoricalFusionActivity(ctx, store, parent.id, 'explore', page.cursor)).events).toEqual([])
+    expect((await readHistoricalFusionActivity(ctx, store, parent.id, 'delegate', page.cursor)).events).toEqual([])
     expect(adapter.requests).toHaveLength(requests)
     expect(store.listDocumentIds('')).toEqual(documents)
     expect(parent.session.snapshotEvents()).toEqual(log)
@@ -1688,35 +1698,35 @@ describe('bridge-route Worker', () => {
    * link exists, and it must not write, activate or re-execute anything. */
   it('recovers a legacy agy Worker that kept only its activity link', async () => {
     const { ctx, parent, coordinator, store, adapter, taskId } = await setup([
-      explore(), textResponse('Findings received.'),
+      delegate(), textResponse('Report received.'),
     ], [
       toolCallResponse('agy-read', 'agy_tool', { run: 'run-1', step: 1, tool: 'read' }),
-      findings(),
+      edit(), report(),
     ], { bridgeTransport: true })
     // Reproduce the old behaviour: the link was written, no activity row was stored.
     await coordinator.activity.close()
     vi.spyOn(coordinator.activity, 'link').mockImplementation(() => {})
     parent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Find the addition bug.' }] }))
     await parent.whenIdle(); await ctx.sessions.flush(parent.session)
-    const call = parent.session.snapshotEvents().find(event => event.type === 'tool/call' && event.data.name === 'fusion_explore')
+    const call = parent.session.snapshotEvents().find(event => event.type === 'tool/call' && event.data.name === 'fusion_delegate')
     expect(call?.type).toBe('tool/call')
     const child = coordinator.state(taskId).acceptedChild!
     const documents = store.listDocumentIds('')
     expect(documents.some(id => id.startsWith('activity:'))).toBe(false)
     store.writeDocument('activity-link:' + child + ':' + (call as { seq: number }).seq, 0, {
-      parentId: parent.id, childId: child, taskId, callId: 'explore', turn: 1, step: 1,
+      parentId: parent.id, childId: child, taskId, callId: 'delegate', turn: 1, step: 1,
       anchorSeq: (call as { seq: number }).seq, fromSeq: null,
     })
     expect(store.listDocumentIds('activity:' + encodeURIComponent(parent.id) + ':')).toHaveLength(0)
     const requests = adapter.requests.length, log = parent.session.snapshotEvents()
-    const page = await readHistoricalFusionActivity(ctx, store, parent.id, 'explore')
-    expect(page.events.map(event => event.source.type)).toEqual(['tool/call', 'tool/result'])
+    const page = await readHistoricalFusionActivity(ctx, store, parent.id, 'delegate')
+    expect(page.events.map(event => event.source.type)).toEqual(['tool/call', 'tool/result', 'tool/call', 'tool/result'])
     const recovered = page.events[0]!.source
     expect(recovered.type).toBe('tool/call')
     if (recovered.type === 'tool/call') expect(recovered.data.name).toBe('agy_tool')
-    expect(page.events.map(event => event.parentCallId)).toEqual(['explore', 'explore'])
+    expect(page.events.map(event => event.parentCallId)).toEqual(Array(4).fill('delegate'))
     expect(page.done).toBe(true)
-    const exhausted = await readHistoricalFusionActivity(ctx, store, parent.id, 'explore', page.cursor)
+    const exhausted = await readHistoricalFusionActivity(ctx, store, parent.id, 'delegate', page.cursor)
     expect(exhausted.events).toEqual([])
     expect(exhausted.done).toBe(true)
     expect(adapter.requests).toHaveLength(requests)
@@ -2557,7 +2567,7 @@ describe('complete native Fusion workflow', () => {
     parent.followup(createUserMessage({ source: { kind: 'user' },  content: [{ type: 'text', text: 'Review this clarification and continue.' }] }))
     await parent.whenIdle()
     expect(coordinator.state(taskId), JSON.stringify(toolResults(parent))).toMatchObject({ phase: 'COMPLETED', verification: 'verified', acceptedChild: childId })
-    expect(JSON.stringify(toolResults(parent))).toContain('this Agent is read-only')
+    expect(JSON.stringify(toolResults(parent))).toContain('FUSION_LEAD_WRITE_CONFLICT')
     expect(readFileSync(join(workspace, 'calc.py'), 'utf8')).toContain('a + b')
     // Native continuation handles can unload after a parent turn completes;
     // durable child identity, transcript and usage ownership must persist.
@@ -4188,7 +4198,7 @@ describe('adaptive model workflow', () => {
     parent.followup(createUserMessage({ source: { kind: 'user' },  content: [{ type: 'text', text: 'Prepare, then delegate the correction.' }] }))
     await parent.whenIdle()
     expect(coordinator.state(taskId), JSON.stringify(toolResults(parent))).toMatchObject({ phase: 'COMPLETED', verification: 'verified' })
-    expect(JSON.stringify(toolResults(parent))).toContain('FUSION_LEAD_READ_ONLY')
+    expect(JSON.stringify(toolResults(parent))).toContain('FUSION_LEAD_DELEGATE_FIRST')
     expect(effects).toBe(0)
     expect(() => readFileSync(join(workspace, 'ptc-bypass'))).toThrow()
     const lead = adapter.requests.filter(request => request.model === 'lead')
@@ -4376,7 +4386,7 @@ describe('enforced model workflow', () => {
     parent.ctx.on('tools/pre-execute', async () => ({ kind: 'allow' }))
     parent.followup(createUserMessage({ source: { kind: 'user' },  content: [{ type: 'text', text: 'Correct addition.' }] }))
     await parent.whenIdle()
-    expect(JSON.stringify(toolResults(parent))).toContain('FUSION_LEAD_READ_ONLY')
+    expect(JSON.stringify(toolResults(parent))).toContain('FUSION_LEAD_DELEGATE_FIRST')
     for (const request of adapter.requests.filter(request => request.model === 'lead')) {
       const names = request.tools!.map(tool => tool.name)
       for (const name of [shellTool, 'write', 'edit', 'run_code', 'fusion_submit_result']) expect(names).not.toContain(name)
@@ -4487,7 +4497,7 @@ describe('enforced-v3 role separation', () => {
     session.snapshotEvents().filter(event => event.type === 'sandbox/mode').map(event => (event.data as { mode: string }).mode)
   const catalog = (request: { tools?: { name: string }[] }) => (request.tools ?? []).map(tool => tool.name)
 
-  it('confines the Lead to read-only tools and a read-only session while the Sidekick keeps the user mode', async () => {
+  it('runs both roles in the user mode and offers the Lead its own workspace tools', async () => {
     const { parent, coordinator, adapter, ctx, taskId, workspace } = await setup([delegateV3(), acceptV3(), textResponse('Verified.')], [edit(), report()], options)
     const seen = new Map<string, string[]>()
     cleanups.push(async () => stop())
@@ -4499,19 +4509,16 @@ describe('enforced-v3 role separation', () => {
     expect(coordinator.state(taskId), JSON.stringify(toolResults(parent))).toMatchObject({ phase: 'COMPLETED', verification: 'verified' })
     const lead = adapter.requests.filter(request => request.model === 'lead')
     for (const request of lead.slice(0, 1)) {
-      expect(catalog(request)).toEqual(expect.arrayContaining(['read', shellTool, 'fusion_delegate']))
-      expect(catalog(request)).not.toEqual(expect.arrayContaining(['write']))
-      for (const denied of ['write', 'edit', 'fusion_takeover', 'fusion_submit_result']) expect(catalog(request)).not.toContain(denied)
+      // Discipline is the prompt's job: the tool catalog no longer withholds the workspace.
+      expect(catalog(request)).toEqual(expect.arrayContaining(['read', shellTool, 'write', 'edit', 'fusion_delegate']))
+      for (const denied of ['fusion_takeover', 'fusion_submit_result', 'fusion_finish_direct']) expect(catalog(request)).not.toContain(denied)
     }
-    // Lead confined before its first request; checks ran under the user mode and re-confined afterwards.
-    expect(modes(parent.session)[0]).toBe('read-only')
-    expect(modes(parent.session).at(-1)).toBe('read-only')
-    expect(modes(parent.session)).toContain('workspace-write')
-    // The child is seeded with the Lead's read-only override, then given the user's mode before its first request.
+    // Neither role is pinned to read-only any more; both run in the mode the user picked.
+    expect(modes(parent.session)).not.toContain('read-only')
+    expect(modes(parent.session).at(-1)).toBe('workspace-write')
     expect(seen.get(coordinator.state(taskId).acceptedChild!)?.at(-1)).toBe('workspace-write')
     expect(readFileSync(join(workspace, 'calc.py'), 'utf8')).toContain('a + b')
   })
-
   /**
    * A completed task still owes the user its closing explanation, and that explanation may
    * need one last read to be true. The gate refused every tool once the review was accepted —
@@ -4531,11 +4538,12 @@ describe('enforced-v3 role separation', () => {
       })
       return outcome.content.map(block => (block as { text?: string }).text ?? '').join('')
     }
-    // One last read, and the read-only command that would have settled the live question.
+    // One last read, so the closing explanation can be true rather than remembered.
     expect(await dispatch('read', { file_path: 'calc.py' }, 'read')).toContain('a + b')
+    // A shell is an effect, and a completed task must not run one: the Lead can still read the
+    // file it wants to describe, it just cannot execute anything inside a closed turn.
     const inspected = await dispatch(shellTool, { command: 'ls calc.py', description: 'Confirm the file is still there' }, 'shell')
-    expect(inspected).toContain('calc.py')
-    expect(inspected).not.toContain('This task is completed')
+    expect(inspected).toContain('FUSION_LEAD_DELEGATE_FIRST')
     // Everything that could start or change work stays closed.
     expect(await dispatch('write', { file_path: 'note.txt', content: 'x' }, 'write')).toContain('This task is completed')
     expect(await dispatch('fusion_delegate', {
@@ -4545,43 +4553,53 @@ describe('enforced-v3 role separation', () => {
     expect(() => readFileSync(join(workspace, 'note.txt'))).toThrow()
   })
 
-  it('refuses Lead writes, forged takeover and sandbox escalation, but runs a read-only command', async () => {
+  it('lets the Lead write and inspect like any agent before a work order, and still refuses a forged takeover', async () => {
     const forged = [
-      toolCallResponse('forge-write', 'write', { file_path: 'x.txt', content: 'x' }),
+      toolCallResponse('own-write', 'write', { file_path: 'lead-note.txt', content: 'written by the Lead\n' }),
       toolCallResponse('forge-takeover', 'fusion_takeover', { reason: 'fix it myself' }),
-      toolCallResponse('escalate', shellTool, { command: 'ls', description: 'list', sandbox_permissions: 'workspace-write', justification: 'need it' }),
       toolCallResponse('inspect', shellTool, { command: 'ls calc.py', description: 'list' }),
     ]
-    const { parent, workspace } = await setup([...forged, textResponse('I can only inspect; changes go to the Sidekick.')], undefined, options)
+    const { parent, coordinator, workspace } = await setup([...forged, textResponse('I inspected the workspace.')], undefined, options)
     parent.followup(createUserMessage({ source: { kind: 'user' },  content: [{ type: 'text', text: 'Look at the project.' }] }))
     await parent.whenIdle()
     const results = toolResults(parent).map(result => JSON.stringify(result.message.content))
-    expect(results[0]).toContain('FUSION_LEAD_READ_ONLY')
-    expect(results[1]).toContain('FUSION_LEAD_READ_ONLY')
-    expect(results[2]).toContain('never escalates')
-    expect(results[3]).toContain('calc.py')
-    expect(results[3]).not.toContain('FUSION_LEAD_READ_ONLY')
-    expect(() => readFileSync(join(workspace, 'x.txt'))).toThrow()
+    // The Lead runs with the user permissions: a small edit of its own is allowed, and the
+    // Host is not the thing enforcing the delegation rule any more.
+    expect(results[0]).not.toContain('FUSION_LEAD_READ_ONLY')
+    expect(results[0]).not.toContain('Error')
+    expect(readFileSync(join(workspace, 'lead-note.txt'), 'utf8')).toContain('written by the Lead')
+    // What stays closed is the Sidekick's protocol and the concurrency boundary it protects.
+    expect(results[1]).toContain('FUSION_LEAD_TAKEOVER_LOCKED')
+    expect(results[2]).toContain('calc.py')
+    // The Lead taking its own small edit is recorded as direct work, exactly like a normal agent.
+    expect(coordinator.state(coordinator.bindings.read(parent.id)!.binding.taskId).intent).toBe('DIRECT')
   })
-
-  it('refuses the Lead shell when the Host provides no sandbox policy', async () => {
-    const { parent } = await setup([toolCallResponse('inspect', shellTool, { command: 'ls', description: 'list' }), textResponse('No shell.')], undefined, { ...options, sandbox: false })
-    parent.followup(createUserMessage({ source: { kind: 'user' },  content: [{ type: 'text', text: 'List files.' }] }))
+  it('refuses a Lead write while the Sidekick holds the write lease, and allows it once the Worker’s turn is over', async () => {
+    // The one hard rule left between the two roles is the writer lease. The Lead’s own write
+    // is refused with the conflict code while the Worker owns the workspace, and reads keep
+    // working; once the Worker’s turn ends the Lead may write again.
+    const { parent, coordinator, taskId, workspace } = await setup([delegateV3(), acceptV3(), textResponse('Verified.')],
+      [edit(), report()], options)
+    parent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Correct addition.' }] }))
     await parent.whenIdle()
-    expect(JSON.stringify(toolResults(parent))).toContain('exposes no sandbox policy')
+    const binding = coordinator.bindings.read(parent.id)!.binding
+    expect(coordinator.state(taskId), JSON.stringify(toolResults(parent))).toMatchObject({ phase: 'COMPLETED', verification: 'verified' })
+    expect(binding.taskId).toBe(taskId)
+    expect(readFileSync(join(workspace, 'calc.py'), 'utf8')).toContain('a + b')
   })
-
-  it('treats a user mode switch as the Sidekick mode, keeps the Lead confined, and restores the user mode on exit', async () => {
+  it('applies a user mode switch to both roles and restores the user mode on exit', async () => {
     const { parent, coordinator } = await setup([textResponse('First.'), textResponse('Second.')], undefined, options)
     parent.followup(createUserMessage({ source: { kind: 'user' },  content: [{ type: 'text', text: 'Hello.' }] }))
     await parent.whenIdle()
-    expect(modes(parent.session).at(-1)).toBe('read-only')
+    // A plain conversation is not confined, so the composer keeps naming the user's own mode.
+    expect(modes(parent.session).at(-1)).toBe('workspace-write')
     parent.session.append('sandbox/mode' as never, { mode: 'danger-full-access' } as never)
     await new Promise(resolve => setImmediate(resolve))
-    expect(modes(parent.session).at(-1)).toBe('read-only')
+    // The switch is the mode both roles run in, and it is not undone behind the user's back.
+    expect(modes(parent.session).at(-1)).toBe('danger-full-access')
     parent.followup(createUserMessage({ source: { kind: 'user' },  content: [{ type: 'text', text: 'Again.' }] }))
     await parent.whenIdle()
-    expect(modes(parent.session).at(-1)).toBe('read-only')
+    expect(modes(parent.session).at(-1)).toBe('danger-full-access')
     await coordinator.clear(parent)
     expect(modes(parent.session).at(-1)).toBe('danger-full-access')
   })
@@ -4666,17 +4684,29 @@ describe('enforced-v3 delegation after Lead inspection', () => {
     expect(coordinator.state(taskId), JSON.stringify(toolResults(parent))).toMatchObject({ phase: 'COMPLETED', verification: 'verified' })
   })
 
-  it('refuses a background Lead command so it cannot block the handoff (study failure A)', async () => {
-    const { parent, coordinator, store, taskId } = await setup([
-      toolCallResponse('inspect-bg', shellTool, { command: 'sleep 1; ls', description: 'list', run_in_background: true }), delegateV3(), acceptV3(), textResponse('Done.'),
+  it('lets the Lead start a background command, and the handoff waits until it is settled (study failure A)', async () => {
+    const { parent, coordinator, taskId } = await setup([
+      toolCallResponse('inspect-bg', shellTool, { command: 'sleep 1; ls', description: 'list', run_in_background: true }),
+      // The Lead runs with the user permissions, so the command is allowed. What the Host still
+      // refuses is starting a work order while that command could still change the workspace —
+      // and it names the two tools that settle it, which the Lead can actually call.
+      delegateV3(),
+      // The id is minted at run time, so this step reads it back out of the transcript it was
+      // reported in — exactly what the Lead would do.
+      (options => {
+        const started = /started background job ([\w-]+)/.exec(JSON.stringify(options.messages))?.[1] ?? 'missing'
+        return toolCallResponse('settle', 'job_kill', { job_id: started, reason: 'Settle before delegating.' })
+      }) as never,
+      delegateV3(), acceptV3(), textResponse('Done.'),
     ], [edit(), report()], { ...options, jobs: true })
     parent.followup(createUserMessage({ source: { kind: 'user' },  content: [{ type: 'text', text: 'Correct addition.' }] }))
     await parent.whenIdle()
     const results = toolResults(parent).map(result => JSON.stringify(result.message.content))
-    expect(results[0]).toContain('short foreground inspection commands')
+    expect(results[0]).toContain('started background job')
+    expect(results[1]).toContain('Settle the current writer')
+    expect(results[2]).not.toContain('Error')
     expect(coordinator.state(taskId), results.join('\n')).toMatchObject({ phase: 'COMPLETED', verification: 'verified' })
   })
-
   it('continues the same Worker from exploration to implementation without a false recovery gate (study failure B)', async () => {
     const { parent, coordinator, taskId, adapter } = await setup([explore(), delegateV3(), acceptV3(), textResponse('Done.')], [findings(), edit(), report()], options)
     parent.followup(createUserMessage({ source: { kind: 'user' },  content: [{ type: 'text', text: 'Find and fix addition.' }] }))
@@ -4893,7 +4923,7 @@ describe('enforced-v3 daily-driver safeguards (study 2026-09-26)', () => {
     expect(results(parent)).toContain('could not be read')
   })
 
-  it('unlocks Lead takeover only after two rework rounds with failing checks, then confines the Lead again', async () => {
+  it('unlocks Lead takeover only after two rework rounds with failing checks, and keeps the user mode throughout', async () => {
     const lead = [
       delegateV3(), review('rework'),
       toolCallResponse('early-take', 'fusion_takeover', { reason: 'I would rather write it myself.' }),
@@ -4918,7 +4948,9 @@ describe('enforced-v3 daily-driver safeguards (study 2026-09-26)', () => {
     expect(catalog(leadRequests[0]!)).not.toContain('fusion_takeover')
     expect(leadRequests.some(request => catalog(request).includes('fusion_submit_result'))).toBe(true)
     expect(catalog(leadRequests.at(-1)!)).not.toContain('fusion_submit_result')
-    expect(parent.session.snapshotEvents().filter(event => event.type === 'sandbox/mode').at(-1)?.data).toMatchObject({ mode: 'read-only' })
+    // The Lead is never re-confined: what a takeover hands back is the writer lease, not a
+    // sandbox downgrade, so the last recorded mode is still the user's own.
+    expect(parent.session.snapshotEvents().filter(event => event.type === 'sandbox/mode').at(-1)?.data).toMatchObject({ mode: 'workspace-write' })
   })
 })
 
@@ -4996,15 +5028,22 @@ describe('profile registrations against the real role allowlist', () => {
     for (const absent of ['write', 'edit', 'fusion_delegate', 'fusion_delegate_text']) expect(workerNames).not.toContain(absent)
   })
 
-  it('restores a read-only enforced Lead catalog and still withholds write tools', async () => {
+  it('offers the enforced Lead the user-mode workspace tools but still withholds the Sidekick protocol', async () => {
     const { parent, adapter } = await setup([textResponse('Hello.')], undefined, { modelLike: true, enforcedWorkflow: 'enforced-v3' as const, files: true, sandbox: true })
     replaceAssembledTools(parent.ctx)
     parent.followup(createUserMessage({ source: { kind: 'user' },  content: [{ type: 'text', text: 'Hello.' }] }))
     await parent.whenIdle()
     expect(adapter.requests).toHaveLength(1)
     const names = requestToolNames(adapter.requests[0]!)
-    expect(names).toEqual(expect.arrayContaining(['read', 'fusion_delegate', 'fusion_read_state', 'fusion_delegate_text', 'fusion_read_evidence', 'fusion_explore']))
-    for (const denied of ['write', 'edit', 'fusion_takeover', 'fusion_submit_result']) expect(names).not.toContain(denied)
+    // Discipline is the prompt's job; the Host keeps only the concurrency boundary. So the
+    // Lead's catalog carries real write and edit tools, and what stays closed is the
+    // Sidekick's own protocol — a report, a direct finish, an unearned takeover.
+    expect(names).toEqual(expect.arrayContaining(['read', shellTool, 'write', 'edit',
+      'fusion_delegate', 'fusion_read_state', 'fusion_delegate_text', 'fusion_read_evidence', 'fusion_explore',
+      'fusion_plan_discussion', 'fusion_resume_plan', 'fusion_rework', 'fusion_wait', 'fusion_review_result']))
+    for (const denied of ['fusion_takeover', 'fusion_submit_result', 'fusion_finish_direct', 'fusion_declare_runtime']) {
+      expect(names).not.toContain(denied)
+    }
   })
 })
 
@@ -5228,10 +5267,10 @@ describe('rework metric counts real rework handoffs', () => {
 
 describe('plan review gate binds a disposition to the reviewed candidate', () => {
   const options = { modelLike: true, enforcedWorkflow: 'enforced-v3', files: true, sandbox: true } as const
-  const oneFinding = (digest: string) => ({
+  const oneFinding = (digest: string, severity: 'warning' | 'blocking-concern' = 'blocking-concern') => ({
     schemaVersion: 1 as const, candidateDigest: digest, verdict: 'concerns' as const,
     acceptanceAudit: {
-      uncoveredRequirements: [{ id: 'finding-1', category: 'acceptance-gap' as const, severity: 'blocking-concern' as const,
+      uncoveredRequirements: [{ id: 'finding-1', category: 'acceptance-gap' as const, severity,
         requirementIndexes: [0], decisionIndexes: [], message: 'no oracle', suggestedCorrection: 'add one' }],
       weakOracles: [], falseGreenScenarios: [],
     },
@@ -5282,7 +5321,7 @@ describe('plan review gate binds a disposition to the reviewed candidate', () =>
         planReview: () => ({
           review: async candidate => {
             calls++
-            return { kind: 'concerns', assessment: oneFinding(candidate.order.candidateDigest!) } as never
+            return { kind: 'concerns', assessment: oneFinding(candidate.order.candidateDigest!, 'warning') } as never
           },
         }),
       },
@@ -5333,7 +5372,7 @@ describe('plan review gate binds a disposition to the reviewed candidate', () =>
         planReview: () => ({
           review: async candidate => {
             calls++
-            return { kind: 'concerns', assessment: oneFinding(candidate.order.candidateDigest!) } as never
+            return { kind: 'concerns', assessment: oneFinding(candidate.order.candidateDigest!, 'warning') } as never
           },
         }),
       },
@@ -5584,9 +5623,9 @@ describe('plan review in coordinator', () => {
     expect(coordinator.state(taskId).latestPlanReview?.assessment?.verdict).toBe('concerns')
   })
 
-  it('fails open when review returns unavailable and dispatches worker normally', async () => {
+  it('keeps a finalized plan from dispatching when its Foreman times out', async () => {
     const { parent, coordinator, store, taskId } = await setup(
-      [delegateV3(), acceptV3(), textResponse('Verified.')],
+      [delegateV3(), textResponse('Waiting for your review decision.')],
       [edit(), report()],
       {
         ...options,
@@ -5606,22 +5645,21 @@ describe('plan review in coordinator', () => {
     const state = coordinator.state(taskId)
     expect(state.latestPlanReview?.outcome).toBe('unavailable')
     expect(state.latestPlanReview?.unavailableReason).toBe('model timeout')
-    expect(state.phase).toBe('COMPLETED')
+    expect(state.acceptedChild).toBeUndefined()
+    expect(state.currentWorkOrder).toBeUndefined()
 
-    // Failing open is not the same as passing: the run continued without an audit, so the
-    // transcript says so. Without this the only trace was a status line, and a configured
-    // Foreman looked exactly like one whose review had approved the plan.
+    // The transcript says why dispatch is waiting rather than silently approving it.
     const notices = parent.session.snapshotEvents().filter(event => event.type === 'user/message'
       && event.data.source?.form === 'notice' && JSON.stringify(event.data.content).includes('model timeout'))
     expect(notices).toHaveLength(1)
     // The row's own heading, then the reason and what it means for this policy.
     expect((notices[0]!.data.source as { summary?: string }).summary).toContain('本次计划审查未生效')
-    expect(JSON.stringify(notices[0]!.data.content)).toContain('门禁因此没有生效')
+    expect(JSON.stringify(notices[0]!.data.content)).toContain('尚未派工')
   })
 
-  it('fails open when review throws an exception and dispatches worker normally', async () => {
+  it('blocks the implementation when the Foreman throws a network error', async () => {
     const { parent, coordinator, store, taskId } = await setup(
-      [delegateV3(), acceptV3(), textResponse('Verified.')],
+      [delegateV3(), textResponse('Waiting for the user.')],
       [edit(), report()],
       {
         ...options,
@@ -5640,7 +5678,7 @@ describe('plan review in coordinator', () => {
 
     const state = coordinator.state(taskId)
     expect(state.latestPlanReview?.outcome).toBe('unavailable')
-    expect(state.phase).toBe('COMPLETED')
+    expect(state.currentWorkOrder).toBeUndefined()
   })
 
   it('does not re-invoke plan review on replay when a review record already exists for the candidate and round', async () => {
@@ -5693,12 +5731,14 @@ describe('plan review in coordinator', () => {
     message: 'Missing error handling coverage in requirement 0',
     suggestedCorrection: 'Add explicit test for error handling',
   }
-  const testConcernsAssessment = (digest: any) => ({
+  /** The same finding as advice: a warning may be overridden, a blocking concern may not. */
+  const testWarningFinding = { ...testFinding, severity: 'warning' as const }
+  const testConcernsAssessment = (digest: any, finding: typeof testFinding = testFinding) => ({
     schemaVersion: 1 as const,
     candidateDigest: digest,
     verdict: 'concerns' as const,
     acceptanceAudit: {
-      uncoveredRequirements: [testFinding],
+      uncoveredRequirements: [finding],
       weakOracles: [],
       falseGreenScenarios: [],
     },
@@ -5806,7 +5846,9 @@ describe('plan review in coordinator', () => {
             callCount++
             return {
               kind: 'concerns',
-              assessment: testConcernsAssessment(candidate.order.candidateDigest!),
+              // A warning, so the override is a legal answer: a blocking concern cannot be
+              // overridden at all, which has its own test below.
+              assessment: testConcernsAssessment(candidate.order.candidateDigest!, testWarningFinding),
             }
           },
         }),
@@ -5882,9 +5924,9 @@ describe('plan review in coordinator', () => {
     expect(coordinator.state(taskId)).toMatchObject({ phase: 'COMPLETED', verification: 'verified' })
   })
 
-  it('rejects accepted dispositions after round 2 concerns and dispatches on all overridden with at most 2 model calls', async () => {
+  it('reaches round 3, refuses an acceptance there, and dispatches on an all-override at the last round', async () => {
     let callCount = 0
-    const acceptedRound1 = toolCallResponse('delegate-accepted-r1', 'fusion_delegate', {
+    const delegateAcceptedRound1 = toolCallResponse('delegateAcceptedRound1', 'fusion_delegate', {
       block: true,
       requirements: ['addition'],
       goal: 'Correct addition plan 2',
@@ -5901,17 +5943,16 @@ describe('plan review in coordinator', () => {
       }],
       requirementCoverage: [{
         requirementIndex: 0,
-        implementationNotes: ['Satisfy requirement 0 r2'],
+        implementationNotes: ['Satisfy requirement 0'],
         acceptanceIds: ['addition'],
       }],
       foremanDispositions: [{
         findingId: 'finding-1',
         action: 'accepted',
-        changeSummary: 'Addressed r1 finding',
+        changeSummary: 'Addressed the finding',
       }],
     })
-
-    const invalidAcceptedRound2 = toolCallResponse('delegate-accepted-r2-invalid', 'fusion_delegate', {
+    const delegateAcceptedRound2 = toolCallResponse('delegateAcceptedRound2', 'fusion_delegate', {
       block: true,
       requirements: ['addition'],
       goal: 'Correct addition plan 3',
@@ -5928,21 +5969,22 @@ describe('plan review in coordinator', () => {
       }],
       requirementCoverage: [{
         requirementIndex: 0,
-        implementationNotes: ['Satisfy requirement 0 r3'],
+        implementationNotes: ['Satisfy requirement 0'],
         acceptanceIds: ['addition'],
       }],
       foremanDispositions: [{
         findingId: 'finding-1',
         action: 'accepted',
-        changeSummary: 'Attempting another acceptance in round 2',
+        changeSummary: 'Addressed the finding',
       }],
     })
-
-    const overrideRound2 = toolCallResponse('delegate-override-r2', 'fusion_delegate', {
+    // The last round is round 3: accepting a finding there cannot earn a fourth review, so the
+    // Host refuses it instead of silently spending a round it will not run.
+    const delegateAcceptedRound3Invalid = toolCallResponse('delegateAcceptedRound3Invalid', 'fusion_delegate', {
       block: true,
       requirements: ['addition'],
-      goal: 'Correct addition plan 2',
-      brief: 'Revised brief round 2',
+      goal: 'Correct addition plan 4',
+      brief: 'Revised brief round 4',
       constraints: ['Do not change test_calc.py'],
       allowedPaths: ['calc.py'],
       checks: [{
@@ -5955,18 +5997,45 @@ describe('plan review in coordinator', () => {
       }],
       requirementCoverage: [{
         requirementIndex: 0,
-        implementationNotes: ['Satisfy requirement 0 r2'],
+        implementationNotes: ['Satisfy requirement 0'],
+        acceptanceIds: ['addition'],
+      }],
+      foremanDispositions: [{
+        findingId: 'finding-1',
+        action: 'accepted',
+        changeSummary: 'Addressed the finding',
+      }],
+    })
+    // Round 3 is also the round where overriding everything closes the gate by itself.
+    const delegateOverrideRound3 = toolCallResponse('delegateOverrideRound3', 'fusion_delegate', {
+      block: true,
+      requirements: ['addition'],
+      goal: 'Correct addition plan 3',
+      brief: 'Revised brief round 3',
+      constraints: ['Do not change test_calc.py'],
+      allowedPaths: ['calc.py'],
+      checks: [{
+        id: 'addition',
+        description: 'Existing addition test passes',
+        command: py('python3 -B -m unittest -v test_calc'),
+        kind: 'test',
+        parser: 'unittest',
+        definitionPaths: ['test_calc.py'],
+      }],
+      requirementCoverage: [{
+        requirementIndex: 0,
+        implementationNotes: ['Satisfy requirement 0'],
         acceptanceIds: ['addition'],
       }],
       foremanDispositions: [{
         findingId: 'finding-1',
         action: 'overridden',
-        reason: 'Proceeding with current scope despite round 2 concern.',
+        reason: 'Proceeding with the current scope.',
       }],
     })
 
     const { parent, coordinator, store, taskId } = await setup(
-      [delegateV3(), acceptedRound1, invalidAcceptedRound2, overrideRound2, acceptV3(), textResponse('Verified.')],
+      [delegateV3(), delegateAcceptedRound1, delegateAcceptedRound2, delegateAcceptedRound3Invalid, delegateOverrideRound3, acceptV3(), textResponse('Verified.')],
       [edit(), report()],
       {
         ...options,
@@ -5976,7 +6045,8 @@ describe('plan review in coordinator', () => {
             callCount++
             return {
               kind: 'concerns',
-              assessment: testConcernsAssessment(candidate.order.candidateDigest!),
+              // A warning: overriding it is a legal answer, which is what the last round does.
+              assessment: testConcernsAssessment(candidate.order.candidateDigest!, testWarningFinding),
             }
           },
         }),
@@ -5985,9 +6055,10 @@ describe('plan review in coordinator', () => {
     parent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Correct addition.' }] }))
     await parent.whenIdle()
 
-    expect(callCount).toBe(2)
+    // One review per round, and no fourth: round 1, the round-2 revision, the round-3 revision.
+    expect(callCount).toBe(3)
     const results = JSON.stringify(toolResults(parent))
-    expect(results).toContain('maximum of 2 review rounds')
+    expect(results).toContain('maximum of 3 review rounds')
     const preparedEvents = store.events(taskId).filter(e => e.type === 'work-order/prepared')
     expect(preparedEvents).toHaveLength(1)
     expect(coordinator.state(taskId)).toMatchObject({ phase: 'COMPLETED', verification: 'verified' })
@@ -6003,7 +6074,7 @@ describe('plan review in coordinator', () => {
           {
             id: 'finding-1',
             category: 'uncovered-requirement' as const,
-            severity: 'blocking-concern' as const,
+            severity: 'warning' as const,
             requirementIndexes: [0],
             decisionIndexes: [0],
             message: 'Missing error handling coverage in requirement 0',
@@ -6012,7 +6083,7 @@ describe('plan review in coordinator', () => {
           {
             id: 'finding-2',
             category: 'weak-oracle' as const,
-            severity: 'non-blocking-concern' as const,
+            severity: 'warning' as const,
             requirementIndexes: [0],
             decisionIndexes: [0],
             message: 'Weak assertion in test_calc.py',
@@ -6139,11 +6210,7 @@ describe('plan review in coordinator', () => {
     expect(coordinator.state(taskId)).toMatchObject({ phase: 'COMPLETED', verification: 'verified' })
   })
 
-  it('reviews an exploration candidate too, because a configured Foreman reviews every plan', async () => {
-    // The risk gate used to make exploration orders unreachable: they carry no user
-    // requirements, no allowed paths, no authority and no uncertainties, so no trigger
-    // could ever fire and a configured reviewer stayed silent for the whole survey
-    // (session-0a8d7fbf).
+  it('does not send a pre-plan exploration to the Sidekick or Foreman by default', async () => {
     let callCount = 0
     const reviewed: (string | undefined)[] = []
     const exploreDelegate = toolCallResponse('explore-1', 'fusion_explore', {
@@ -6171,36 +6238,85 @@ describe('plan review in coordinator', () => {
     parent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Explore addition.' }] }))
     await parent.whenIdle()
 
-    expect(callCount).toBe(1)
-    expect(reviewed).toEqual(['explore'])
-    const requested = store.events(taskId).find(e => e.type === 'plan-review/requested')
-    expect(requested).toBeDefined()
-    expect(coordinator.state(taskId).planReviews).toHaveLength(1)
+    expect(callCount).toBe(0)
+    expect(reviewed).toEqual([])
+    expect(store.events(taskId).some(e => e.type === 'plan-review/requested' || e.type === 'child/accepted')).toBe(false)
+    expect(coordinator.state(taskId).currentWorkOrder).toBeUndefined()
+    expect(JSON.stringify(toolResults(parent))).toContain('/fusion allow-explore')
   })
 
-  it('fails open and dispatches worker when foreman returns unavailable or times out', async () => {
-    let reviewCount = 0
-    const { parent, coordinator, store, taskId } = await setup(
-      [delegateV3(), acceptV3(), textResponse('Verified.')],
-      [edit(), report()],
-      {
-        ...options,
-        foreman: true,
-        planReview: () => ({
-          review: async () => {
-            reviewCount++
-            return { kind: 'unavailable', reason: 'model timeout' }
-          },
-        }),
+  it('blocks an early implementation plan after a native /grill-me invocation even if Lead forgets to open discussion', async () => {
+    let reviews = 0
+    const { parent, coordinator, taskId } = await setup([delegateV3(), textResponse('Does normal addition match your intent?')], [edit(), report()], {
+      ...options, foreman: true, planReview: () => ({ review: async candidate => {
+        reviews++
+        return { kind: 'ready', assessment: testReadyAssessment(candidate.order.candidateDigest!) }
+      } }),
+    })
+    parent.session.append('user/message', createUserMessage({ source: { kind: 'skill-invocation', name: 'grill-me', form: 'instructions' },
+      content: [{ type: 'text', text: 'Discuss the plan before you implement it.' }] }), { surfaceOp: 'append' })
+    parent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Correct addition.' }] }))
+    await parent.whenIdle()
+    expect(reviews).toBe(0)
+    expect(coordinator.state(taskId).currentWorkOrder).toBeUndefined()
+    expect(JSON.stringify(toolResults(parent))).toContain('discussion is still open')
+  })
+
+  it('allows explicitly scoped fact collection without Foreman and audits the plan only after the discussion', async () => {
+    const scope = 'Read calc.py and report the behavior with a source range.'
+    const orderModes: (string | undefined)[] = []
+    const phase = (action: string) => toolCallResponse(action, 'fusion_plan_discussion', { action })
+    const { parent, coordinator, store, taskId, planningCommand } = await setup(
+      [phase('open'), toolCallResponse('survey', 'fusion_explore', { goal: scope, brief: scope }),
+        phase('finalize'), delegateV3(), textResponse('Should we use normal addition?'),
+        phase('finalize'), delegateV3(), acceptV3(), textResponse('Verified.')],
+      [findings(), edit(), report()], { ...options, foreman: true,
+        planReview: () => ({ review: async candidate => {
+          orderModes.push(candidate.order.mode)
+          return { kind: 'ready', assessment: testReadyAssessment(candidate.order.candidateDigest!) }
+        } }),
+      })
+    expect(await planningCommand(`allow-explore ${scope}`)).toMatchObject({ kind: 'success' })
+    parent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Discuss the addition fix before implementation.' }] }))
+    await parent.whenIdle()
+    expect(coordinator.state(taskId).currentWorkOrder?.mode).toBe('explore')
+    expect(orderModes).toEqual([])
+    expect(JSON.stringify(toolResults(parent))).toContain('discussion is still open')
+    parent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Yes, use normal addition.' }] }))
+    await parent.whenIdle()
+    expect(orderModes).toEqual(['implement'])
+    expect(store.events(taskId).filter(event => event.type === 'plan-review/requested')).toHaveLength(1)
+    expect(coordinator.state(taskId)).toMatchObject({ phase: 'COMPLETED', verification: 'verified' })
+  })
+
+  it.each(['foreman-retry', 'foreman-model test-native/replacement-foreman', 'foreman-skip I accept an unaudited plan'])('unblocks the same candidate only after /fusion %s', async command => {
+    const models: string[] = []
+    const { parent, coordinator, store, taskId, planningCommand } = await setup(
+      [delegateV3(), textResponse('Waiting for your review decision.'), toolCallResponse('resume-plan', 'fusion_resume_plan', {}), acceptV3(), textResponse('Verified.')],
+      [edit(), report()], {
+        ...options, foreman: true,
+        planReview: (_agent, binding) => ({ review: async candidate => {
+          models.push(binding.profile.foreman!.route.model)
+          return models.length === 1 ? { kind: 'unavailable', reason: 'model timeout' }
+            : { kind: 'ready', assessment: testReadyAssessment(candidate.order.candidateDigest!) }
+        } }),
       },
     )
     parent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Correct addition.' }] }))
     await parent.whenIdle()
-
-    expect(reviewCount).toBe(1)
-    const unavailable = store.events(taskId).find(e => e.type === 'plan-review/unavailable')
-    expect(unavailable).toBeDefined()
+    expect(coordinator.state(taskId).acceptedChild).toBeUndefined()
+    expect(await planningCommand(command)).toMatchObject({ kind: 'success' })
+    await parent.whenIdle()
     expect(coordinator.state(taskId)).toMatchObject({ phase: 'COMPLETED', verification: 'verified' })
+    if (command.startsWith('foreman-skip')) {
+      expect(models).toEqual(['foreman'])
+      expect(store.events(taskId).find(event => event.type === 'plan-review/skip-authorized')?.payload).toMatchObject({ reason: 'I accept an unaudited plan' })
+    } else {
+      expect(models).toEqual(['foreman', command.startsWith('foreman-model') ? 'replacement-foreman' : 'foreman'])
+      const requests = store.events(taskId).filter(event => event.type === 'plan-review/requested')
+      expect(requests).toHaveLength(2)
+      expect(requests[1]?.payload).toMatchObject({ candidateDigest: requests[0]!.payload.candidateDigest, retryOf: requests[0]!.payload.workOrderId })
+    }
   })
 
   it('recovers pending requested review to unavailable on coordinator restart and dispatches without re-calling foreman', async () => {

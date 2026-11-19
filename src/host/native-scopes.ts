@@ -187,6 +187,8 @@ export class NativeFusionScopes {
         this.callbacks.projectMessage?.(agent, entry.binding, role, message) ?? message), ...(taskContext ? [taskContext] : [])] }
     }, { prepend: true }))
     entry.dispose.push(scope.systemPrompt.section({ name: 'fusion-role', order: 90, text: entry.binding.prompts[role] }))
+    if (role === 'lead') entry.dispose.push(scope.systemPrompt.section({ name: 'fusion-planning-policy', order: 91,
+      text: 'Current Fusion planning policy overrides any earlier delegation guidance: personally verify decisive evidence. Begin fusion_plan_discussion(open) when a skill requires discussion before finalization; follow its rounds and finish the discussion before calling finalize. Ordinary work does not need an extra confirmation. Use fusion_explore only with a user command granting the exact read-only scope; never use it by default. Only submit a finalized plan for dispatch. If a Foreman review is unavailable, do not dispatch, resubmit variants, or re-run the review yourself. Ask the user to retry, change Foreman model, or explicitly skip through the /fusion controls, then use fusion_resume_plan.' }))
     entry.dispose.push(scope.on('system-prompt/assemble', async (_assembly, _context, next) => {
       entry.refreshTools()
       const assembled = await next()

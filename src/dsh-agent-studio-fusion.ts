@@ -8,6 +8,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { ModelModality } from '@deepseek-ai/dsh-llm'
+import { runPlanningCommand } from './host/planning-commands.js'
 import type { ModelCatalog } from '@deepseek-ai/dsh-api-session-controller'
 import type {} from '@deepseek-ai/dsh-api-session-controller'
 import type {} from '@deepseek-ai/dsh-host-webserver'
@@ -471,8 +472,8 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
     // reloaded. Keep answering it from the same handler; nothing new uses it.
     { path: LEGACY_FUSION_API_PATH, handler: apiHandler },
   ])
-  ctx.effect(() => ctx.commands.register({ name: 'fusion', description: bi('Fusion 状态、暂停、恢复与退出（不调用模型）', 'Fusion status, pause, resume and exit (no model call)'),
-    input: { hint: bi('status | pause | resume | recover [--effects-stopped] <检查记录> | off', 'status | pause | resume | recover [--effects-stopped] <inspection note> | off') },
+  ctx.effect(() => ctx.commands.register({ name: 'fusion', description: bi('Fusion 状态、任务控制与工长审查恢复', 'Fusion status, task controls, and Foreman recovery'),
+    input: { hint: 'status | pause | resume | recover | allow-explore <scope> | foreman-retry | foreman-model <provider/model> | foreman-skip <reason> | off' },
     handler: async invocation => {
       const [action = 'status', ...note] = invocation.rawInput.trim().split(/\s+/)
       try {
@@ -492,10 +493,17 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
               // The same money the panel shows, so `/fusion status` and the panel
               // never disagree. Read-only: this never starts an agent or a model call.
               const status = readFusionStatus(store, invocation.agent.id)
-              return status.task?.cost ? { cost: status.task.cost } : {}
+              return { ...(status.task?.cost ? { cost: status.task.cost } : {}),
+                 ...(status.task?.planReview ? { planReview: status.task.planReview } : {}) }
             })() }, null, 2) }
         }
         const controller = await getRuntime({ profile: binding.profile, prompts: binding.prompts })
+        const planning = await runPlanningCommand(invocation, controller, async route => {
+          const catalog = await physicalCatalog()
+          if (!catalog.groups.find(group => group.id === route.provider)?.models.some(model => model.id === route.model)) throw new Error('Choose a registered physical Foreman model.')
+          if (needsBudget(binding.profile)) budget.check(effectiveRoutes(binding).concat(route))
+        })
+        if (planning) return planning
         if (action === 'pause') { controller.modelControl.cancel(binding); await controller.pause(invocation.agent) }
         else if (action === 'resume') {
           const authorizationId = needsBudget(binding.profile) ? budget.check(effectiveRoutes(binding)).authorizationId : 'native-account'

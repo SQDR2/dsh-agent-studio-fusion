@@ -1,11 +1,16 @@
 import { describe, expect, it } from 'vitest'
+import { realpathSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
+import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
-import type { PlanReviewCandidate, PlanReviewCheckDefinition, PlanReviewRecord, RequirementCoverage, WorkOrder } from '../src/contracts.js'
+import type { ForemanAssessment, PlanReviewCandidate, PlanReviewCheckDefinition, PlanReviewRecord, RequirementCoverage, WorkOrder } from '../src/contracts.js'
 import { OperationId, SessionId, SnapshotId, TaskId, WorkOrderId } from '../src/contracts.js'
-import { assertValidPlanReviewCandidate, candidateDigest, collectForemanFindings, FOREMAN_MAX_FINDINGS, FOREMAN_SYSTEM_PROMPT, foremanAssessmentSchema, lintPlanReviewCandidate, parseForemanAssessment, planReviewGateDecision, semanticCandidateProjection } from '../src/plan-review.js'
-import { NativePlanReviewService } from '../src/host/plan-review.js'
+import { assertValidPlanReviewCandidate, candidateDigest, collectForemanFindings, FOREMAN_MAX_FINDINGS, FOREMAN_MAX_REVIEW_ROUNDS, FOREMAN_SYSTEM_PROMPT, foremanAssessmentSchema, lintPlanReviewCandidate, parseForemanAssessment, planReviewGateDecision, semanticCandidateProjection } from '../src/plan-review.js'
+import { FOREMAN_MAX_TOOL_CALLS, NativePlanReviewService } from '../src/host/plan-review.js'
+import { verifyForemanCitations } from '../src/host/plan-review-tools.js'
+import { nativeShellTool } from '../src/host/shell.js'
 import { NativeAuxiliaryRequests } from '../src/host/native-auxiliary.js'
 import type { SessionBinding } from '../src/host/bindings.js'
 
@@ -74,6 +79,25 @@ function makeCandidate(patch?: {
     ...(patch?.assessmentSchema === undefined ? {} : { assessmentSchema: patch.assessmentSchema }),
   }
 }
+
+/**
+ * The workspace a review resolves its tools and citations against.
+ *
+ * A review is only a review when its verdict is bound to bytes that exist, so the Host opens
+ * every cited range and discards the assessment when one does not resolve. These tests run
+ * against this repository, resolved from the spec's own URL rather than the process working
+ * directory, so the fixture ranges below are real files with real lines.
+ */
+const WORKSPACE_ROOT = realpathSync.native(fileURLToPath(new URL('..', import.meta.url)))
+
+/** Ranges that exist in this checkout: cited as "inspected" by a simulated approval. */
+const INSPECTED = () => [{ path: 'src/plan-review.ts', startLine: 1, endLine: 2 }]
+
+/** Ranges that exist in this checkout: cited as the code a finding is visible in. */
+const EVIDENCE = () => [{ path: 'src/host/plan-review.ts', startLine: 1, endLine: 2 }]
+
+/** A workspace-backed agent: the review needs one to check citations against. */
+const workspaceAgent = () => ({ id: 'agent-1', session: { header: { cwd: WORKSPACE_ROOT } } }) as unknown as Agent
 
 describe('candidateDigest calculation', () => {
   it('computes a stable deterministic digest for the same candidate', () => {
@@ -522,10 +546,14 @@ describe('parseForemanAssessment strict structural schema validation', () => {
   const digest = candidateDigest(candidate)
   candidate.order.candidateDigest = digest
 
+  const inspection = () => [{ path: 'src/feature.ts', startLine: 1, endLine: 2 }]
+  const evidence = () => [{ path: 'src/feature.ts', startLine: 1, endLine: 1 }]
+
   const validReadyObj = () => ({
     schemaVersion: 1,
     candidateDigest: digest,
     verdict: 'ready',
+    inspected: inspection(),
     acceptanceAudit: {
       uncoveredRequirements: [],
       weakOracles: [],
@@ -547,12 +575,30 @@ describe('parseForemanAssessment strict structural schema validation', () => {
     decisionIndexes: [0],
     message: 'Requirement 0 is missing validation check',
     suggestedCorrection: 'Add a check covering requirement 0',
+    evidence: evidence(),
   })
 
-  it('preserves the verbatim required FOREMAN_SYSTEM_PROMPT constant', () => {
-    expect(FOREMAN_SYSTEM_PROMPT).toBe(
-      'You are Foreman, an independent plan auditor. Review only the supplied candidate work order. Find semantic gaps that deterministic Host validation cannot decide: uncovered hard requirements, weak acceptance oracles, concrete false-green scenarios, unsupported decisions, counterexamples, unresolved critical assumptions, scope contradictions, and material ambiguities that would change observable behavior. A candidate whose mode is explore or text has no acceptance checks by construction: audit whether its goal, brief and constraints can still answer the question the user asked, and leave the acceptance-audit arrays empty instead of inventing checks it was never meant to have. Do not propose an alternative plan. Do not discuss formatting, permissions, path syntax, or other deterministic Host checks. Return exactly one JSON object matching ForemanAssessment schema version 1. Use verdict "ready" only when every finding array is empty; otherwise use "concerns". Report at most 8 findings across all finding arrays, most material first; when the plan has more problems than that, report the ones that would change observable behavior and omit the rest. Copy candidateDigest exactly. Do not use Markdown or include any text outside the JSON object.',
-    )
+  it('lets the Foreman read the workspace and run commands, and still tells it not to change anything', () => {
+    expect(FOREMAN_SYSTEM_PROMPT).toContain('read, grep and glob')
+    expect(FOREMAN_SYSTEM_PROMPT).toContain('run commands')
+    expect(FOREMAN_SYSTEM_PROMPT).toContain('do not edit the plan')
+    expect(FOREMAN_SYSTEM_PROMPT).toContain('do not fix or write code')
+    expect(FOREMAN_SYSTEM_PROMPT).toContain('do not run mutating commands')
+    // The old claim of having no command runner is gone: the tool exists and runs.
+    expect(FOREMAN_SYSTEM_PROMPT).not.toContain('no command runner')
+  })
+
+  it('requires every claim to be bound to a cited file range', () => {
+    expect(FOREMAN_SYSTEM_PROMPT).toContain('path')
+    expect(FOREMAN_SYSTEM_PROMPT).toContain('startLine')
+    expect(FOREMAN_SYSTEM_PROMPT).toContain('endLine')
+    expect(FOREMAN_SYSTEM_PROMPT).toContain('must carry a non-empty evidence array')
+    expect(FOREMAN_SYSTEM_PROMPT).toContain('must carry a non-empty inspected array')
+  })
+
+  it('requires an assessment bound to the submitted candidate', () => {
+    expect(FOREMAN_SYSTEM_PROMPT).toContain('Return exactly one JSON object matching ForemanAssessment schema version 1')
+    expect(FOREMAN_SYSTEM_PROMPT).toContain('Copy candidateDigest exactly')
   })
 
   // The cap keeps the assessment inside the request's output budget by construction: a
@@ -723,6 +769,59 @@ describe('parseForemanAssessment strict structural schema validation', () => {
     }
   })
 
+  it('refuses a ready verdict that cites nothing it inspected', () => {
+    const obj: Record<string, unknown> = validReadyObj()
+    delete obj.inspected
+    const outcome = parseForemanAssessment(JSON.stringify(obj), candidate)
+    expect(outcome.kind).toBe('unavailable')
+    if (outcome.kind === 'unavailable') {
+      expect(outcome.reason).toContain('inspected is empty')
+    }
+    const empty = { ...validReadyObj(), inspected: [] }
+    expect(parseForemanAssessment(JSON.stringify(empty), candidate).kind).toBe('unavailable')
+  })
+
+  it('refuses a blocking finding that cites no evidence', () => {
+    const obj = validReadyObj()
+    obj.verdict = 'concerns'
+    const { evidence: _evidence, ...uncited } = validFinding('f-1')
+    obj.acceptanceAudit.uncoveredRequirements.push(uncited as never)
+    const outcome = parseForemanAssessment(JSON.stringify(obj), candidate)
+    expect(outcome.kind).toBe('unavailable')
+    if (outcome.kind === 'unavailable') {
+      expect(outcome.reason).toContain('Blocking-concern findings cite no evidence')
+      expect(outcome.reason).toContain('"f-1"')
+    }
+  })
+
+  it('accepts a warning without evidence, because advice needs no proof', () => {
+    const obj = validReadyObj()
+    obj.verdict = 'concerns'
+    const { evidence: _evidence, ...uncited } = validFinding('f-1')
+    obj.acceptanceAudit.uncoveredRequirements.push({ ...uncited, severity: 'warning' } as never)
+    const outcome = parseForemanAssessment(JSON.stringify(obj), candidate)
+    expect(outcome.kind).toBe('concerns')
+    if (outcome.kind === 'concerns') {
+      expect(outcome.assessment.acceptanceAudit.uncoveredRequirements[0]!.severity).toBe('warning')
+    }
+  })
+
+  it('rejects a malformed citation instead of ignoring it', () => {
+    const backwards = validReadyObj()
+    backwards.verdict = 'concerns'
+    backwards.acceptanceAudit.uncoveredRequirements.push({
+      ...validFinding('f-1'), evidence: [{ path: 'src/feature.ts', startLine: 4, endLine: 2 }],
+    } as never)
+    const outcome = parseForemanAssessment(JSON.stringify(backwards), candidate)
+    expect(outcome.kind).toBe('unavailable')
+    if (outcome.kind === 'unavailable') expect(outcome.reason).toContain('1 <= startLine <= endLine')
+
+    const extra = { ...validReadyObj(), inspected: [{ path: 'src/feature.ts', startLine: 1, endLine: 2, digest: 'x' }] }
+    const second = parseForemanAssessment(JSON.stringify(extra), candidate)
+    expect(second.kind).toBe('unavailable')
+    if (second.kind === 'unavailable') expect(second.reason).toContain('Unknown field in inspected[0]: "digest"')
+  })
+
   it('rejects duplicate finding ids across different categories', () => {
     const obj = validReadyObj()
     obj.verdict = 'concerns'
@@ -745,6 +844,7 @@ describe('NativePlanReviewService execution and fail-open behavior', () => {
     schemaVersion: 1,
     candidateDigest: digest,
     verdict: 'ready',
+    inspected: INSPECTED(),
     acceptanceAudit: { uncoveredRequirements: [], weakOracles: [], falseGreenScenarios: [] },
     decisionChallenges: { unsupportedDecisions: [], counterexamples: [], unresolvedCriticalAssumptions: [] },
     materialAmbiguities: [],
@@ -754,6 +854,7 @@ describe('NativePlanReviewService execution and fail-open behavior', () => {
     schemaVersion: 1,
     candidateDigest: digest,
     verdict: 'concerns',
+    inspected: INSPECTED(),
     acceptanceAudit: {
       uncoveredRequirements: [{
         id: 'gap-1',
@@ -763,6 +864,7 @@ describe('NativePlanReviewService execution and fail-open behavior', () => {
         decisionIndexes: [0],
         message: 'Requirement 0 uncovered',
         suggestedCorrection: 'Add check',
+        evidence: EVIDENCE(),
       }],
       weakOracles: [],
       falseGreenScenarios: [],
@@ -774,13 +876,15 @@ describe('NativePlanReviewService execution and fail-open behavior', () => {
   function makeService(
     streamFn: (options: GenerateOptions) => AsyncIterable<StreamChunk>,
     foremanConfig?: { route: { provider: string; model: string; reasoningEffort?: string }; maxOutputTokens: number; timeoutMs: number },
+    tools?: unknown,
   ) {
     const ctx = {
       llm: {
         stream: (opts: GenerateOptions) => streamFn(opts),
       },
+      tools,
     } as unknown as Context
-    const agent = { id: 'agent-1' } as Agent
+    const agent = workspaceAgent()
     const binding = {
       sessionId: 'agent-1',
       taskId: TaskId('task-1'),
@@ -812,6 +916,7 @@ describe('NativePlanReviewService execution and fail-open behavior', () => {
   const validReadyAssessment = () => ({
     schemaVersion: 1 as const,
     verdict: 'ready' as const,
+    inspected: INSPECTED(),
     acceptanceAudit: { uncoveredRequirements: [], weakOracles: [], falseGreenScenarios: [] },
     decisionChallenges: { unsupportedDecisions: [], counterexamples: [], unresolvedCriticalAssumptions: [] },
     materialAmbiguities: [],
@@ -836,9 +941,17 @@ describe('NativePlanReviewService execution and fail-open behavior', () => {
 
     const outcome = await service.review(candidate)
     expect(outcome.kind).toBe('ready')
-    expect(capturedOptions?.tools).toEqual([])
+    // The reviewer inspects the repository: three file tools and the Host's own shell, which
+    // is the platform's native one — `bash` here, `pwsh` on Windows.
+    expect(capturedOptions?.tools?.map(tool => tool.name)).toEqual(['read', 'grep', 'glob', nativeShellTool])
     expect(capturedOptions?.maxTokens).toBe(2048)
     expect(capturedOptions?.system).toBe(FOREMAN_SYSTEM_PROMPT)
+    if (outcome.kind === 'ready') {
+      // The approval is bound to code: the Host opened each cited range and recorded the
+      // digest of the bytes it read, so the record proves what the reviewer actually saw.
+      expect(outcome.assessment.inspected?.[0]).toMatchObject({ path: 'src/plan-review.ts', startLine: 1, endLine: 2 })
+      expect(outcome.assessment.inspected?.[0]?.digest).toMatch(/^[0-9a-f]{64}$/)
+    }
 
     const tag = auxiliary.get(capturedOptions!)
     expect(tag).toBeDefined()
@@ -857,6 +970,12 @@ describe('NativePlanReviewService execution and fail-open behavior', () => {
     if (outcome.kind === 'concerns') {
       expect(outcome.assessment.verdict).toBe('concerns')
       expect(outcome.assessment.acceptanceAudit.uncoveredRequirements).toHaveLength(1)
+      const finding = outcome.assessment.acceptanceAudit.uncoveredRequirements[0]!
+      expect(finding.severity).toBe('blocking-concern')
+      // A blocking finding must cite code, and the citation is resolved against the real
+      // workspace: a range that does not exist would have discarded the whole assessment.
+      expect(finding.evidence?.[0]).toMatchObject({ path: 'src/host/plan-review.ts', startLine: 1, endLine: 2 })
+      expect(finding.evidence?.[0]?.digest).toMatch(/^[0-9a-f]{64}$/)
     }
   })
 
@@ -914,7 +1033,7 @@ describe('native plan review request and stream assembly', () => {
   const candidateWithSchema = () => makeCandidate({ assessmentSchema: foremanAssessmentSchema(),
     userMessages: ['Fix addition in calc.py.'], evidenceSummary: 'Exploration summary: calc.py subtracts' })
 
-  it('sends the schema inside the candidate JSON with an empty tool table', async () => {
+  it('sends the schema inside the candidate JSON with the inspection tool table', async () => {
     let seen: GenerateOptions | undefined
     const { service } = makeService(async function* (options) {
       seen = options
@@ -922,7 +1041,7 @@ describe('native plan review request and stream assembly', () => {
     })
     const outcome = await service.review(candidateWithSchema())
     expect(outcome.kind).toBe('ready')
-    expect(seen?.tools).toEqual([])
+    expect(seen?.tools?.map(tool => tool.name)).toEqual(['read', 'grep', 'glob', nativeShellTool])
     expect(seen?.system).toBe(FOREMAN_SYSTEM_PROMPT)
     const text = String((seen!.messages[0] as unknown as { content: { type: string; text: string }[] }).content[0]!.text)
     const sent = JSON.parse(text)
@@ -984,6 +1103,203 @@ describe('native plan review request and stream assembly', () => {
     expect(outcome.kind).toBe('unavailable')
   })
 })
+
+/**
+ * The review is a loop, not one call: the reviewer asks for tools, the Host executes them
+ * against the frozen workspace, and the answers go back into the next request. Without that
+ * loop the Foreman could only judge the plan text, and every acceptance claim would be taken
+ * on the Lead's word.
+ */
+describe('foreman inspection loop, citation check and runaway guard', () => {
+  /** One assistant turn that asks for a single tool call, as the adapter streams it. */
+  const toolCallTurn = (id: string, name: string, args: unknown): StreamChunk[] => {
+    const arguments_ = JSON.stringify(args)
+    return [
+      { type: 'tool-call-delta', index: 0, id: ToolCallId(id), name, argumentsDelta: arguments_ },
+      { type: 'block-end', index: 0, block: { type: 'tool-call', id: ToolCallId(id), name, arguments: arguments_ } },
+      { type: 'finish', reason: { kind: 'tool-calls' } },
+    ]
+  }
+
+  type RecordedResult = { toolCallId: string; isError?: boolean; content: { type: string; text?: string }[] }
+  const toolResultsOf = (options: GenerateOptions): RecordedResult[] => options.messages
+    .filter(message => message.role === 'tool') as unknown as RecordedResult[]
+
+  it('runs one shell command and replays its output into the next request', async () => {
+    const requests: GenerateOptions[] = []
+    const dispatched: { name: string; arguments: unknown; callId: string }[] = []
+    // The Host's tool runtime, reached through `executeSingleTool` — the review runs the
+    // command itself, with no model in the loop.
+    const tools = {
+      execute: async (input: { name: string; arguments: unknown; callId: string }) => {
+        dispatched.push(input)
+        return { isError: false, content: [{ type: 'text', text: 'FAIL tests/x.spec.ts > adds two numbers' }] }
+      },
+    }
+    const command = 'pnpm exec vitest run tests/x.spec.ts'
+    const { service } = makeService(async function* (options) {
+      requests.push(options)
+      if (requests.length === 1) {
+        yield* toolCallTurn('shell-1', nativeShellTool, { command, description: 'run the acceptance test' })
+        return
+      }
+      yield* mockTextStream(JSON.stringify({
+        ...validConcernsObj(),
+        acceptanceAudit: {
+          uncoveredRequirements: [{
+            id: 'gap-shell', category: 'acceptance-gap', severity: 'blocking-concern',
+            requirementIndexes: [0], decisionIndexes: [0],
+            message: 'The acceptance command the plan names fails: FAIL tests/x.spec.ts > adds two numbers',
+            suggestedCorrection: 'Fix the addition before claiming requirement 0 is covered',
+            evidence: EVIDENCE(),
+          }],
+          weakOracles: [], falseGreenScenarios: [],
+        },
+      }))
+    }, undefined, tools)
+
+    const outcome = await service.review(candidate)
+    expect(outcome.kind).toBe('concerns')
+    // One command, exactly the one the model asked for, dispatched by the Host.
+    expect(dispatched).toHaveLength(1)
+    expect(dispatched[0]!.name).toBe(nativeShellTool)
+    expect(dispatched[0]!.arguments).toEqual({ command, description: 'run the acceptance test' })
+    // The turn and its result are both replayed, so the next request sees what the command said.
+    expect(requests).toHaveLength(2)
+    const second = requests[1]!
+    expect(second.messages.map(message => message.role)).toEqual(['user', 'assistant', 'tool'])
+    const results = toolResultsOf(second)
+    expect(results).toHaveLength(1)
+    expect(results[0]!.toolCallId).toBe('shell-1')
+    expect(results[0]!.isError).toBe(false)
+    expect(results[0]!.content[0]!.text).toContain('FAIL tests/x.spec.ts')
+    if (outcome.kind === 'concerns') {
+      const finding = outcome.assessment.acceptanceAudit.uncoveredRequirements[0]!
+      expect(finding.severity).toBe('blocking-concern')
+      expect(finding.message).toContain('FAIL tests/x.spec.ts')
+      expect(finding.evidence?.[0]?.digest).toMatch(/^[0-9a-f]{64}$/)
+    }
+  })
+
+  it('discards the whole assessment when it cites code that does not exist', async () => {
+    const { service } = makeService(async function* () {
+      yield* mockTextStream(JSON.stringify({
+        ...validReadyObj(),
+        inspected: [{ path: 'src/no-such-file.ts', startLine: 1, endLine: 2 }],
+      }))
+    })
+
+    const outcome = await service.review(candidate)
+    expect(outcome.kind).toBe('unavailable')
+    if (outcome.kind === 'unavailable') {
+      expect(outcome.reason).toContain('cites src/no-such-file.ts:1-2')
+      expect(outcome.reason).toContain('the file does not exist')
+      // One unresolvable citation discards the review instead of being dropped on its own:
+      // a reviewer that cited a file it never opened has not checked its other claims either.
+      expect(outcome.reason).toContain('The whole assessment was discarded')
+    }
+  })
+
+  it('stops a review that never converges at the runaway guard', async () => {
+    expect(FOREMAN_MAX_TOOL_CALLS).toBe(40)
+    let requests = 0
+    // A reviewer that keeps reading without ever answering: every turn asks for another read.
+    const { service } = makeService(async function* () {
+      requests += 1
+      yield* toolCallTurn(`read-${requests}`, 'read', { file_path: 'src/plan-review.ts', offset: 1, limit: 1 })
+    })
+
+    const outcome = await service.review(candidate)
+    expect(outcome.kind).toBe('unavailable')
+    if (outcome.kind !== 'unavailable') return
+    expect(outcome.reason).toContain('runaway guard')
+    expect(outcome.reason).toContain(`asked for ${FOREMAN_MAX_TOOL_CALLS + 1} tool calls`)
+    expect(outcome.reason).toContain(`more than the ${FOREMAN_MAX_TOOL_CALLS} one review may make`)
+    // The bound is checked before the calls run, so the review stops at the limit instead of
+    // overshooting it by a whole turn's worth of work.
+    expect(requests).toBe(FOREMAN_MAX_TOOL_CALLS + 1)
+  })
+})
+})
+
+describe('foreman citation verification', () => {
+  const assessment = (patch: Partial<ForemanAssessment> = {}): ForemanAssessment => ({
+    schemaVersion: 1,
+    candidateDigest: 'a'.repeat(64),
+    verdict: 'ready',
+    inspected: INSPECTED(),
+    acceptanceAudit: { uncoveredRequirements: [], weakOracles: [], falseGreenScenarios: [] },
+    decisionChallenges: { unsupportedDecisions: [], counterexamples: [], unresolvedCriticalAssumptions: [] },
+    materialAmbiguities: [],
+    ...patch,
+  })
+
+  const blockingFinding = (path: string) => ({
+    id: 'f-1', category: 'acceptance-gap' as const, severity: 'blocking-concern' as const,
+    requirementIndexes: [0], decisionIndexes: [], message: 'the check never runs', suggestedCorrection: 'wire it up',
+    evidence: [{ path, startLine: 1, endLine: 2 }],
+  })
+
+  it('resolves every cited range and stamps the digest of the bytes it opened', () => {
+    const checked = verifyForemanCitations(assessment(), WORKSPACE_ROOT)
+    expect(checked.ok).toBe(true)
+    if (!checked.ok) return
+    const digest = checked.assessment.inspected?.[0]?.digest
+    expect(digest).toMatch(/^[0-9a-f]{64}$/)
+    // The digest is of the file, not of the range, so two ranges of one file share it.
+    const twice = verifyForemanCitations(assessment({
+      inspected: [{ path: 'src/plan-review.ts', startLine: 1, endLine: 2 },
+        { path: 'src/plan-review.ts', startLine: 3, endLine: 4 }],
+    }), WORKSPACE_ROOT)
+    expect(twice.ok).toBe(true)
+    if (!twice.ok) return
+    expect(twice.assessment.inspected?.map(citation => citation.digest)).toEqual([digest, digest])
+  })
+
+  it('resolves a finding citation too, and reports the one that does not', () => {
+    const cited = verifyForemanCitations(assessment({
+      verdict: 'concerns',
+      acceptanceAudit: {
+        uncoveredRequirements: [blockingFinding('src/plan-review.ts')],
+        weakOracles: [], falseGreenScenarios: [],
+      },
+    }), WORKSPACE_ROOT)
+    expect(cited.ok).toBe(true)
+    if (cited.ok) {
+      expect(cited.assessment.acceptanceAudit.uncoveredRequirements[0]!.evidence?.[0]?.digest).toMatch(/^[0-9a-f]{64}$/)
+    }
+
+    const missing = verifyForemanCitations(assessment({
+      verdict: 'concerns',
+      acceptanceAudit: {
+        uncoveredRequirements: [blockingFinding('src/gone.ts')],
+        weakOracles: [], falseGreenScenarios: [],
+      },
+    }), WORKSPACE_ROOT)
+    expect(missing.ok).toBe(false)
+    if (!missing.ok) {
+      expect(missing.reason).toContain('finding "f-1" cites src/gone.ts:1-2')
+      expect(missing.reason).toContain('the file does not exist')
+    }
+  })
+
+  it('refuses a range the file does not have, an absolute path, and a review with no workspace', () => {
+    const tooLong = verifyForemanCitations(assessment({
+      inspected: [{ path: 'src/plan-review.ts', startLine: 1, endLine: 1_000_000 }],
+    }), WORKSPACE_ROOT)
+    expect(tooLong.ok).toBe(false)
+    if (!tooLong.ok) expect(tooLong.reason).toContain('so the range is not in it')
+
+    const absolute = verifyForemanCitations(assessment({
+      inspected: [{ path: `${WORKSPACE_ROOT}/src/plan-review.ts`, startLine: 1, endLine: 2 }],
+    }), WORKSPACE_ROOT)
+    expect(absolute.ok).toBe(false)
+    if (!absolute.ok) expect(absolute.reason).toContain('the path is absolute')
+
+    const noRoot = verifyForemanCitations(assessment(), undefined)
+    expect(noRoot.ok).toBe(false)
+    if (!noRoot.ok) expect(noRoot.reason).toContain('no workspace root')
+  })
 })
 
 describe('plan review candidate composition and assessment schema', () => {
@@ -1080,12 +1396,12 @@ describe('plan review gate decision', () => {
       ? { findingId: item.findingId, action: 'accepted' as const, changeSummary: 'revised' }
       : { findingId: item.findingId, action: 'overridden' as const, reason: 'deliberate' })
 
-  it('approves a reviewed candidate that is ready, and an unreachable reviewer fails open', () => {
+  it('approves a ready assessment but not an unavailable reviewer', () => {
     expect(planReviewGateDecision({ candidateDigest: digest('a'), reviews: [review()], resolutions: [] }))
       .toMatchObject({ approved: true })
     expect(planReviewGateDecision({ candidateDigest: digest('a'),
       reviews: [review({ outcome: 'unavailable', assessment: undefined, unavailableReason: 'timeout' })], resolutions: [] }))
-      .toMatchObject({ approved: true })
+      .toMatchObject({ approved: false, reason: 'unavailable' })
   })
 
   it('does not treat a different digest as approved by an earlier review', () => {
@@ -1103,17 +1419,40 @@ describe('plan review gate decision', () => {
     expect(planReviewGateDecision({ candidateDigest: digest('a'), reviews,
       resolutions: [{ candidateDigest: digest('a'), round: 1, dispositions: dispositions('overridden'), revisedCandidateDigest: digest('b') }] }))
       .toMatchObject({ approved: false })
+    // A revision that resolves to the candidate in hand did change nothing after all: the
+    // round-1 override stands for this digest and the plan dispatches without another round.
+    expect(planReviewGateDecision({ candidateDigest: digest('a'), reviews,
+      resolutions: [{ candidateDigest: digest('a'), round: 1, dispositions: dispositions('overridden'), revisedCandidateDigest: digest('a') }] }))
+      .toMatchObject({ approved: true })
     // A mix that accepted anything is a claim of change, never an approval.
     expect(planReviewGateDecision({ candidateDigest: digest('a'), reviews,
       resolutions: [{ candidateDigest: digest('a'), round: 1, dispositions: dispositions('accepted') }] }))
       .toMatchObject({ approved: false })
   })
 
+  // Severity is the coordinator's business, not the gate's: the gate sees dispositions only.
+  // `fusion_delegate` refuses an `overridden` disposition for a blocking concern outright, so
+  // a blocking finding never reaches the gate as an all-override. This records that split, so
+  // a later refactor cannot quietly move the severity rule into the gate (or drop it there).
+  it('leaves the blocking-concern refusal to the coordinator', () => {
+    const reviews = [review({ assessment: concernsAssessment(digest('a'), 1) as never })]
+    const blocking = concernsAssessment(digest('a'), 1)
+    blocking.materialAmbiguities[0]!.severity = 'blocking-concern' as never
+    const blockingReview = [review({ assessment: blocking as never })]
+    expect(planReviewGateDecision({ candidateDigest: digest('a'), reviews: blockingReview,
+      resolutions: [{ candidateDigest: digest('a'), round: 1, dispositions: dispositions('overridden', 1) }] }))
+      .toMatchObject({ approved: true })
+    // A warning-only review closes the same way: the gate's answer does not depend on severity.
+    expect(planReviewGateDecision({ candidateDigest: digest('a'), reviews,
+      resolutions: [{ candidateDigest: digest('a'), round: 1, dispositions: dispositions('overridden', 1) }] }))
+      .toMatchObject({ approved: true })
+  })
+
   it('continues round 2 after an interrupted request instead of repeating round 1', () => {
     const decision = planReviewGateDecision({ candidateDigest: digest('b'),
       reviews: [review({ assessment: concernsAssessment(digest('a')) as never })],
       resolutions: [{ candidateDigest: digest('a'), round: 1, dispositions: dispositions('accepted'), revisedCandidateDigest: digest('b') }] })
-    expect(decision).toEqual({ approved: false, round: 2, reason: 'interrupted-round-2' })
+    expect(decision).toEqual({ approved: false, round: 2, reason: 'interrupted-review' })
   })
 
   it('lets a round-2 review close by overriding everything, and not before', () => {
@@ -1124,6 +1463,40 @@ describe('plan review gate decision', () => {
       resolutions: [{ candidateDigest: digest('a'), round: 2, dispositions: dispositions('overridden') }] }))
       .toMatchObject({ approved: true })
   })
+
+  // The loop runs three rounds: round 1 and 2 can send a repaired plan back for review, and
+  // round 3 is the last, so only there does overriding everything close the question.
+  it('reaches round 3 and stops there', () => {
+    expect(FOREMAN_MAX_REVIEW_ROUNDS).toBe(3)
+
+    // An interrupted review continues at the round that was due, one round at a time.
+    expect(planReviewGateDecision({ candidateDigest: digest('b'),
+      reviews: [review({ assessment: concernsAssessment(digest('a')) as never })],
+      resolutions: [{ candidateDigest: digest('a'), round: 1, dispositions: dispositions('accepted'), revisedCandidateDigest: digest('b') }] }))
+      .toMatchObject({ approved: false, round: 2 })
+    expect(planReviewGateDecision({ candidateDigest: digest('c'),
+      reviews: [review({ round: 2, assessment: concernsAssessment(digest('b')) as never }, digest('b'))],
+      resolutions: [{ candidateDigest: digest('b'), round: 2, dispositions: dispositions('accepted'), revisedCandidateDigest: digest('c') }] }))
+      .toMatchObject({ approved: false, round: 3 })
+
+    // Round 3 exists, is reached, and closes by overriding everything — it is the last round.
+    const third = [review({ round: 3, assessment: concernsAssessment(digest('c')) as never }, digest('c'))]
+    expect(planReviewGateDecision({ candidateDigest: digest('c'), reviews: third, resolutions: [] }))
+      .toMatchObject({ approved: false })
+    expect(planReviewGateDecision({ candidateDigest: digest('c'), reviews: third,
+      resolutions: [{ candidateDigest: digest('c'), round: 3, dispositions: dispositions('overridden') }] }))
+      .toMatchObject({ approved: true, round: 3 })
+
+    // There is no fourth round: a resolution recorded at round 3 does not continue anywhere,
+    // and a record claiming round 4 is not consulted at all.
+    expect(planReviewGateDecision({ candidateDigest: digest('d'),
+      reviews: third,
+      resolutions: [{ candidateDigest: digest('c'), round: 3, dispositions: dispositions('accepted'), revisedCandidateDigest: digest('d') }] }))
+      .toEqual({ approved: false, round: 1, reason: 'unreviewed' })
+    expect(planReviewGateDecision({ candidateDigest: digest('d'),
+      reviews: [review({ round: 4, assessment: readyAssessment(digest('d')) as never }, digest('d'))], resolutions: [] }))
+      .toEqual({ approved: false, round: 1, reason: 'unreviewed' })
+  })
 })
 
 describe('foreman review budgets: a stall is not the same answer as a slow reviewer', () => {
@@ -1133,6 +1506,7 @@ describe('foreman review budgets: a stall is not the same answer as a slow revie
     schemaVersion: 1,
     candidateDigest: candidate.order.candidateDigest,
     verdict: 'ready',
+    inspected: INSPECTED(),
     acceptanceAudit: { uncoveredRequirements: [], weakOracles: [], falseGreenScenarios: [] },
     decisionChallenges: { unsupportedDecisions: [], counterexamples: [], unresolvedCriticalAssumptions: [] },
     materialAmbiguities: [],
@@ -1148,7 +1522,7 @@ describe('foreman review budgets: a stall is not the same answer as a slow revie
       taskId: TaskId('task-1'),
       profile: { digest: 'profile-digest', foreman },
     } as unknown as SessionBinding
-    return new NativePlanReviewService(ctx, { id: 'agent-1' } as Agent, binding, new NativeAuxiliaryRequests())
+    return new NativePlanReviewService(ctx, workspaceAgent(), binding, new NativeAuxiliaryRequests())
   }
 
   // The observed failure: the route produced no chunk at all and the call was ended by one

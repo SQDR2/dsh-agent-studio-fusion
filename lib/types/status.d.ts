@@ -36,17 +36,14 @@ export interface FusionStatus {
             compactor: PhysicalRoute | null;
         };
         /**
-         * Role-separated sandbox modes, present while Fusion confines the Lead. The
-         * composer's own permission control follows the conversation (Lead) session,
-         * so the UI shows these instead of the derived preset name.
+         * Per-role sandbox modes, present while Fusion owns the conversation. Both roles run
+         * under the mode the user chose; the field stays so the UI can name whichever role is
+         * working without re-deriving Fusion's state.
          */
         permissions?: {
-            /**
-             * What the Lead's own work is confined to. The session is widened only for the
-             * checks Fusion runs itself and for the Lead during a Host-unlocked takeover.
-             */
+            /** What the Lead runs under: the user's mode for this conversation. */
             lead: SandboxMode;
-            /** What the Sidekick runs under: the mode the user chose for this conversation. */
+            /** What the Sidekick runs under: the same user mode. */
             worker: SandboxMode;
             /** The role working right now; null while the task waits. */
             active: Role | null;

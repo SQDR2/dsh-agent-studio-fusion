@@ -1,6 +1,7 @@
 # Devin CLI 的 Fusion 是怎么做的 —— 二进制取证与 dsh-fusion 逐项对比
 
 > 取证对象：`devin 3000.12.32`（`/home/zlw/.local/share/devin/cli/_versions/current/bin/devin`）
+> 2026-11-19 复核：现行 `devin 3000.14.30821`（`a09cd7f323ee`），SHA-256 `b855dafc39ab228c7394cf1d16d60df583fdc75c613a544afff5cd9dd5583f24`，257,086,440 字节。§1–§9 仍是 3000.12.32 的结论；版本间的差异与新增证据见 §10。
 > SHA-256 `9f9c08774f928ef1b4c7d1a77d3d185318921c79a9a5b6e04b7c0663bc416ab5`，209,703,784 字节，ELF x86-64 static-pie，已 strip。
 > 对比对象：本仓库（dsh-fusion 0.3.8）。
 > 本文所有偏移都是 ELF 文件偏移；该二进制的 `.rodata` 段 `p_offset == p_vaddr`（0x84a1000），所以偏移可以直接当 `.rodata` 虚拟地址用。
@@ -13,7 +14,7 @@ Devin 的 Fusion 在**机制上很薄、在提示词上很厚**：一个配对�
 
 dsh-fusion 走的是相反的路：把角色分离下沉到**工具表 + 沙箱 + 宿主执行验收命令**。所以在两件事上它比 Devin 硬：
 
-- **Lead 真的写不了东西**（Devin 的 Lead 能写，只是会被提醒别写）；
+- **一个工作区只有一个写者，由宿主保证**（Devin 只提醒 Lead 与 sidekick 可能同时在改同一个工作区，见 §10.1）。注：本仓库 v2 之后 Lead 不再被强制只读，旧版"Lead 真的写不了东西"这条差异已不成立；
 - **验收命令由宿主在真实环境跑，结果由宿主记录**（Devin 是 sidekick 自己跑、自己汇报，Lead 只审"它交回来的产物"）。
 
 但有 4 处 dsh-fusion 明确缺东西，且都不是"再加一句话"能补的：
@@ -208,7 +209,7 @@ sidekick 的**权威上限**（与工具描述同区，偏移 `0x85db4a5`）：
 
 > Fix something yourself only if it's truly one or two of your own turns including any verification (revert a churned lockfile, drop a stray import); anything that needs tests run or might cascade goes back to the sidekick as one consolidated brief.
 
-> 该结论已记为 unknown `unk_08ba65…`：没有反编译，无法确认工具表是否真的按角色裁剪。
+> 该结论已记为 unknown `unk_08ba65…`：没有反编译，无法确认工具表是否真的按角色裁剪。3000.14.30821 上的补充见 §10：能看到的机制（沙箱 flag、权限模式、harness 开关）都是会话级或 provider 级，没有「按角色裁剪工具表」这一层，因此这里仍按 [推断] 记录。
 
 ### 2.8 不可委派红线（brief 直接 INVALID）
 
@@ -303,7 +304,7 @@ chisel-agent/src/acp_server/agent_impl.rs          （306 处）
 | 每角色独立模型 / 推理强度 | **对齐** | `PhysicalRoute{provider,model,reasoningEffort}`，lead/worker 各一份（`contracts/fusion.ts`） |
 | 每角色独立上下文预算 | **更强** | `LEAD_DEFAULT` / `WORKER_DEFAULT`（`src/profile/resolve.ts:50,64`）：`compactToFraction` 0.5 vs 0.55、`evidenceReadTokens` 4k vs 8k、`maxToolVisibleTokens` 6k vs 8k |
 | 独立压缩模型 | **对齐** | `profile.compactor` + `routeNativeCompaction`（`src/host/native-compaction.ts`） |
-| 角色分离 | **更强（机制化）** | Lead 工具表被裁剪 + 沙箱只读 + 错误码 `FUSION_LEAD_READ_ONLY`（`src/host/native-role-sandbox.ts:144`、`src/host/coordinator.ts:1301`） |
+| 角色分离 | **更强（机制化）** | 两个角色跑用户自己的模式；硬约束是"一个工作区一个写者"（写租约 + `FUSION_LEAD_WRITE_CONFLICT`，`src/host/workspace-guard.ts:27`）与 Lead 目录里不含 Sidekick 协议（`src/host/coordinator.ts:353`）。`FUSION_LEAD_READ_ONLY` 与只读沙箱在 v2 已移除 |
 | 验收 | **更强（宿主执行）** | 宿主在真实环境跑冻结命令：parser 计数、`definitionPaths` 字节冻结、`independent` 并发、`baseline: no-new-failures`、`timeoutSeconds`（`prompts/lead.md` L19–L26、`src/host/native-checks.ts`） |
 | 用户硬要求逐条核对 | **更强（Devin 没有）** | `fusion_delegate` 强制 `requirements` 逐字引用（`src/host/coordinator.ts:1682`），accept 必须 `{index, met, evidence}`，另有 `literalSpansMissing` |
 | 成本核算 | **更强** | `computeSavings` 分出 `basis / priced / unpriced / incomplete / unknown`（`src/usage/cost.ts`、`src/host/status.ts:161`）；Devin 只有一个"按 lead 价折算"的估算 |
@@ -435,7 +436,7 @@ Devin 在 Lead 真的自己动手时注入 `first_edit_reminder`。dsh-fusion �
 | id | 问题 |
 |---|---|
 | `unk_de3879c57c7e297adfa056f9999b5b571b303a34da474e7c74879c8d14532bb5` | 后端如何决定配对（`AssignModel` / `assignment_jwt` / `isFusionCompatible`），客户端是否本地复核 |
-| `unk_08ba6543f931de27ac60836461bc0862be79ea2b8026cc087fbe8d34880b28bb` | Lead 的请求工具表是否真的含写工具（决定 §2.7 是"提示词约束"还是"工具表约束"） |
+| `unk_08ba6543f931de27ac60836461bc0862be79ea2b8026cc087fbe8d34880b28bb` | Lead 的请求工具表是否真的含写工具（决定 §2.7 是"提示词约束"还是"工具表约束"）。**部分解答**：3000.14.30821 上未发现任何按角色裁剪工具的机制（§10.2），运行记录未复核，故仍未关闭 |
 | `unk_999a361acc291f1c6e3ec59d3b9ef857867991cb91c75f67a907e88fb73295ba` | sidekick 的上下文/压缩预算（`DEVIN_SIDEKICK_COMPACTION_THRESHOLDS` 默认值）与首轮 handoff 共享多少 Lead 对话 |
 
 证据包：`/tmp/devin-re/rea-evidence.json`（3 条 evidence + 3 条 unknown）。
@@ -640,3 +641,53 @@ jobs-local/src/index.ts:655   private async disposeOwned(owner) {
   - **declared**：后台 job 在跑 → 声明 → 报告落库（`phase: COMPLETED`，未被 pending 阻塞）→ journal 有 `retained.purpose`/`deadlineAt` → `runtime-handle` 有 `commandDigest` 且状态 `ended` → 下一次 Worker 请求里出现 "Processes the previous handoff declared" 与该 purpose → 结束时 job 已不在运行；
   - **undeclared**：未开 `preserveRuntime` 时报告被拒，文案点名 `fusion_declare_runtime` 或"先收尾"。
 - 全量：`pnpm test` 503/503；`pnpm test:host` 282 通过 / 1 跳过（仅 Windows ACL）。
+
+## 10. 3000.14.30821 复核：Devin 的 Lead 没有被沙箱化
+
+§1–§9 取证于 `3000.12.32`。本机现行版本是 `3000.14.30821`（`a09cd7f323ee`），SHA-256 `b855dafc39ab228c7394cf1d16d60df583fdc75c613a544afff5cd9dd5583f24`，257,086,440 字节。这一节只回答一个问题：**Devin 的 Lead 是不是被沙箱化 / 被剥夺了写权限？**答案是否，并给出这一版上可复核的证据；同时记录它对本仓库 v2 改造的影响。
+
+### 10.1 证据
+
+**[观察·文档] 沙箱是整个 CLI 的一个 flag，不是角色属性。** `share/devin/docs/sandbox.mdx:7`：
+
+> The `--sandbox` flag runs the CLI with OS-level isolation, enforcing writable paths and `deny` rules at the operating-system level and optionally restricting network traffic.
+
+三点可复核：命令行验收（`sed -n 7p $DOCS/sandbox.mdx`）；它约束的是**命令**（sandboxed commands / exec-tool processes），不是某个模型的工具表；全篇没有 lead / sidekick / fusion 字样（`grep -in "lead|sidekick|fusion" sandbox.mdx` 无输出）。所以"Lead 被沙箱化"在 Devin 里没有对应机制可循。
+
+**[观察·静态] Lead 的提示词把角色描述成「一个工具 + 谁负责结果与权威动作」，不是「谁有写权限」。** `strings -n 200 bin/devin | grep 'You are the lead'`：
+
+> You have a `{SIDEKICK_TOOL}` tool: a persistent subagent that works alongside you on the same machine (shared filesystem and repos; its shell sessions are separate from yours). You are the lead: you own the outcome and the user-facing and authority actions
+
+同一个二进制里，sidekick 那一侧的可配置项也是"指导"而不是"限制"，`--sidekick-prefer-exec-tool`：
+
+> Give the Local Fusion sidekick the shell-first file-operation guidance. Hidden from `--help`
+
+**[观察·静态] 权限模式是会话级的，没有 per-role mode。** `--permission-mode` 的帮助文本：
+
+> Modes: "auto" auto-approves read-only tools, "accept-edits" also auto-approves workspace edits, "smart" additionally auto-runs actions a fast model judges safe, "dangerous" auto-approves all tools. Defaults to `permission_mode` from the config file, then "auto".
+
+**[观察·静态] 唯一能按角色单独指定的是 harness（provider 侧），仍不是沙箱。** `--harness-lead-only` / `--harness-sidekick-only`：
+
+> HARNESS_LEAD_ONLY Apply `--harness` only to the lead, keeping the sidekick's registry harness
+
+**[观察·静态] 并发靠"提醒"，不靠互斥。** agent 的系统提示词里有一条：
+
+> You may be in a dirty git worktree, and the worktree may change underneath you while you work — either because the user made changes out-of-band, or because another agent is working in the same repo at the same time.
+
+也就是说 Devin 明确告诉 Lead"另一个 agent 可能在同时改这个仓库"，而不是用写租约把其中一方挡住。
+
+### 10.2 结论与仍未解决的部分
+
+[推断] Devin 的 Lead 与 sidekick 共用同一套沙箱与权限：沙箱是会话级 flag、权限模式是会话级设置，角色差异体现在工具（`{SIDEKICK_TOOL}`）与提示词。这**部分解答**了 §6 的 `unk_08ba65…`：在这版二进制里找不到"按角色裁剪工具表"的机制。但"Lead 的请求里实际带了哪些工具名"没有从运行记录里读出来（`sessions.db` 未复核），所以 §2.7 的「Lead 保留写工具」仍按 [推断] 记录——现在有两处独立旁证，而不是一条提示词。
+
+### 10.3 对本仓库的影响（v2 之后）
+
+1.2.x 的 v2 改造放弃了"Lead 只读"。旧文"dsh-fusion 比 Devin 硬的地方是 Lead 真的写不了东西"不再成立；两边现在都允许 Lead 写，差别移到下面两处：
+
+| 维度 | Devin 3000.14.30821 | dsh-fusion（v2 之后） |
+|---|---|---|
+| Lead 是否被沙箱限制 | 否：会话级 `--sandbox` / `--permission-mode` | 否：与用户同模式（`src/host/native-role-sandbox.ts`） |
+| 并发写怎么处理 | 提示词提醒"可能有人在同时改" | 宿主：写租约；Worker 持租约时 Lead 的写入被拒，`FUSION_LEAD_WRITE_CONFLICT`（`src/host/workspace-guard.ts:27`） |
+| 验收由谁执行 | sidekick 自己跑、写进报告 | 宿主在真实环境跑冻结命令（`src/host/native-checks.ts`） |
+
+**代价**：v2 之后 dsh-fusion 与 Devin 一样，靠提示词约束"Lead 不要抢着实现"；区别是它至少还有一道并发边界，而 Devin 连这道边界也只有一句提醒。

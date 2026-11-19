@@ -11,7 +11,15 @@ describe('workspace write lease guard', () => {
   })
 
   it('still denies a Fusion agent that does not hold the lease', () => {
-    expect(denial()).toBe('Workspace writer is fusion-worker; this Agent is read-only')
+    // One writer per workspace, not a capability cap: the refusal names the conflict and the
+    // documented way out instead of calling the other side read-only.
+    expect(denial()).toContain('FUSION_LEAD_WRITE_CONFLICT')
+    expect(denial()).toContain('workspace writer is fusion-worker')
+    expect(denial()).toContain('fusion_takeover')
+  })
+
+  it('keeps reads and searches working while the other side holds the lease', () => {
+    expect(denial({ exempt: true })).toBeUndefined()
   })
 
   it('allows the Fusion holder, a read or control tool, and a different directory with no lease', () => {

@@ -10,9 +10,9 @@ import { NativeWorkerNotices } from './native-worker-notices.js'
 import { SessionId as NativeSessionId } from '@deepseek-ai/dsh-session'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ToolExecution, ToolRunContext } from '@deepseek-ai/dsh-tools'
-import type { AuthorityAction, Digest, ExplorationReport, ForemanAssessment, ForemanDisposition, ForemanFinding, FusionEvent, PlanReviewCandidate, PlanReviewCheckDefinition, PlanReviewRecord, RequirementCoverage, Role, RuntimeHandle, TaskId, WorkerReport, WorkOrder } from '../contracts.js'
+import type { AuthorityAction, Digest, ExplorationReport, ForemanAssessment, ForemanDisposition, ForemanFinding, FusionEvent, PhysicalRoute, PlanReviewCandidate, PlanReviewCheckDefinition, PlanReviewRecord, RequirementCoverage, Role, RuntimeHandle, TaskId, WorkerReport, WorkOrder } from '../contracts.js'
 import { EpochId, OperationId, PUBLICATION_PROHIBITION, SessionId, SnapshotId, TaskId as asTaskId, WorkOrderId } from '../contracts.js'
-import { candidateDigest, semanticCandidateProjection, assertValidPlanReviewCandidate, lintPlanReviewCandidate, collectForemanFindings, foremanAssessmentSchema, planReviewGateDecision, type PlanReviewModule, type PlanReviewOutcome } from '../plan-review.js'
+import { candidateDigest, semanticCandidateProjection, assertValidPlanReviewCandidate, lintPlanReviewCandidate, collectForemanFindings, foremanAssessmentSchema, planReviewGateDecision, FOREMAN_MAX_REVIEW_ROUNDS, type PlanReviewModule, type PlanReviewOutcome } from '../plan-review.js'
 import { NativePlanReviewService } from './plan-review.js'
 import { digestOf } from '../digest.js'
 import { WorkspaceWriteLease } from '../execution/write-lease.js'
@@ -96,6 +96,12 @@ function formatForemanConcerns(assessment: ForemanAssessment, round: number): st
     if (f.suggestedCorrection) {
       lines.push(`  Suggested correction: ${f.suggestedCorrection}`)
     }
+    for (const citation of f.evidence ?? []) {
+      lines.push(`  Evidence: ${citation.path}:${citation.startLine}-${citation.endLine}`)
+    }
+  }
+  if (findings.some(f => f.severity === 'blocking-concern')) {
+    lines.push('', 'A blocking concern cannot be overridden: revise the plan and answer it with action "accepted", or ask the user how to proceed.')
   }
   return lines.join('\n')
 }
@@ -105,8 +111,21 @@ const BACKGROUND_HANDOFF_PAUSE = 'Lead turn stopped during a background handoff'
 const textOutput = { schema: { type: 'string' as const }, render: (_args: unknown, text: string) => [{ type: 'text' as const, text }] }
 const stringList = { type: 'array' as const, items: { type: 'string' as const }, required: true as const }
 const optionalStringList = { type: 'array' as const, items: { type: 'string' as const } }
-const FUSION_TOOLS = new Set(['fusion_read_state', 'fusion_delegate_text', 'fusion_explore', 'fusion_delegate', 'fusion_rework', 'fusion_wait', 'fusion_review_result', 'fusion_submit_result', 'fusion_takeover', 'fusion_finish_direct', 'fusion_read_evidence', 'fusion_declare_runtime'])
+const FUSION_TOOLS = new Set(['fusion_read_state', 'fusion_plan_discussion', 'fusion_resume_plan', 'fusion_delegate_text', 'fusion_explore', 'fusion_delegate', 'fusion_rework', 'fusion_wait', 'fusion_review_result', 'fusion_submit_result', 'fusion_takeover', 'fusion_finish_direct', 'fusion_read_evidence', 'fusion_declare_runtime'])
 const WORKER_FUSION_TOOLS = new Set(['fusion_submit_result', 'fusion_read_state', 'fusion_read_evidence', 'fusion_declare_runtime'])
+interface ForemanRecovery {
+  commandId: string
+  candidateDigest: Digest
+  round: number
+  failureWorkOrderId: WorkOrder['id']
+  action: 'retry' | 'skip'
+  route?: PhysicalRoute
+  note?: string
+}
+interface ExplorationGrant { commandId: string; scope: string; used?: true }
+interface PlanningDiscussion { openedAt: number; finalizedAt?: number }
+interface FrozenPlanInput { sourceSeq: number; args: DelegateInput; mode: 'text' | 'implement' }
+const FOREMAN_BLOCKED = 'Foreman review unavailable; Sidekick dispatch is blocked. Ask the user to use /fusion foreman-retry, /fusion foreman-model <provider/model>, or /fusion foreman-skip <reason>. Then call fusion_resume_plan for the exact saved plan.'
 export interface CoordinatorOptions {
   profile: ResolvedProfile
   workerTools: readonly string[]
@@ -320,8 +339,18 @@ export const normalizeQuote = (text: string) => text.replace(/\s+/g, ' ').trim()
 /** Literal code spans (`like this`) a requirement asks for; a candidate that omits them gets flagged. */
 export const literalSpans = (text: string) => [...new Set([...text.matchAll(/`([^`\n]{2,120})`/g)].map(match => match[1]!))]
 
-/** The enforced-v3 Lead's fixed catalog (order is part of the cached prompt prefix). */
-const SEPARATED_LEAD_TOOLS: readonly string[] = [...new Set([...READ_TOOLS, nativeShellTool, ...[...FUSION_TOOLS].filter(name =>
+/**
+ * The enforced-v3 Lead's fixed catalog (order is part of the cached prompt prefix).
+ *
+ * It carries the same inspection and editing tools a normal agent has — read, search, shell,
+ * write, edit — because discipline is the prompt's job and the Host's job is the concurrency
+ * boundary, not a capability cap. `job_kill` comes with them: the Lead may now start a
+ * background command, and the message that stops a handoff while one is running names
+ * `job_output`/`job_kill` as the way out, so the way out has to be callable. What stays out is
+ * the Sidekick's own protocol: submitting a report, finishing directly, declaring a runtime, or
+ * taking over before the Host unlocks it.
+ */
+const SEPARATED_LEAD_TOOLS: readonly string[] = [...new Set([...READ_TOOLS, nativeShellTool, 'write', 'edit', 'job_kill', ...[...FUSION_TOOLS].filter(name =>
   !['fusion_takeover', 'fusion_submit_result', 'fusion_finish_direct', 'fusion_declare_runtime'].includes(name))])]
 
 /** Test files by common conventions (Python, JS/TS, Go, Rust and generic test directories). */
@@ -442,6 +471,12 @@ export class FusionCoordinator {
         if (!binding.workerId && previous.acceptedChild) this.bindings.assignWorker(agent.id, binding.taskId, previous.acceptedChild)
         const nextTask = asTaskId(randomUUID())
         this.#createTask(agent, nextTask, { profile: binding.profile, prompts: binding.prompts }, binding.taskId)
+        const grantId = `explore-grant:${binding.taskId}`, grantRow = store.readDocument(grantId)
+        const grant = grantRow?.value as ExplorationGrant | undefined
+        if (grant && !grant.used) {
+          store.writeDocument(grantId, grantRow!.revision, { ...grant, used: true })
+          store.writeDocument(`explore-grant:${nextTask}`, 0, grant)
+        }
         return this.bindings.rollover(agent.id, binding.taskId, nextTask)
       },
       taskContext: (agent, binding, role) => binding.profile.interactionMode === 'model-like'
@@ -460,7 +495,7 @@ export class FusionCoordinator {
       modelLimits: (provider, model) => resolveModelOutputLimits(this.ctx, provider, model),
       beforeRequest: (agent, turn, step, binding, role) => {
         this.options.authorizeRequest(agent, binding, role, turn, step)
-        this.roleSandbox.ensure(agent, binding, role, role === 'lead' && this.#leadWriter(binding, agent))
+        this.roleSandbox.ensure(agent, binding, role)
         const state = this.state(binding.taskId)
         if (role === 'lead' && state.activeReviewTicket) captureNativeReviewRequest(store, agent, turn, step, state.activeReviewTicket)
         if (role === 'worker') {
@@ -673,7 +708,22 @@ export class FusionCoordinator {
       if (message) agent.session.append('user/message', message, { surfaceOp: 'append' })
     }))
     this.#dispose.push(ctx.on('session/event', (session, event) => {
-      if (event.type !== 'user/message' || event.data.source && event.data.source.kind !== 'user') return
+      if (event.type !== 'user/message') return
+      const source = event.data.source as { kind: string; name?: string } | undefined
+      // Slash invocations commit a trusted skill source. The common grilling
+      // entry points open the discussion even if the Lead forgets the tool;
+      // other interactive skills declare it through fusion_plan_discussion.
+      if (source?.kind === 'skill-invocation' && ['grill-me', 'grilling'].includes(source.name ?? '')) {
+        const binding = this.bindings.read(session.id)?.binding
+        if (!binding?.selected) return
+        const state = this.state(binding.taskId)
+        if (state.control.mode !== 'running' || state.currentWorkOrder && state.currentWorkOrder.mode !== 'explore') return
+        const id = `plan-discussion:${binding.taskId}`, row = store.readDocument(id)
+        const prior = row?.value as PlanningDiscussion | undefined
+        if (!prior || prior.finalizedAt !== undefined) store.writeDocument(id, row?.revision ?? 0, { openedAt: event.seq } satisfies PlanningDiscussion)
+        return
+      }
+      if (source && source.kind !== 'user') return
       const binding = this.bindings.read(session.id)?.binding
       if (!binding?.selected) return
       const id = `task-index:${binding.taskId}`, row = store.readDocument(id)
@@ -693,7 +743,9 @@ export class FusionCoordinator {
         }
         return
       }
-      if (state.currentWorkOrder || state.control.mode !== 'running' || this.modelControl.blocked(binding, 'lead')) return
+      if (state.currentWorkOrder || state.pendingPlanReview || state.latestPlanReview || state.control.mode !== 'running' || this.modelControl.blocked(binding, 'lead')) return
+      const discussion = store.readDocument(`plan-discussion:${binding.taskId}`)?.value as PlanningDiscussion | undefined
+      if (discussion && discussion.finalizedAt === undefined) return
       if (state.lease && binding.profile.interactionMode !== 'model-like') return
       if (this.effects.pending(binding.taskId).length) return
       try {
@@ -1118,24 +1170,20 @@ export class FusionCoordinator {
   /**
    * Say, where the user is reading, that this candidate was never audited.
    *
-   * A review that times out or exceeds its output budget is recorded as `unavailable`, and
-   * `planReviewGateDecision` reads that as approval ("ready, unavailable, or overridden"),
-   * so a configured reviewer silently stops reviewing. The status panel carries the reason,
-   * but it is easy to miss there. One notice per reviewed candidate puts it in the
-   * transcript, which is also the Lead's context, so the next turn can tell the user
-   * instead of assuming an audit happened.
+   * The status panel carries the reason, but it is easy to miss there. Put the reason
+   * and the dispatch block in the transcript, which is also the Lead's context.
    */
   #announcePlanReviewUnavailable(agent: Agent, binding: SessionBinding, record: PlanReviewRecord): void {
     try {
-      // Keyed by what was reviewed: a replay of the same candidate must not speak twice.
-      const id = `plan-review-notice:${binding.taskId}:${record.candidateDigest}:${record.round}`
+      // Each failed attempt has its own reason; replaying it must not speak twice.
+      const id = `plan-review-notice:${binding.taskId}:${record.workOrderId}:${record.round}`
       if (this.store.readDocument(id)) return
       const reason = record.unavailableReason ?? bi('未记录原因', 'reason not recorded')
       const message = createUserMessage({ source: { kind: FUSION_SOURCE_KIND, form: 'notice',
         summary: bi('本次计划审查未生效', 'The plan review did not run') },
         content: [{ type: 'text', text: bi(
-          `工长没有产出审查结论（${reason}），这份候选计划未经独立审查。门禁因此没有生效，任务按失败开放策略继续执行。`,
-          `The Foreman produced no verdict (${reason}), so this candidate was never independently audited. The gate therefore did not apply and the task continued under the fail-open policy.`) }] })
+          `工长没有产出审查结论（${reason}），这份候选计划未经独立审查，尚未派工。`,
+          `The Foreman produced no verdict (${reason}). This candidate has not been independently audited or dispatched.`) }] })
       const event = agent.session.append('user/message', message, { surfaceOp: 'append' })
       this.store.writeDocument(id, 0, { schemaVersion: 1, taskId: binding.taskId,
         candidateDigest: record.candidateDigest, round: record.round, eventSeq: event.seq })
@@ -1620,12 +1668,15 @@ export class FusionCoordinator {
       ? undefined : [...READ_TOOLS, ...FUSION_TOOLS]
   }
 
-  /** Whether this dispatch only reads: a read tool, or a shell the role sandbox still confines. */
+  /**
+   * Whether this dispatch only reads.
+   *
+   * A Lead shell is no longer read-only by construction: the Lead runs in the user's own mode,
+   * so a command can write. It therefore counts as an effect, which is what keeps a gated
+   * (paused, interrupted or completed) turn from running one.
+   */
   #readOnlyDispatch(exec: Readonly<ToolExecution>, role: Role): boolean {
-    if (role !== 'lead') return false
-    if (isRead(exec)) return true
-    if (!isShellTool(exec.name)) return false
-    return this.roleSandbox.leadShellProblem(exec) === undefined
+    return role === 'lead' && isRead(exec)
   }
 
   /**
@@ -1672,7 +1723,7 @@ export class FusionCoordinator {
       const problem = completedToolProblem({
         role,
         read: isRead(exec),
-        confinedShell: role === 'lead' && isShellTool(exec.name) && this.roleSandbox.leadShellProblem(exec) === undefined,
+        shell: role === 'lead' && isShellTool(exec.name),
       })
       if (problem) return problem
     }
@@ -1809,10 +1860,15 @@ export class FusionCoordinator {
   }
 
   /**
-   * enforced-v3 role separation: the Lead never holds execution tools. It may
-   * read, run shell commands the Host confines to read-only, and coordinate.
-   * Every change goes through the Sidekick. The only exception is a takeover the
-   * Host unlocks from objective state (#escalation), never the Lead's choice.
+   * enforced-v3 role separation, carried by the prompt and one concurrency rule.
+   *
+   * The Lead runs with the user's own permissions: it reads, searches, runs commands and may
+   * write, because the expensive model is expected to follow the delegation rule in its prompt
+   * rather than be fenced out of the workspace. The Host enforces what a prompt cannot: one
+   * writer per workspace, so a Lead write or command that could change files is refused while
+   * the Sidekick holds the lease (by the writer guard, for both roles alike). The Sidekick's
+   * own protocol tools — submitting a report, finishing directly, taking over before the Host
+   * unlocks it — stay closed to the Lead.
    */
   #separatedLeadTools(_state: TaskState, binding: SessionBinding): readonly string[] {
     // One catalog for the whole conversation. Tools sit in the prompt prefix, so a phase-dependent catalog
@@ -1844,23 +1900,18 @@ export class FusionCoordinator {
     if (this.#leadWriter(binding, exec.agent!)) return exec.name === 'fusion_finish_direct' ? 'Submit the correction with fusion_submit_result; the frozen checks decide' : false
     if (exec.name === 'fusion_takeover' && this.#escalation(binding)) return false
     if (exec.name === 'fusion_takeover') {
-      return `FUSION_LEAD_READ_ONLY: takeover unlocks only when the Host sees the Sidekick cannot finish: ${ESCALATE_AFTER_REWORKS} rework rounds with checks still failing (after you record a rework review), its step limit, or repeated stalls. Until then send corrections with fusion_rework.`
+      return `FUSION_LEAD_TAKEOVER_LOCKED: takeover unlocks only when the Host sees the Sidekick cannot finish: ${ESCALATE_AFTER_REWORKS} rework rounds with checks still failing (after you record a rework review), its step limit, or repeated stalls. Until then send corrections with fusion_rework.`
     }
+    // The Sidekick's protocol is not the Lead's: a report is what the Worker submits, and
+    // finishing directly closes the user's task, so neither can be forged from this side.
     if (exec.name === 'fusion_submit_result' || exec.name === 'fusion_finish_direct') {
-      return 'FUSION_LEAD_READ_ONLY: in this Fusion mode the Lead never writes. Send corrections to the same Sidekick with fusion_rework.'
+      return 'FUSION_SIDEKICK_PROTOCOL: a report or a direct finish is the Sidekick\'s own submission. Send corrections to the same Sidekick with fusion_rework, or answer the user directly.'
     }
     if (isRead(exec) || FUSION_TOOLS.has(exec.name)) return false
     if (isShellTool(exec.name) && this.#isNestedCheck(exec)) return false
-    if (isShellTool(exec.name) && (exec.arguments as { run_in_background?: unknown }).run_in_background === true) {
-      this.workflow.denyEffect(binding)
-      return 'FUSION_LEAD_READ_ONLY: the Lead runs only short foreground inspection commands. Test runs and long commands belong to the Sidekick: delegate them.'
-    }
-    const shell = isShellTool(exec.name) ? this.roleSandbox.leadShellProblem(exec) : undefined
-    if (isShellTool(exec.name) && !shell) return undefined
-    // Record the refusal so a text-only answer cannot mark undelegated work complete.
-    this.workflow.denyEffect(binding)
-    if (shell) return shell
-    return 'FUSION_LEAD_READ_ONLY: in this Fusion mode the Lead only reads and runs read-only commands. Every workspace change, file write or code execution goes to the Sidekick: use fusion_delegate (or fusion_delegate_text for writing without a workspace).'
+    // Everything else runs with the user's permissions. The only boundary left is the
+    // workspace write lease, and `workspaceWriterDenial` enforces it for both roles.
+    return false
   }
 
   /**
@@ -2122,9 +2173,82 @@ export class FusionCoordinator {
     throw new Error(`Acceptance commands use programs this host's check shell cannot find: ${hints.join('; ')}. Checks and the Worker run in the same non-interactive shell with the Host's PATH (a desktop app started from the Dock gets only the system PATH). Retry fusion_delegate with commands that exist here, using the absolute path shown when one is installed off PATH, and tell the Worker to use the same path.`)
   }
 
-  async delegate(agent: Agent, args: DelegateInput, exec: ToolRunContext, mode: 'explore' | 'implement' | 'text' = 'implement'): Promise<string> {
+  #planDiscussion(agent: Agent, action: 'open' | 'finalize'): string {
+    const binding = this.#binding(agent, 'lead'), state = this.state(binding.taskId)
+    if (state.pendingPlanReview || state.currentWorkOrder && state.currentWorkOrder.mode !== 'explore') {
+      throw new Error('Planning discussion must precede implementation or text dispatch.')
+    }
+    const id = `plan-discussion:${binding.taskId}`, row = this.store.readDocument(id)
+    const discussion = row?.value as PlanningDiscussion | undefined
+    const events = agent.session.snapshotEvents()
+    if (action === 'open') {
+      if (discussion && discussion.finalizedAt === undefined) return 'Planning discussion is already open; continue the skill with the user.'
+      this.store.writeDocument(id, row?.revision ?? 0, { openedAt: events.at(-1)?.seq ?? 0 } satisfies PlanningDiscussion)
+      return 'Planning discussion is open. Investigate decisive facts yourself; stop for the user’s answers as required by the skill. No finalized plan can be submitted yet.'
+    }
+    if (!discussion) throw new Error('No planning discussion was opened. If the task requires an interactive skill, open the discussion first.')
+    if (discussion.finalizedAt !== undefined) return 'Planning discussion is already finalized.'
+    const fromHuman = (kind: string | undefined) => kind === undefined || kind === 'user' || kind === 'user-question-reply'
+    const reply = events.findLast(event => event.seq > discussion.openedAt && (event.type === 'user/message'
+      && fromHuman(event.data.source?.kind) || event.type === 'agent/inbox/spliced'
+      && event.data.inserted.some(message => fromHuman(message.source?.kind))))
+    if (!reply) throw new Error('Wait for the user to respond before finalizing an interactive discussion.')
+    this.store.writeDocument(id, row!.revision, { ...discussion, finalizedAt: reply.seq })
+    return 'Planning discussion finalized. Lead owns the plan; only its finalized candidate goes to the configured Foreman before dispatch.'
+  }
+
+  /** Only the registered human command calls this; it is not a model tool. */
+  authorizeExploration(agent: Agent, commandId: string, scope: string): void {
+    const binding = this.#binding(agent, 'lead')
+    if (agent.status !== 'idle' || !commandId || !scope.trim() || this.state(binding.taskId).currentWorkOrder) {
+      throw new Error('Authorize one bounded read-only exploration while the Lead is idle and before a work order exists.')
+    }
+    const id = `explore-grant:${binding.taskId}`
+    this.store.writeDocument(id, this.store.readDocument(id)?.revision ?? 0, { commandId, scope: scope.trim() } satisfies ExplorationGrant)
+  }
+
+  /** Authorize the next attempt or bypass of exactly the failed candidate and round. */
+  authorizeForemanRecovery(agent: Agent, commandId: string, action: 'retry' | 'skip', options: { route?: PhysicalRoute; note?: string } = {}): void {
+    const binding = this.#binding(agent, 'lead'), state = this.state(binding.taskId), failure = state.latestPlanReview
+    if (agent.status !== 'idle' || !commandId || !binding.profile.foreman || state.control.mode !== 'running'
+      || state.control.recovering || state.control.outcomeUnknown || state.pendingPlanReview
+      || failure?.outcome !== 'unavailable' || state.currentWorkOrder && state.currentWorkOrder.mode !== 'explore') {
+      throw new Error('No idle, undispatched candidate is waiting for a Foreman decision in this task.')
+    }
+    if (action === 'skip' && !options.note?.trim()) throw new Error('Provide a reason to explicitly skip this failed plan review.')
+    const id = `foreman-recovery:${binding.taskId}`
+    this.store.writeDocument(id, this.store.readDocument(id)?.revision ?? 0, {
+      commandId, candidateDigest: failure.candidateDigest, round: failure.round, failureWorkOrderId: failure.workOrderId,
+      action, ...(options.route ? { route: options.route } : {}), ...(options.note ? { note: options.note.trim() } : {}),
+    } satisfies ForemanRecovery)
+  }
+
+  async #resumeForemanPlan(agent: Agent, exec: ToolRunContext): Promise<string> {
+    const binding = this.#binding(agent, 'lead'), failure = this.state(binding.taskId).latestPlanReview
+    if (failure?.outcome !== 'unavailable') throw new Error('There is no unavailable Foreman review to resume.')
+    const saved = this.store.readDocument(`foreman-input:${binding.taskId}:${failure.workOrderId}`)?.value as FrozenPlanInput | undefined
+    if (!saved) throw new Error('This older interrupted review did not save its plan input. Submit the original candidate through fusion_delegate.')
+    const { foremanDispositions: _resolved, ...args } = saved.args
+    return this.delegate(agent, args, exec, saved.mode, failure.candidateDigest)
+  }
+
+  async delegate(agent: Agent, args: DelegateInput, exec: ToolRunContext, mode: 'explore' | 'implement' | 'text' = 'implement', expectedDigest?: Digest): Promise<string> {
     const binding = await this.#readyBinding(agent, 'lead', exec.signal)
     const priorState = this.state(binding.taskId)
+    const explorationGrantRow = mode === 'explore' ? this.store.readDocument(`explore-grant:${binding.taskId}`) : undefined
+    const explorationGrant = explorationGrantRow?.value as ExplorationGrant | undefined
+    if (mode === 'explore') {
+      if (!explorationGrant || explorationGrant.used || args.goal.trim() !== explorationGrant.scope || args.brief.trim() !== explorationGrant.scope || args.constraints.length !== 0) {
+        throw new Error('Lead inspects evidence by default. For a bounded Sidekick survey, the user must first run /fusion allow-explore <scope>. Copy the authorized scope verbatim into both goal and brief and omit constraints.')
+      }
+      if (this.#routeTransport(binding, 'worker') || this.acpRunsWorker(binding)) {
+        throw new Error('This Sidekick runs its own agent tools, so Fusion cannot guarantee read-only fact collection. Lead must investigate directly.')
+      }
+    }
+    const discussion = this.store.readDocument(`plan-discussion:${binding.taskId}`)?.value as PlanningDiscussion | undefined
+    if (mode !== 'explore' && discussion && discussion.finalizedAt === undefined) {
+      throw new Error('The user discussion is still open. Finish the skill’s discussion with the user, then record finalization before submitting an implementation or text plan.')
+    }
     const held = this.#held.get(binding.taskId)
     const directHandoff = (mode === 'implement' || binding.profile.interactionMode === 'model-like') && priorState.intent === 'DIRECT' && !priorState.currentWorkOrder
       && priorState.control.mode === 'running' && !priorState.control.recovering && !priorState.control.outcomeUnknown
@@ -2223,6 +2347,9 @@ export class FusionCoordinator {
     }
     order.candidateDigest = candidateDigest(candidate)
     assertValidPlanReviewCandidate(candidate)
+    if (expectedDigest && order.candidateDigest !== expectedDigest) {
+      throw new Error('The original candidate no longer matches current requirements or workspace evidence; it cannot be retried or dispatched under the previous decision.')
+    }
 
     if (priorState.pendingPlanReview) {
       const pending = priorState.pendingPlanReview
@@ -2248,14 +2375,23 @@ export class FusionCoordinator {
       })
     }
 
-    // A configured Foreman always reviews. There is no shadow or risk-gated setting to
-    // downgrade that: a reviewer the user switched on but which silently skips work orders
-    // is indistinguishable from a broken one, and the skipped plans are exactly the ones
-    // nobody audited.
-    if (binding.profile.foreman) {
+    // An authorized read-only survey gathers inputs; it is not a finalized plan.
+    // Every finalized implementation or text candidate goes through the configured gate.
+    if (binding.profile.foreman && mode !== 'explore') {
       const currentState = this.state(binding.taskId)
       const reviews = currentState.planReviews ?? []
       const resolutions = currentState.planReviewResolutions ?? []
+      const recovery = this.store.readDocument(`foreman-recovery:${binding.taskId}`)?.value as ForemanRecovery | undefined
+      const latest = currentState.latestPlanReview
+      const frozen = { sourceSeq: source.seq, args, mode } satisfies FrozenPlanInput
+      const blocked = (reason?: string) => `${FOREMAN_BLOCKED} ${reason ?? ''}`.trimEnd()
+      if (latest?.outcome === 'unavailable' && latest.candidateDigest !== order.candidateDigest
+        && !currentState.planReviewSkips?.some(skip => skip.failureWorkOrderId === latest.workOrderId)) {
+        // A new genuine user request can supersede the failed draft. Rewording the plan
+        // or repeatedly pressing the tool on the same request is not a retry grant.
+        const sourceAtFailure = this.store.readDocument(`foreman-input:${binding.taskId}:${latest.workOrderId}`)?.value as FrozenPlanInput | undefined
+        if (sourceAtFailure && source.seq <= sourceAtFailure.sourceSeq) return blocked(latest.unavailableReason)
+      }
       // Whether this exact candidate may be dispatched without another model call.
       //
       // Approval is bound to the digest that was actually reviewed. A round-1 `accepted`
@@ -2268,8 +2404,23 @@ export class FusionCoordinator {
           dispositions: item.dispositions, ...(item.revisedCandidateDigest === undefined ? {} : { revisedCandidateDigest: item.revisedCandidateDigest }) })) })
 
       if (decision.approved) {
-        // Already approved across round 1 or round 2 (ready, unavailable, or overridden).
-        // Allow replay/retry without re-calling Foreman.
+        // Already approved across round 1 or round 2 (ready or overridden).
+      } else if (decision.reason === 'unavailable') {
+        const record = reviews.findLast(r => r.candidateDigest === order.candidateDigest && r.round === decision.round)!
+        const skipped = currentState.planReviewSkips?.some(skip => skip.failureWorkOrderId === record.workOrderId)
+        if (!skipped) {
+          if (recovery?.failureWorkOrderId !== record.workOrderId || recovery.candidateDigest !== order.candidateDigest || recovery.round !== record.round) {
+            return blocked(record.unavailableReason)
+          }
+          if (recovery.action === 'skip') {
+            this.append(binding.taskId, 'plan-review/skip-authorized', { candidateDigest: record.candidateDigest,
+              round: record.round, failureWorkOrderId: record.workOrderId, commandId: recovery.commandId, reason: recovery.note! })
+          } else {
+            const outcome = await this.#runPlanReview(agent, binding, candidate, record.round, exec.signal, recovery, frozen)
+            if (outcome.kind === 'concerns') return formatForemanConcerns(outcome.assessment, record.round)
+            if (outcome.kind === 'unavailable') return blocked(outcome.reason)
+          }
+        }
       } else {
         const unresolvedReview = [...reviews].reverse().find(r => {
           if (r.outcome !== 'assessment' || r.assessment?.verdict !== 'concerns') return false
@@ -2297,6 +2448,16 @@ export class FusionCoordinator {
               if (typeof d.reason !== 'string' || !d.reason.trim()) {
                 throw new Error(`Disposition for finding "${d.findingId}" has action "overridden" but is missing a non-empty reason.`)
               }
+              // A blocking concern is the reviewer's claim that this plan would produce the
+              // wrong result. The Lead's disagreement is not evidence against it: the whole
+              // point of an independent audit is that the author does not get to overrule it.
+              // A warning is advice and may be overridden with a reason.
+              const finding = findings.find(item => item.id === d.findingId)
+              if (finding?.severity === 'blocking-concern') {
+                throw new Error(`Finding "${d.findingId}" is a blocking concern, and a blocking concern cannot be overridden. `
+                  + 'Fix the plan so the finding no longer holds and resubmit it with action "accepted" (which sends the revision through another review round), '
+                  + 'or ask the user how to proceed. Only "warning" findings may be overridden, with a reason.')
+              }
             } else if (d.action === 'accepted') {
               if (typeof d.changeSummary !== 'string' || !d.changeSummary.trim()) {
                 throw new Error(`Disposition for finding "${d.findingId}" has action "accepted" but is missing a non-empty changeSummary.`)
@@ -2304,8 +2465,9 @@ export class FusionCoordinator {
               if (order.candidateDigest === unresolvedReview.candidateDigest) {
                 throw new Error(`Disposition for finding "${d.findingId}" was accepted, but candidate work order was not changed (digest is identical to round ${unresolvedReview.round}). Accepted findings require candidate changes.`)
               }
-              if (unresolvedReview.round >= 2) {
-                throw new Error('Foreman plan review reached the maximum of 2 review rounds. Accepted findings are not permitted in post-round-2; you must override all findings with reasons, ask the user for guidance, or abort the task.')
+              if (unresolvedReview.round >= FOREMAN_MAX_REVIEW_ROUNDS) {
+                throw new Error(`Foreman plan review reached the maximum of ${FOREMAN_MAX_REVIEW_ROUNDS} review rounds. `
+                  + 'Accepted findings are not permitted after the last round; ask the user for guidance, or abort the task.')
               }
             } else {
               throw new Error(`Invalid disposition action "${String((d as { action?: unknown }).action)}"`)
@@ -2334,10 +2496,13 @@ export class FusionCoordinator {
           })
 
           if (hasAccepted) {
-            const round2Outcome = await this.#runPlanReview(agent, binding, candidate, 2, exec.signal)
-            if (round2Outcome.kind === 'concerns') {
-              return formatForemanConcerns(round2Outcome.assessment, 2)
+            // The repaired plan owes the next round: one round per revision, up to the bound.
+            const nextRound = unresolvedReview.round + 1
+            const nextOutcome = await this.#runPlanReview(agent, binding, candidate, nextRound, exec.signal, undefined, frozen)
+            if (nextOutcome.kind === 'concerns') {
+              return formatForemanConcerns(nextOutcome.assessment, nextRound)
             }
+            if (nextOutcome.kind === 'unavailable') return blocked(nextOutcome.reason)
           }
         } else {
           if (args.foremanDispositions && args.foremanDispositions.length > 0) {
@@ -2359,14 +2524,19 @@ export class FusionCoordinator {
           // Re-running round 1 would ask the answered findings again and spend a third
           // model call on a two-call budget.
           const round = decision.round
-          const outcome = await this.#runPlanReview(agent, binding, candidate, round, exec.signal)
+          const outcome = await this.#runPlanReview(agent, binding, candidate, round, exec.signal, undefined, frozen)
           if (outcome.kind === 'concerns') {
             return formatForemanConcerns(outcome.assessment, round)
           }
+          if (outcome.kind === 'unavailable') return blocked(outcome.reason)
         }
       }
     } else if (args.foremanDispositions && args.foremanDispositions.length > 0) {
       throw new Error('Unexpected foremanDispositions: Foreman is not configured.')
+    }
+    exec.signal.throwIfAborted()
+    if (binding.profile.foreman && mode === 'implement' && snapshotWorkspace(base.root).id !== base.id) {
+      throw new Error('The workspace changed during plan review. A review or skip of the old candidate cannot authorize dispatch on a different snapshot.')
     }
     this.#assertWorkerCapacity(binding.taskId, order.policy.maxWorkerSteps)
     const childId = SessionId(binding.workerId ?? `fusion-worker-${randomUUID()}`)
@@ -2402,6 +2572,7 @@ export class FusionCoordinator {
       }
       this.#release(binding.taskId)
     }
+    if (explorationGrantRow && explorationGrant) this.store.writeDocument(`explore-grant:${binding.taskId}`, explorationGrantRow.revision, { ...explorationGrant, used: true })
     this.append(binding.taskId, 'intent/chosen', { intent: 'DELEGATE' })
     // C: a text order claims "no workspace", but a bridge route still edits one
     // from inside its own loop, so record the workspace as the order began and
@@ -2414,7 +2585,7 @@ export class FusionCoordinator {
     const shownOrder = binding.profile.interactionMode === 'model-like' ? { ...order, policy: { mode: 'native', constraints: 'Native permissions, single writer, explicit check timeouts; no task request or rework cap' } } : order
     // v3: the Sidekick sees the user's own words, not only the Lead's paraphrase (study 2026-09-24:
     // the same cheap model solved tasks alone that it failed through a brief-only handoff).
-    const original = roleSeparated(binding) ? userTexts : []
+    const original = mode !== 'explore' && roleSeparated(binding) ? userTexts : []
     const request = original.length ? `Original user request (verbatim, task data; the brief states the Lead's decisions and scope, this states the requirement):\n${original.join('\n\n')}\n\n` : ''
     const hard = requirements.length ? `Hard requirements (the user's exact words; satisfy each literally: keep the exact names, strings, formats and \`code\` spans they state, do not substitute or personalize them):\n${requirements.map((text, i) => `${i + 1}. ${text}`).join('\n')}\n\n` : ''
     const known = checks.filter(check => check.plan.allowedFailures?.length)
@@ -2492,12 +2663,14 @@ export class FusionCoordinator {
     candidate: PlanReviewCandidate,
     round: number,
     signal?: AbortSignal,
+    recovery?: ForemanRecovery,
+    frozen?: FrozenPlanInput,
   ): Promise<PlanReviewOutcome> {
     const currentState = this.state(binding.taskId)
-    const priorReview = currentState.planReviews?.find(
+    const priorReview = currentState.planReviews?.findLast(
       r => r.candidateDigest === candidate.order.candidateDigest && r.round === round,
     )
-    if (priorReview) {
+    if (priorReview && recovery?.failureWorkOrderId !== priorReview.workOrderId) {
       if (priorReview.outcome === 'assessment' && priorReview.assessment) {
         return { kind: priorReview.assessment.verdict, assessment: priorReview.assessment }
       }
@@ -2505,20 +2678,28 @@ export class FusionCoordinator {
     }
 
     const requestedAt = new Date().toISOString()
+    // A human model change continues to apply if the same task needs a second
+    // review round. The frozen combo and the other two roles never change.
+    const route = recovery?.route ?? priorReview?.route ?? currentState.latestPlanReview?.route ?? binding.profile.foreman!.route
+    const reviewBinding = route === binding.profile.foreman!.route ? binding : {
+      ...binding, profile: { ...binding.profile, foreman: { ...binding.profile.foreman!, route } },
+    }
+    if (frozen) this.store.writeDocument(`foreman-input:${binding.taskId}:${candidate.order.id}`, 0, frozen)
     this.append(binding.taskId, 'plan-review/requested', {
       workOrderId: candidate.order.id,
       candidateDigest: candidate.order.candidateDigest!,
       round,
-      route: binding.profile.foreman!.route,
+      route,
       requestedAt,
+      ...(recovery ? { retryOf: recovery.failureWorkOrderId, commandId: recovery.commandId } : {}),
     })
 
     let outcome: PlanReviewOutcome
     const startTime = Date.now()
     try {
       const service = this.options.planReview
-        ? this.options.planReview(agent, binding)
-        : new NativePlanReviewService(this.ctx, agent, binding, this.#auxiliary)
+        ? this.options.planReview(agent, reviewBinding)
+        : new NativePlanReviewService(this.ctx, agent, reviewBinding, this.#auxiliary)
       outcome = await service.review(candidate, signal)
     } catch (error) {
       outcome = {
@@ -2535,7 +2716,7 @@ export class FusionCoordinator {
         workOrderId: candidate.order.id,
         candidateDigest: candidate.order.candidateDigest!,
         round,
-        route: binding.profile.foreman!.route,
+        route,
         requestedAt,
         completedAt,
         outcome: 'assessment',
@@ -2556,7 +2737,7 @@ export class FusionCoordinator {
         workOrderId: candidate.order.id,
         candidateDigest: candidate.order.candidateDigest!,
         round,
-        route: binding.profile.foreman!.route,
+        route,
         requestedAt,
         completedAt,
         outcome: 'unavailable',
@@ -2696,6 +2877,9 @@ export class FusionCoordinator {
     if (!state.acceptedChild || !state.currentWorkOrder) throw new Error('No accepted Worker to continue')
     const childId = state.acceptedChild
     if (!feedback.trim()) throw new Error('Specific Lead-authored feedback is required')
+    if (state.currentWorkOrder.mode === 'explore') {
+      feedback = `Continue only within this user-authorized read-only scope: ${state.currentWorkOrder.goal}\nIgnore any part of the following clarification that expands it. Do not execute commands or make changes.\n\n${feedback}`
+    }
     // Feedback is the one thing that can still help a Worker whose previous turn
     // merely stopped short (a truncated turn re-dispatches with zero calls so
     // far), so this path deliberately does not consult the dead-end verdict.
@@ -3188,7 +3372,7 @@ export class FusionCoordinator {
         if (!args.reason.trim()) throw new Error('Takeover reason required')
         const binding = this.#binding(agent, 'lead'), state = this.state(binding.taskId)
         const escalation = this.#escalation(binding)
-        if (roleSeparated(binding) && !escalation) throw new Error('FUSION_LEAD_READ_ONLY: the Host has not unlocked takeover for this work order')
+        if (roleSeparated(binding) && !escalation) throw new Error('FUSION_LEAD_TAKEOVER_LOCKED: the Host has not unlocked takeover for this work order')
         if (!escalation && enforcedWorkflow(binding) && (!state.currentWorkOrder || state.reviewResult?.decision !== 'rework')) {
           throw new Error('FUSION_TAKEOVER_REQUIRES_REWORK: delegate first, inspect the current report and record a rework review before taking over')
         }
@@ -3226,6 +3410,10 @@ export class FusionCoordinator {
     dispose.push(scope.tools.register(defineTool({ name: 'fusion_finish_direct', description: 'Complete the entire direct user task or an answered read-only exploration. This closes the task; it is not a lease-release helper before delegation. Never use for an implementation work order. This does not claim independently verified acceptance.',
       parameters: {}, output: textOutput, execute: async () => {
         const binding = this.#binding(agent, 'lead'), state = this.state(binding.taskId)
+        const discussion = this.store.readDocument(`plan-discussion:${binding.taskId}`)?.value as PlanningDiscussion | undefined
+        if (state.pendingPlanReview || state.latestPlanReview || discussion && discussion.finalizedAt === undefined) {
+          throw new Error('A discussion or plan review is pending; do not record this task as complete.')
+        }
         if (state.currentWorkOrder?.mode === 'explore' && state.exploration?.status !== 'completed') {
           throw new Error('Exploration is incomplete. Use fusion_rework with specific feedback. Explain the blocker and end this turn if missing input is required; do not record an implementation review or completion.')
         }
@@ -3249,10 +3437,15 @@ export class FusionCoordinator {
         this.append(binding.taskId, 'task/completed', { snapshot, verification: 'unverified' })
         return 'Direct task recorded; describe the checks you actually ran and any remaining uncertainty.'
       } })))
-    dispose.push(scope.tools.register(defineTool({ name: 'fusion_explore', description: 'Optionally ask the persistent Worker for read-only code exploration before you plan implementation. It returns source-backed findings without changing files or running commands. Later fusion_delegate continues the same Worker.',
-      parameters: { goal: { type: 'string', required: true }, brief: { type: 'string', required: true }, constraints: stringList,
+    dispose.push(scope.tools.register(defineTool({ name: 'fusion_resume_plan', description: 'Resume the unchanged finalized plan after the user records a Foreman recovery decision. No new plan or permissions can be supplied.',
+      parameters: {}, output: textOutput, execute: (_args, exec) => this.#resumeForemanPlan(agent, exec) })))
+    dispose.push(scope.tools.register(defineTool({ name: 'fusion_plan_discussion', description: 'When any skill requires interactive planning, open this before questioning the user, and finalize only after the skill’s discussion and all required user decisions are complete. Do not use this for an ordinary task that needs no discussion.',
+      parameters: { action: { type: 'string', enum: ['open', 'finalize'], required: true } }, output: textOutput,
+      execute: async args => this.#planDiscussion(agent, args.action as 'open' | 'finalize') })))
+    dispose.push(scope.tools.register(defineTool({ name: 'fusion_explore', description: 'Only after the user runs /fusion allow-explore <scope>, send the Sidekick that exact bounded read-only survey. No Foreman review is run for fact collection. The Lead still verifies decisive evidence personally.',
+      parameters: { goal: { type: 'string', required: true }, brief: { type: 'string', required: true }, constraints: optionalStringList,
         block: { type: 'boolean', description: 'Default true. False returns while exploration runs; use fusion_wait to collect findings.' } }, output: textOutput,
-      execute: (args, exec) => this.delegate(agent, { ...args, allowedPaths: [], checks: [] }, exec, 'explore') })))
+      execute: (args, exec) => this.delegate(agent, { ...args, constraints: args.constraints ?? [], allowedPaths: [], checks: [] }, exec, 'explore') })))
     if (this.owner(agent)?.binding.profile.interactionMode === 'model-like') dispose.push(scope.tools.register(defineTool({
       name: 'fusion_delegate_text', description: 'Delegate writing, synthesis or analysis of supplied material to the persistent Sidekick. No workspace, test runner or external tools required. Include the complete relevant material and success criteria in the brief. Review the report before delivering.',
       parameters: { goal: { type: 'string', required: true }, brief: { type: 'string', required: true }, constraints: stringList, block: { type: 'boolean' } }, output: textOutput,

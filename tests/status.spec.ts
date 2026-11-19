@@ -165,11 +165,12 @@ describe('role-separated permissions', () => {
     expect(readFusionStatus(store, PARENT).task).not.toHaveProperty('permissions')
     store.writeDocument(`sandbox-intent:${PARENT}`, 0, intent('danger-full-access'))
     store.writeDocument(`usage:${TASK}:lead`, 0, usage('1', 'final', 10))
+    // Both roles run in the user's mode: the Lead is no longer reported as read-only.
     expect(readFusionStatus(store, PARENT).task!.permissions)
-      .toEqual({ lead: 'read-only', worker: 'danger-full-access', active: 'lead' })
+      .toEqual({ lead: 'danger-full-access', worker: 'danger-full-access', active: 'lead' })
     store.writeDocument(`usage:${TASK}:worker`, 0, usage('2', 'final', 10, 'worker'))
     expect(readFusionStatus(store, PARENT).task!.permissions)
-      .toEqual({ lead: 'read-only', worker: 'danger-full-access', active: 'worker' })
+      .toEqual({ lead: 'danger-full-access', worker: 'danger-full-access', active: 'worker' })
   })
 
   it('reports the user mode while the Lead holds a takeover and nothing once Fusion released the conversation', () => {

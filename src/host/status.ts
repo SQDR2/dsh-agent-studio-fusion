@@ -128,13 +128,11 @@ function readStatus(store: SqliteFusionStore, sessionId: string, index: StatusIn
   const pendingDelivery = modelControl?.operation && ['prepared', 'dispatching'].includes(modelControl.operation.state)
     ? { stage: '等待检查', detail: '继续消息的投递结果尚未确认。检查会话后使用 /fusion recover 提交检查记录。', attention: true } : {}
   const stage = { ...taskStage(state, checking, workerStepLimitReached, workerQuotaExhausted), ...modelStage, ...pendingDelivery }
-  // The composer's own permission control follows the conversation (Lead) session,
-  // where Fusion's read-only confinement matches no configured preset. Report the
-  // per-role modes so the UI can name the permission of the role that is working.
+  // Both roles run in the mode the user chose for the conversation, so the composer's own
+  // permission control already names it. Report the per-role modes anyway: the chip tells the
+  // user which role is working, and both entries are now the same user-chosen mode.
   const intent = roleSeparated(binding) ? readSandboxIntent(store, sessionId) : undefined
-  const takeover = runtime?.schemaVersion === 1 && runtime.taskId === taskId && runtime.takeover === true
-  const permissions = intent && { lead: takeover ? intent.mode : 'read-only' as const,
-    worker: intent.mode, active: activeRole(facts.requests, state.phase) }
+  const permissions = intent && { lead: intent.mode, worker: intent.mode, active: activeRole(facts.requests, state.phase) }
   const costs = taskCosts(store, taskId, modelControl?.routes.lead ?? binding.profile.lead)
   return { ...base, task: { id: taskId, revision: state.revision, ...stage, stageEn: english(stage.stage)!,
     detailEn: 'detailEn' in stage && stage.detailEn ? stage.detailEn : english(stage.detail) ?? null, ...(modelControl ? { modelControl } : {}), verification: state.verification,

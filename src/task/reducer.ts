@@ -18,7 +18,7 @@ import type {
 } from '../contracts.js'
 import { PUBLICATION_PROHIBITION, TERMINAL_PHASES } from '../contracts.js'
 import { digestOf } from '../digest.js'
-import { collectForemanFindings } from '../plan-review.js'
+import { collectForemanFindings, FOREMAN_MAX_REVIEW_ROUNDS } from '../plan-review.js'
 import { assertCurrentSubject, reportSubject, reviewReadinessReceipt, sameSubject } from '../review/ticket.js'
 import type { TaskState } from './state.js'
 
@@ -118,16 +118,20 @@ function applyPayload(state: TaskState | undefined, event: FusionEvent): TaskSta
       }
     case 'plan-review/requested': {
       const next = need(state, event)
-      if (event.payload.round !== 1 && event.payload.round !== 2) {
-        throw new FusionError(EVENT_CONFLICT, `Plan review round must be 1 or 2, got ${String(event.payload.round)}`)
+      // The bound lives in one place: a round the gate would never run must not be recorded,
+      // and a fourth round is past the point where the plan is oscillating.
+      if (!Number.isInteger(event.payload.round) || event.payload.round < 1
+        || event.payload.round > FOREMAN_MAX_REVIEW_ROUNDS) {
+        throw new FusionError(EVENT_CONFLICT, `Plan review round must be 1..${FOREMAN_MAX_REVIEW_ROUNDS}, got ${String(event.payload.round)}`)
       }
       if (next.pendingPlanReview) {
         throw new FusionError(EVENT_CONFLICT, 'A plan review is already pending; complete or fail it before requesting another')
       }
-      const duplicateRound = next.planReviews?.some(
+      const previous = next.planReviews?.findLast(
         r => r.candidateDigest === event.payload.candidateDigest && r.round === event.payload.round,
       )
-      if (duplicateRound) {
+      const retry = previous?.outcome === 'unavailable' && event.payload.retryOf === previous.workOrderId && Boolean(event.payload.commandId)
+      if (previous && !retry || !previous && event.payload.retryOf !== undefined) {
         throw new FusionError(EVENT_CONFLICT, `Duplicate plan review round ${event.payload.round} for candidate digest ${event.payload.candidateDigest}`)
       }
       return {
@@ -153,12 +157,6 @@ function applyPayload(state: TaskState | undefined, event: FusionEvent): TaskSta
         pending.round !== event.payload.round
       ) {
         throw new FusionError(EVENT_CONFLICT, 'Pending plan review does not match completed payload')
-      }
-      const duplicateRound = next.planReviews?.some(
-        r => r.candidateDigest === event.payload.candidateDigest && r.round === event.payload.round,
-      )
-      if (duplicateRound) {
-        throw new FusionError(EVENT_CONFLICT, `Duplicate plan review round ${event.payload.round} for candidate digest ${event.payload.candidateDigest}`)
       }
       const record = event.payload.record
       if (!record.completedAt || typeof record.completedAt !== 'string') {
@@ -226,8 +224,8 @@ function applyPayload(state: TaskState | undefined, event: FusionEvent): TaskSta
         throw new FusionError(EVENT_CONFLICT, 'Plan review has already been resolved')
       }
 
-      if (round !== 1 && round !== 2) {
-        throw new FusionError(EVENT_CONFLICT, `Plan review round must be 1 or 2, got ${String(round)}`)
+      if (!Number.isInteger(round) || round < 1 || round > FOREMAN_MAX_REVIEW_ROUNDS) {
+        throw new FusionError(EVENT_CONFLICT, `Plan review round must be 1..${FOREMAN_MAX_REVIEW_ROUNDS}, got ${String(round)}`)
       }
       // Only a concerns review can be resolved: a ready review asks nothing of the Lead,
       // and an unavailable one produced no findings to answer, so neither can carry a
@@ -318,12 +316,6 @@ function applyPayload(state: TaskState | undefined, event: FusionEvent): TaskSta
       ) {
         throw new FusionError(EVENT_CONFLICT, 'Pending plan review does not match unavailable payload')
       }
-      const duplicateRound = next.planReviews?.some(
-        r => r.candidateDigest === event.payload.candidateDigest && r.round === event.payload.round,
-      )
-      if (duplicateRound) {
-        throw new FusionError(EVENT_CONFLICT, `Duplicate plan review round ${event.payload.round} for candidate digest ${event.payload.candidateDigest}`)
-      }
       const record = event.payload.record
       if (!record.completedAt || typeof record.completedAt !== 'string') {
         throw new FusionError(EVENT_CONFLICT, 'PlanReviewRecord completedAt is required for unavailable review')
@@ -348,6 +340,16 @@ function applyPayload(state: TaskState | undefined, event: FusionEvent): TaskSta
         planReviews: reviews,
         latestPlanReview: record,
       }
+    }
+    case 'plan-review/skip-authorized': {
+      const next = need(state, event)
+      const { candidateDigest, round, failureWorkOrderId, commandId, reason } = event.payload
+      const failure = next.planReviews?.findLast(r => r.candidateDigest === candidateDigest && r.round === round)
+      if (next.pendingPlanReview || failure?.outcome !== 'unavailable' || failure.workOrderId !== failureWorkOrderId
+        || !commandId || !reason.trim() || next.planReviewSkips?.some(skip => skip.failureWorkOrderId === failureWorkOrderId)) {
+        throw new FusionError(EVENT_CONFLICT, 'A human skip must reference one currently unavailable review')
+      }
+      return { ...next, planReviewSkips: [...(next.planReviewSkips ?? []), event.payload] }
     }
     case 'foreman-attribution/completed': {
       const next = need(state, event)

@@ -4,6 +4,7 @@ import type {
   Constraint,
   Digest,
   ForemanAssessment,
+  ForemanCitation,
   ForemanDisposition,
   ForemanFinding,
   PlanReviewCandidate,
@@ -456,13 +457,36 @@ export type PlanReviewOutcome =
  */
 export const FOREMAN_MAX_FINDINGS = 8
 
-export const FOREMAN_SYSTEM_PROMPT =
-  'You are Foreman, an independent plan auditor. Review only the supplied candidate work order. Find semantic gaps that deterministic Host validation cannot decide: uncovered hard requirements, weak acceptance oracles, concrete false-green scenarios, unsupported decisions, counterexamples, unresolved critical assumptions, scope contradictions, and material ambiguities that would change observable behavior. A candidate whose mode is explore or text has no acceptance checks by construction: audit whether its goal, brief and constraints can still answer the question the user asked, and leave the acceptance-audit arrays empty instead of inventing checks it was never meant to have. Do not propose an alternative plan. Do not discuss formatting, permissions, path syntax, or other deterministic Host checks. Return exactly one JSON object matching ForemanAssessment schema version 1. Use verdict "ready" only when every finding array is empty; otherwise use "concerns". Report at most 8 findings across all finding arrays, most material first; when the plan has more problems than that, report the ones that would change observable behavior and omit the rest. Copy candidateDigest exactly. Do not use Markdown or include any text outside the JSON object.'
+/**
+ * The most review rounds one candidate may go through.
+ *
+ * A round is review feedback the Lead can answer: round 1 finds problems, the Lead repairs
+ * the plan, and the repaired plan is reviewed again. Two rounds ended the loop while a
+ * repaired plan could still be challenged, so the Lead's only remaining move was an override
+ * — the argument the second review had just refuted. A third round is what a second repair
+ * is worth. A fourth is not: past this point the plan is oscillating, and the Lead must ask
+ * the user instead of iterating on its own judgement.
+ *
+ * Named once so a caller can raise it later without re-deriving the gate, the coordinator and
+ * the messages from separate literals.
+ */
+export const FOREMAN_MAX_REVIEW_ROUNDS = 3
 
-const ROOT_KEYS = new Set(['schemaVersion', 'candidateDigest', 'verdict', 'acceptanceAudit', 'decisionChallenges', 'materialAmbiguities'])
+export const FOREMAN_SYSTEM_PROMPT =
+  'You are Foreman, an independent plan auditor. Review only the supplied candidate work order, and audit it against the real repository: you may read the workspace with read, grep and glob, and run commands (including the test and lint commands an acceptance claim names) with the shell, so open the files and check the claims every finding and every approval depends on instead of reasoning from the plan text alone. Your role is audit only, and that rule is yours to keep: do not edit the plan, do not fix or write code, do not run mutating commands, and do not perform any fix. If something is broken or missing, report it to Lead instead of repairing it, and never leave the workspace modified. Find semantic gaps that deterministic Host validation cannot decide: uncovered hard requirements, weak acceptance oracles, concrete false-green scenarios, unsupported decisions, counterexamples, unresolved critical assumptions, scope contradictions, and material ambiguities that would change observable behavior. A text candidate has no acceptance checks by construction: audit whether its goal, brief and constraints can still answer the question the user asked, and leave the acceptance-audit arrays empty instead of inventing checks it was never meant to have. Do not propose an alternative plan. Do not discuss formatting, permissions, path syntax, or other deterministic Host checks. Bind every claim to code: a finding with severity "blocking-concern" must carry a non-empty evidence array, and a verdict of "ready" must carry a non-empty inspected array listing the ranges you actually read. Each entry is {"path": "<repo-relative path>", "startLine": <first line>, "endLine": <last line>}, with 1 <= startLine <= endLine. The Host opens every cited file, checks that the range exists, records the digest of the bytes it read, and discards the whole assessment as unavailable if one citation does not resolve; cite only what you actually read. Return exactly one JSON object matching ForemanAssessment schema version 1. Use verdict "ready" only when every finding array is empty; otherwise use "concerns". Report at most 8 findings across all finding arrays, most material first; when the plan has more problems than that, report the ones that would change observable behavior and omit the rest. Copy candidateDigest exactly. Do not use Markdown or include any text outside the JSON object.'
+
+const ROOT_KEYS = new Set(['schemaVersion', 'candidateDigest', 'verdict', 'inspected', 'acceptanceAudit', 'decisionChallenges', 'materialAmbiguities'])
 const ACCEPTANCE_AUDIT_KEYS = new Set(['uncoveredRequirements', 'weakOracles', 'falseGreenScenarios'])
 const DECISION_CHALLENGES_KEYS = new Set(['unsupportedDecisions', 'counterexamples', 'unresolvedCriticalAssumptions'])
-const FINDING_KEYS = new Set(['id', 'category', 'severity', 'requirementIndexes', 'decisionIndexes', 'message', 'suggestedCorrection'])
+const FINDING_KEYS = new Set(['id', 'category', 'severity', 'requirementIndexes', 'decisionIndexes', 'message', 'suggestedCorrection', 'evidence'])
+/**
+ * A citation carries a path and a range, and nothing else.
+ *
+ * `digest` is deliberately absent even though {@link ForemanCitation} holds one: the Host
+ * fills it from the bytes it actually opened, so a reviewer-supplied digest would be a claim
+ * about a file instead of a proof of it.
+ */
+const CITATION_KEYS = new Set(['path', 'startLine', 'endLine'])
 const VALID_CATEGORIES = new Set([
   'requirement-coverage',
   'acceptance-gap',
@@ -472,6 +496,40 @@ const VALID_CATEGORIES = new Set([
   'material-ambiguity',
 ])
 const VALID_SEVERITIES = new Set(['warning', 'blocking-concern'])
+
+/**
+ * Structural read of one citation list.
+ *
+ * Shape only: whether the path resolves and the range exists is a filesystem question the
+ * Host answers against the frozen workspace, not something this parser can decide. Rejecting
+ * an absolute path here rather than only during verification keeps the failure attributable
+ * to the reviewer's output instead of to the workspace it was given.
+ */
+function parseCitations(value: unknown, where: string): { citations: ForemanCitation[] } | { reason: string } {
+  if (!Array.isArray(value)) return { reason: `${where} must be an array of {path, startLine, endLine} citations` }
+  const citations: ForemanCitation[] = []
+  for (let index = 0; index < value.length; index++) {
+    const item = value[index]
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return { reason: `${where}[${index}] must be an object` }
+    const citation = item as Record<string, unknown>
+    for (const key of Object.keys(citation)) {
+      if (!CITATION_KEYS.has(key)) return { reason: `Unknown field in ${where}[${index}]: "${key}"` }
+    }
+    if (typeof citation.path !== 'string' || !citation.path.trim()) {
+      return { reason: `${where}[${index}].path must be a non-empty string` }
+    }
+    const startLine = citation.startLine
+    const endLine = citation.endLine
+    if (!Number.isInteger(startLine) || !Number.isInteger(endLine)) {
+      return { reason: `${where}[${index}] must give integer startLine and endLine` }
+    }
+    if ((startLine as number) < 1 || (startLine as number) > (endLine as number)) {
+      return { reason: `${where}[${index}] must cite 1 <= startLine <= endLine, got ${String(startLine)}-${String(endLine)}` }
+    }
+    citations.push({ path: citation.path, startLine: startLine as number, endLine: endLine as number })
+  }
+  return { citations }
+}
 
 export function parseForemanAssessment(rawText: string, candidate: PlanReviewCandidate): PlanReviewOutcome {
   if (typeof rawText !== 'string') {
@@ -576,6 +634,8 @@ export function parseForemanAssessment(rawText: string, candidate: PlanReviewCan
   const userReqCount = (candidate.order.constraints ?? []).filter(c => c && c.provenance === 'user').length
   const decisionsCount = (candidate.order.decisions ?? []).length
   const seenIds = new Set<string>()
+  /** Blocking findings that name no code, reported together so one answer lists every gap. */
+  const uncitedBlocking: string[] = []
 
   for (const list of findingLists) {
     for (const item of list) {
@@ -645,7 +705,24 @@ export function parseForemanAssessment(rawText: string, candidate: PlanReviewCan
       if (typeof finding.suggestedCorrection !== 'string') {
         return { kind: 'unavailable', reason: 'Finding suggestedCorrection must be a string' }
       }
+
+      // evidence: shape is structural, resolution is the Host's job against the workspace.
+      let evidenceCount = 0
+      if (finding.evidence !== undefined) {
+        const evidence = parseCitations(finding.evidence, `Finding "${String(finding.id)}" evidence`)
+        if ('reason' in evidence) return { kind: 'unavailable', reason: evidence.reason }
+        evidenceCount = evidence.citations.length
+      }
+      if (finding.severity === 'blocking-concern' && evidenceCount === 0) uncitedBlocking.push(String(finding.id))
     }
+  }
+
+  // inspected: the ranges the reviewer actually read, cited the same way as finding evidence.
+  let inspected: readonly ForemanCitation[] = []
+  if (parsed.inspected !== undefined) {
+    const citations = parseCitations(parsed.inspected, 'inspected')
+    if ('reason' in citations) return { kind: 'unavailable', reason: citations.reason }
+    inspected = citations.citations
   }
 
   // Validate verdict against finding count
@@ -653,10 +730,27 @@ export function parseForemanAssessment(rawText: string, candidate: PlanReviewCan
     if (seenIds.size > 0) {
       return { kind: 'unavailable', reason: `Verdict is "ready" but findings list contains ${seenIds.size} findings` }
     }
+    // An approval that names no code is an assertion, not a review: the whole point of an
+    // independent audit is that its verdict can be traced to bytes somebody opened.
+    if (inspected.length === 0) {
+      return {
+        kind: 'unavailable',
+        reason: 'Verdict is "ready" but inspected is empty: an approval must cite the file ranges it read '
+          + '(inspected: [{ "path", "startLine", "endLine" }])',
+      }
+    }
     return { kind: 'ready', assessment: parsed as unknown as ForemanAssessment }
   } else {
     if (seenIds.size === 0) {
       return { kind: 'unavailable', reason: 'Verdict is "concerns" but no findings were provided' }
+    }
+    if (uncitedBlocking.length > 0) {
+      return {
+        kind: 'unavailable',
+        reason: `Blocking-concern findings cite no evidence: ${uncitedBlocking.map(id => `"${id}"`).join(', ')}. `
+          + 'A blocking finding must carry evidence naming the code the problem is visible in '
+          + '(path:startLine-endLine); cite the file or downgrade the finding to "warning".',
+      }
     }
     return { kind: 'concerns', assessment: parsed as unknown as ForemanAssessment }
   }
@@ -679,8 +773,28 @@ function decCountString(count: number): string {
  * Every object closes with `additionalProperties: false` so an extra field is a shape error
  * rather than a silently ignored one; `parseForemanAssessment` rejects unknown fields for the
  * same reason.
+ *
+ * The two citation lists are part of the contract because the verdict is bound to code: a
+ * blocking finding must carry `evidence`, and `inspected` is required at the root (an approval
+ * with nothing inspected is refused by the parser anyway). The citation object deliberately
+ * has no `digest` field — the Host fills that from the bytes it opened.
  */
 export function foremanAssessmentSchema(): Readonly<Record<string, unknown>> {
+  const citation = {
+    type: 'object' as const,
+    additionalProperties: false,
+    required: ['path', 'startLine', 'endLine'],
+    properties: {
+      path: { type: 'string', description: 'Repository-relative path, as the review workspace lists it.' },
+      startLine: { type: 'integer', minimum: 1, description: 'First cited line, 1-based and inclusive.' },
+      endLine: { type: 'integer', minimum: 1, description: 'Last cited line, inclusive; must be >= startLine.' },
+    },
+  }
+  const citations = {
+    type: 'array' as const,
+    items: citation,
+    description: 'File ranges you actually read. The Host verifies every range against the workspace.',
+  }
   const finding = {
     type: 'object' as const,
     additionalProperties: false,
@@ -697,6 +811,7 @@ export function foremanAssessmentSchema(): Readonly<Record<string, unknown>> {
       decisionIndexes: { type: 'array', items: { type: 'integer', minimum: 0 } },
       message: { type: 'string' },
       suggestedCorrection: { type: 'string' },
+      evidence: { ...citations, description: 'Required and non-empty for a "blocking-concern"; the code that shows the problem.' },
     },
   }
   const findings = { type: 'array' as const, items: finding }
@@ -745,9 +860,9 @@ export interface PlanReviewGateDecision {
   /** The exact candidate may dispatch without another model call. */
   approved: boolean
   /** The round the gate would run next when it is not approved. */
-  round: 1 | 2
+  round: number
   /** Why it is not approved, for the diagnostic the Lead sees. */
-  reason?: 'interrupted-round-2' | 'unreviewed'
+  reason?: 'interrupted-review' | 'unreviewed' | 'unavailable'
 }
 
 /**
@@ -755,14 +870,14 @@ export interface PlanReviewGateDecision {
  *
  * Approval is bound to the digest that was actually reviewed:
  *
- * - `ready` and `unavailable` close the question for that digest. A reviewer that could not
- *   be reached must not block dispatch — that is the fail-open half of plan §8.3 — while the
- *   Host's own deterministic checks remain fail-closed.
+ * - `ready` closes the question for that digest. An unavailable reviewer is not an
+ *   approval; a repeated delegation must not implicitly retry or dispatch it.
  * - Round 1 closes only when every finding was overridden AND the override did not change
  *   the candidate. An override with a revision is a claim that the plan changed, and the
- *   changed plan still owes round 2; a revision recorded here is what sends the *revised*
- *   digest to round 2.
- * - Round 2 is the last round, so overriding everything there is the only way past it.
+ *   changed plan still owes another round; a revision recorded here is what sends the
+ *   *revised* digest to the next one.
+ * - Only the last round (round {@link FOREMAN_MAX_REVIEW_ROUNDS}) closes by overriding
+ *   everything: every earlier round can still send the repaired plan back for review.
  * - A digest that was never reviewed is not approved, even when a different digest was.
  *
  * This is deliberately a pure function of the recorded reviews and resolutions: the gate runs
@@ -775,26 +890,28 @@ export function planReviewGateDecision(input: {
   resolutions: readonly PlanReviewGateResolution[]
 }): PlanReviewGateDecision {
   const { candidateDigest, reviews, resolutions } = input
-  for (const round of [2, 1] as const) {
-    const review = reviews.find(item => item.candidateDigest === candidateDigest && item.round === round)
+  for (let round = FOREMAN_MAX_REVIEW_ROUNDS; round >= 1; round--) {
+    const review = reviews.findLast(item => item.candidateDigest === candidateDigest && item.round === round)
     if (!review) continue
-    if (review.outcome === 'unavailable') return { approved: true, round }
+    if (review.outcome === 'unavailable') return { approved: false, round, reason: 'unavailable' }
     if (review.assessment?.verdict === 'ready') return { approved: true, round }
     if (review.assessment?.verdict !== 'concerns') continue
     const resolution = resolutions.find(item => item.candidateDigest === candidateDigest && item.round === round)
     const dispositions = resolution?.dispositions ?? review.dispositions
     if (!dispositions?.length || !dispositions.every(item => item.action === 'overridden')) continue
-    if (round === 2) return { approved: true, round }
-    // A round-1 override that also revised the plan is not an approval of the newer candidate:
+    if (round === FOREMAN_MAX_REVIEW_ROUNDS) return { approved: true, round }
+    // An override that also revised the plan is not an approval of the newer candidate:
     // the recorded revision has to be the candidate in hand for the override to stand.
     if (resolution?.revisedCandidateDigest === undefined || resolution.revisedCandidateDigest === candidateDigest) {
       return { approved: true, round }
     }
   }
-  // No review approved this digest. If a round-1 resolution revised the plan into exactly this
-  // candidate, the interruption happened between persisting the resolution and requesting
-  // round 2, so continue there rather than asking round 1's findings again.
-  const continuesRound2 = resolutions.some(item => item.round === 1
+  // No review approved this digest. If a resolution revised the plan into exactly this candidate,
+  // the interruption happened between persisting the resolution and requesting the next round,
+  // so continue there rather than asking the answered findings again.
+  const continuing = resolutions.findLast(item => item.round < FOREMAN_MAX_REVIEW_ROUNDS
     && item.revisedCandidateDigest !== undefined && item.revisedCandidateDigest === candidateDigest)
-  return continuesRound2 ? { approved: false, round: 2, reason: 'interrupted-round-2' } : { approved: false, round: 1, reason: 'unreviewed' }
+  return continuing
+    ? { approved: false, round: continuing.round + 1, reason: 'interrupted-review' }
+    : { approved: false, round: 1, reason: 'unreviewed' }
 }

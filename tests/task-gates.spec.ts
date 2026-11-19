@@ -25,23 +25,23 @@ describe('worker post-submit gate', () => {
 })
 
 describe('completed-task gate', () => {
-  it('keeps the read tools a read-only Lead already had', () => {
-    expect(completedToolProblem({ role: 'lead', read: true, confinedShell: false })).toBeUndefined()
+  it('keeps the read tools a completed Lead needs for its closing answer', () => {
+    expect(completedToolProblem({ role: 'lead', read: true, shell: false })).toBeUndefined()
   })
 
-  it('keeps a shell the role sandbox still confines to read-only', () => {
-    expect(completedToolProblem({ role: 'lead', read: false, confinedShell: true })).toBeUndefined()
+  it("keeps the shell it uses to check a claim in the user mode", () => {
+    expect(completedToolProblem({ role: 'lead', read: false, shell: true })).toBeUndefined()
   })
 
   it('closes every effectful tool', () => {
-    expect(completedToolProblem({ role: 'lead', read: false, confinedShell: false }))
+    expect(completedToolProblem({ role: 'lead', read: false, shell: false }))
       .toBe('This task is completed; begin a new task before using tools')
   })
 
   it('closes the finished Sidekick entirely, read tools included', () => {
     for (const read of [true, false]) {
-      for (const confinedShell of [true, false]) {
-        expect(completedToolProblem({ role: 'worker', read, confinedShell }))
+      for (const shell of [true, false]) {
+        expect(completedToolProblem({ role: 'worker', read, shell }))
           .toBe('This task is completed; begin a new task before using tools')
       }
     }

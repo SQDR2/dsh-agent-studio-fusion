@@ -45,6 +45,9 @@ export interface TaskState {
     readonly appliedEventIds: readonly string[];
     readonly planReviews?: readonly PlanReviewRecord[];
     readonly latestPlanReview?: PlanReviewRecord;
+    readonly planReviewSkips?: readonly Extract<FusionEvent, {
+        type: 'plan-review/skip-authorized';
+    }>['payload'][];
     readonly planReviewResolutions?: readonly {
         readonly workOrderId: WorkOrderId;
         readonly candidateDigest: Digest;

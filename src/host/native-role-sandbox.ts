@@ -2,7 +2,6 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { SessionId as NativeSessionId } from '@deepseek-ai/dsh-session'
 import type { Session } from '@deepseek-ai/dsh-session'
-import type { ToolExecution } from '@deepseek-ai/dsh-tools'
 import type { Role, SandboxMode } from '../contracts.js'
 import type { SqliteFusionStore } from '../task/sqlite-store.js'
 import type { SessionBinding } from './bindings.js'
@@ -50,11 +49,19 @@ export function readSandboxIntent(store: SqliteFusionStore, sessionId: string): 
 }
 
 /**
- * Role separation enforced below the prompt: the Lead's session runs under the
- * Host's own read-only sandbox (bash and filesystem are refused by the OS
- * backend), while the Sidekick keeps the mode the user chose. The plugin never
- * widens a mode: the Sidekick gets exactly the user's mode, and leaving Fusion
- * restores it on the conversation. Only public session events are written.
+ * Both Fusion roles run in the mode the user chose.
+ *
+ * The Lead used to be forced into the Host's read-only sandbox whenever it did not hold the
+ * write lease, and the Sidekick alone kept the user's mode. That was a capability cap where a
+ * concurrency boundary was needed: it made the expensive reviewer unable to run the check it
+ * was reviewing, and it contradicted the prompt that told it to verify its own judgement. So
+ * the Lead now runs exactly like a normal agent, and the only remaining rule is the one the
+ * workspace lease already enforces — one writer per workspace, so a Lead write while the
+ * Sidekick holds the lease is refused by the writer guard (reads and searches still work).
+ *
+ * What this class still owns is the Sidekick's mode: a child is seeded from the Lead's session
+ * and is re-checked before every request, so the Sidekick always runs in the user's mode, and
+ * leaving Fusion restores that mode on the conversation. Only public session events are written.
  */
 export class NativeRoleSandbox {
   readonly #dispose: (() => void)[] = []
@@ -82,18 +89,20 @@ export class NativeRoleSandbox {
   }
 
   /**
-   * Called before every model request of an enforced-v3 role. `writer` is true only while the Lead holds the
-   * write lease through a Host-unlocked takeover; it then runs under the user's own mode, like the Sidekick.
+   * Called before every model request of an enforced-v3 role.
+   *
+   * The Lead is put back into the user's own mode — never a read-only one — so it can read,
+   * search and run commands like any other agent; concurrent writing is the writer guard's
+   * job, not a sandbox downgrade. The Sidekick is given the same recorded mode.
    */
-  ensure(agent: Agent, binding: SessionBinding, role: Role, writer = false): void {
+  ensure(agent: Agent, binding: SessionBinding, role: Role): void {
     const policy = this.#policy
     if (!policy || !roleSeparated(binding)) return
     if (role === 'lead') {
       const saved = this.#intent(binding.sessionId)
       const intent: Intent = saved?.active ? saved
         : { schemaVersion: 1, sessionId: binding.sessionId, mode: policy.resolve({ session: agent.session }).mode, ownSeqs: saved?.ownSeqs ?? [], active: true }
-      const target = writer ? intent.mode : 'read-only'
-      if (policy.overrideOf(agent.session) !== target) this.#set(agent.session, target, intent)
+      if (policy.overrideOf(agent.session) !== intent.mode) this.#set(agent.session, intent.mode, intent)
       this.#save(intent)
       return
     }
@@ -117,36 +126,13 @@ export class NativeRoleSandbox {
   }
 
   /**
-   * Frozen acceptance checks are plugin-issued and nested in a Lead tool call, so
-   * they would inherit the Lead's read-only session. They run under the user's
-   * mode; the Lead's own shell stays refused meanwhile because leadShellProblem
-   * requires an actual read-only resolution at execution time.
+   * Frozen acceptance checks are plugin-issued and nested in a Lead tool call, so they run in
+   * whatever mode the Lead's session has — the user's. Kept as a named seam because the
+   * coordinator's baseline/verification paths call it, and because a future role that does
+   * need a temporary mode still has one place to do it.
    */
-  async whileChecking<T>(agent: Agent, binding: SessionBinding, run: () => Promise<T>): Promise<T> {
-    const policy = this.#policy, intent = this.#intent(binding.sessionId)
-    if (!policy || !roleSeparated(binding) || !intent?.active || intent.mode === 'read-only') return run()
-    this.#set(agent.session, intent.mode, intent)
-    this.#save(intent)
-    try { return await run() }
-    finally {
-      const current = this.#intent(binding.sessionId) ?? intent
-      this.#set(agent.session, 'read-only', current)
-      this.#save(current)
-    }
-  }
-
-  /** A Lead shell is allowed only when the Host will actually run it read-only and without escalation. */
-  leadShellProblem(exec: Readonly<ToolExecution>): string | undefined {
-    const policy = this.#policy
-    if (!policy) return 'FUSION_LEAD_READ_ONLY: this Host exposes no sandbox policy, so the Lead cannot run shell commands. Delegate commands to the Sidekick.'
-    const args = (exec.arguments ?? {}) as { sandbox_permissions?: unknown }
-    if (args.sandbox_permissions !== undefined && args.sandbox_permissions !== null && args.sandbox_permissions !== '') {
-      return 'FUSION_LEAD_READ_ONLY: the Lead never escalates its sandbox. Delegate anything that needs to write or run with wider access to the Sidekick with fusion_delegate.'
-    }
-    if (policy.resolve({ session: exec.agent!.session }).mode !== 'read-only') {
-      return 'FUSION_LEAD_READ_ONLY: the Lead shell is not currently confined to read-only; delegate this command to the Sidekick.'
-    }
-    return undefined
+  async whileChecking<T>(_agent: Agent, _binding: SessionBinding, run: () => Promise<T>): Promise<T> {
+    return await run()
   }
 
   /** Put the user's own mode back when the conversation leaves Fusion. */
@@ -157,7 +143,7 @@ export class NativeRoleSandbox {
     this.#save({ ...intent, active: false })
   }
 
-  /** A mode switch the user makes while Fusion is selected becomes the Sidekick's mode; the Lead stays read-only. */
+  /** A mode switch the user makes while Fusion is selected becomes both roles' mode. */
   install(): () => void {
     this.#dispose.push(this.ctx.on('session/event', (session, event) => {
       if (event.type !== 'sandbox/mode' || this.#writing) return
@@ -167,14 +153,14 @@ export class NativeRoleSandbox {
       if (!intent?.active || intent.ownSeqs.includes(event.seq)) return
       intent.mode = (event.data as { mode: Mode }).mode
       this.#pushSidekickMode(binding.taskId, intent.mode)
-      // Appending inside this event's publication is rejected as reentrant; re-confine next tick.
+      // Appending inside this event's publication is rejected as reentrant; apply next tick.
       setImmediate(() => {
         try {
-          const current = this.#intent(session.id)
-          if (!current?.active) return
-          this.#set(session, 'read-only', current)
+          const current = this.#intent(session.id), policy = this.#policy
+          if (!current?.active || !policy) return
+          if (policy.overrideOf(session) !== current.mode) this.#set(session, current.mode, current)
           this.#save(current)
-        } catch { /* the next Lead request re-confines through ensure() */ }
+        } catch { /* the next Lead request applies it through ensure() */ }
       })
       this.#save(intent)
     }))

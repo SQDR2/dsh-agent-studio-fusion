@@ -5,6 +5,7 @@ import type { PlanReviewRecord } from '../src/contracts.js'
 import { FusionError, REVISION_STALE } from '../src/errors.js'
 import { reviewRequestedEvent } from '../src/review/ticket.js'
 import { reduce, reduceAll } from '../src/task/reducer.js'
+import { FOREMAN_MAX_REVIEW_ROUNDS } from '../src/plan-review.js'
 import { CHILD, SNAP, created, envelope, order } from './helpers.js'
 
 const report = {
@@ -333,9 +334,12 @@ describe('plan review reducer binding', () => {
   })
   const base = () => reduce(undefined, created())
 
-  it('accepts only rounds 1 and 2', () => {
-    expect(() => reduce(base(), requested({ round: 3 }))).toThrow(/round must be 1 or 2/)
-    expect(() => reduce(base(), requested({ round: 0 }))).toThrow(/round must be 1 or 2/)
+  it('accepts only the rounds the gate can run', () => {
+    // The bound is FOREMAN_MAX_REVIEW_ROUNDS, named once: a round the gate would never run must
+    // not be recorded, and a fourth round is past the point where the plan is oscillating.
+    expect(() => reduce(base(), requested({ round: FOREMAN_MAX_REVIEW_ROUNDS + 1 }))).toThrow(/round must be 1\.\.3/)
+    expect(() => reduce(base(), requested({ round: 0 }))).toThrow(/round must be 1\.\.3/)
+    expect(() => reduce(base(), requested({ round: FOREMAN_MAX_REVIEW_ROUNDS }))).not.toThrow()
   })
 
   it('refuses a second request while one review is already pending', () => {
