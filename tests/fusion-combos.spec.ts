@@ -276,12 +276,12 @@ describe('FusionSettings combo list', () => {
     roots.push(root)
 
     await act(async () => { root.root.findByProps({ 'aria-label': '启用工长审查' }).props.onChange({ target: { checked: true } }) })
-    expect(root.root.findByProps({ 'aria-label': '工长输出 Token 上限' }).props.value).toBe(8192)
+    expect(root.root.findByProps({ 'aria-label': '工长输出 Token 上限' }).props.value).toBe(16384)
     expect(root.root.findByProps({ 'aria-label': '工长超时毫秒' }).props.value).toBe(FOREMAN_DEFAULT_TIMEOUT_MS)
 
     await act(async () => { button(root, '保存组合').props.onClick() })
     expect(root.root.findAllByProps({ role: 'alert' })).toHaveLength(0)
-    expect((posts[0] as any).pairs[0].pair.foreman).toMatchObject({ maxOutputTokens: 8192, timeoutMs: FOREMAN_DEFAULT_TIMEOUT_MS })
+    expect((posts[0] as any).pairs[0].pair.foreman).toMatchObject({ maxOutputTokens: 16384, timeoutMs: FOREMAN_DEFAULT_TIMEOUT_MS })
   })
 
   // A five-minute review timeout was refused with one sentence that listed the
@@ -315,20 +315,20 @@ describe('FusionSettings combo list', () => {
     roots.push(root)
 
     await act(async () => { root.root.findByProps({ 'aria-label': '启用工长审查' }).props.onChange({ target: { checked: true } }) })
-    await act(async () => { root.root.findByProps({ 'aria-label': '工长超时毫秒' }).props.onChange({ target: { value: '700000' } }) })
+    await act(async () => { root.root.findByProps({ 'aria-label': '工长超时毫秒' }).props.onChange({ target: { value: '1000000' } }) })
 
     // The field itself is marked, and the message names the field, its range and the value.
     const timeoutInput = root.root.findByProps({ 'aria-label': '工长超时毫秒' })
     expect(timeoutInput.props['aria-invalid']).toBe(true)
     const inline = root.root.findAllByProps({ className: 'fusion-field-error' }).map(node => String(node.children.join('')))
     expect(inline.join(' ')).toContain('超时')
-    expect(inline.join(' ')).toContain('700000')
+    expect(inline.join(' ')).toContain('1000000')
 
     await act(async () => { button(root, '保存组合').props.onClick() })
     expect(posts).toHaveLength(0)
     const alert = root.root.findAllByProps({ role: 'alert' }).map(node => String(node.children.join(''))).join(' ')
     expect(alert).toContain('工长超时')
-    expect(alert).toContain('700000')
+    expect(alert).toContain('1000000')
 
     // Correcting it clears the flag and lets the save through.
     await act(async () => { root.root.findByProps({ 'aria-label': '工长超时毫秒' }).props.onChange({ target: { value: '30000' } }) })

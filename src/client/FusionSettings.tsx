@@ -278,8 +278,8 @@ export function FusionSettings() {
           `Combo ${index + 1}: the Foreman output limit must be an integer of 1–${FOREMAN_MAX_OUTPUT_TOKENS} tokens; it is ${foreman.maxOutputTokens}.`)]
       }
       if (!Number.isSafeInteger(foreman.timeoutMs) || foreman.timeoutMs < FOREMAN_TIMEOUT_MS.min || foreman.timeoutMs > FOREMAN_TIMEOUT_MS.max) {
-        return [tr(lang, `第 ${index + 1} 个组合的工长超时必须 ${FOREMAN_TIMEOUT_MS.min}–${FOREMAN_TIMEOUT_MS.max} 毫秒（最多 10 分钟），现在是 ${foreman.timeoutMs}。`,
-          `Combo ${index + 1}: the Foreman timeout must be ${FOREMAN_TIMEOUT_MS.min}–${FOREMAN_TIMEOUT_MS.max} ms (up to 10 minutes); it is ${foreman.timeoutMs}.`)]
+        return [tr(lang, `第 ${index + 1} 个组合的工长超时必须 ${FOREMAN_TIMEOUT_MS.min}–${FOREMAN_TIMEOUT_MS.max} 毫秒（最多 15 分钟），现在是 ${foreman.timeoutMs}。`,
+          `Combo ${index + 1}: the Foreman timeout must be ${FOREMAN_TIMEOUT_MS.min}–${FOREMAN_TIMEOUT_MS.max} ms (up to 15 minutes); it is ${foreman.timeoutMs}.`)]
       }
       return []
     })
@@ -426,10 +426,10 @@ export function FusionSettings() {
                           // A review that finds many problems must still fit its budget, and a
                           // slow reviewer must be allowed to finish: 4096 output tokens and 30
                           // seconds turned real reviews into `max-tokens` and `TimeoutError`
-                          // aborts, producing no audit verdict. Two minutes hit the
-                          // same wall on an implement candidate that produced no stream at all,
-                          // so a new reviewer starts at `FOREMAN_DEFAULT_TIMEOUT_MS`.
-                          maxOutputTokens: 8192,
+                          // aborts, producing no audit verdict. 8192 then aborted two reviews at
+                          // exactly the cap, because thinking counts as output on a `high` route,
+                          // so a new reviewer starts at 16384 and at the documented ceiling.
+                          maxOutputTokens: 16384,
                           timeoutMs: FOREMAN_DEFAULT_TIMEOUT_MS,
                         },
                       },
@@ -528,8 +528,8 @@ export function FusionSettings() {
                   />
                 </label>
                 {foremanTimeoutInvalid && <p className="fusion-field-error" role="alert">
-                  {tr(lang, `超时要 ${FOREMAN_TIMEOUT_MS.min}–${FOREMAN_TIMEOUT_MS.max} 毫秒（最多 10 分钟），现在是 ${current.pair.foreman.timeoutMs}。`,
-                    `The timeout must be ${FOREMAN_TIMEOUT_MS.min}–${FOREMAN_TIMEOUT_MS.max} ms (up to 10 minutes); it is ${current.pair.foreman.timeoutMs}.`)}</p>}
+                  {tr(lang, `超时要 ${FOREMAN_TIMEOUT_MS.min}–${FOREMAN_TIMEOUT_MS.max} 毫秒（最多 15 分钟），现在是 ${current.pair.foreman.timeoutMs}。`,
+                    `The timeout must be ${FOREMAN_TIMEOUT_MS.min}–${FOREMAN_TIMEOUT_MS.max} ms (up to 15 minutes); it is ${current.pair.foreman.timeoutMs}.`)}</p>}
               </div>
             )}
           </div>

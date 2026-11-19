@@ -4,24 +4,28 @@ import type { PairProfile } from '../contracts.js'
 /** Output ceiling for one review call; the same bound the compaction model uses. */
 export const FOREMAN_MAX_OUTPUT_TOKENS = 128_000
 /**
- * A review call is bounded, but a large candidate plan on a slow model legitimately
- * needs minutes: the earlier two-minute ceiling turned a working setting into a
- * save failure. Ten minutes still bounds the call without binding it to a model's pace.
+ * The range one combo may set for the review ceiling.
+ *
+ * This is the longest the Lead is ever made to wait, not the length of a review: the review
+ * starts with a shorter window and each completed tool call extends it (see
+ * `FOREMAN_BASE_BUDGET_MS` / `FOREMAN_TOOL_CALL_BUDGET_MS`), so the ceiling is only reached by
+ * a reviewer that keeps demonstrating work. Fifteen minutes, because a code-level audit reads
+ * the files its findings depend on: the review that aborted at the old five-minute default had
+ * made twenty-one tool calls in four minutes and was still reading.
  */
-export const FOREMAN_TIMEOUT_MS = { min: 1_000, max: 600_000 } as const
+export const FOREMAN_TIMEOUT_MS = { min: 1_000, max: 900_000 } as const
 
 /**
  * What a combo starts with when the reviewer is switched on.
  *
- * Two minutes was this default and it was not enough to finish the work it was meant to
- * bound. A reasoning reviewer spends tens of seconds before its first token even on a
- * two-word request, and a candidate plan is orders of magnitude larger: one implement
- * candidate on a `reasoningEffort: high` route aborted at 120 006 ms having emitted no
- * stream at all, and the gate reads an abort as approval, so the plan shipped unaudited
- * with only a notice to say so. Five minutes keeps the documented ceiling for headroom
- * above the case that failed instead of sitting one queue stall away from it.
+ * Each raise of this default has been a fix for the same failure. Two minutes aborted a
+ * `reasoningEffort: high` reviewer that emitted no stream at all; five minutes then aborted
+ * one that was streaming steadily at ~115 tokens/s across sixteen turns and twenty-one tool
+ * calls, with nothing wrong with the route. A fixed second count cannot separate "slow" from
+ * "stuck", and the reviewer now does real work per review, so the default moved to ten
+ * minutes — the ceiling a review only reaches if it keeps producing evidence.
  */
-export const FOREMAN_DEFAULT_TIMEOUT_MS = 300_000
+export const FOREMAN_DEFAULT_TIMEOUT_MS = 600_000
 
 /**
  * How long the reviewer may stay silent before the attempt is treated as never having
@@ -31,8 +35,8 @@ export const FOREMAN_DEFAULT_TIMEOUT_MS = 300_000
  * thinking" from "the gateway never answered", so it spends the whole budget on a stall
  * and reports one undifferentiated `TimeoutError`. Waiting only this long for the first
  * chunk distinguishes the two, and a route that produced nothing has not been reviewed
- * at all, so that case is worth one retry — where a review still streaming at its total
- * deadline is a slow reviewer whose partial output would be discarded anyway.
+ * at all, so that case is worth one retry — where a review still streaming at its ceiling
+ * is a slow reviewer whose partial output would be discarded anyway.
  */
 export const FOREMAN_NO_PROGRESS_TIMEOUT_MS = 120_000
 

@@ -31,21 +31,112 @@ interface AttemptResult {
  * run, only how many round trips it may spend doing it. A reviewer that keeps inspecting
  * without ever answering is not converging, and the review is better reported as unavailable
  * (which blocks dispatch and offers the documented recovery commands) than left to consume its
- * whole timeout silently. Forty calls is far above any real review: a plan review that needs
- * more than a handful of reads and one test run has already lost the thread.
+ * whole ceiling silently.
+ *
+ * Sixty, not forty: a review that reads the files a finding depends on makes a dozen calls
+ * before it writes anything, and the observed review that aborted at the old ceiling had made
+ * twenty-one of them. The bound is the same runaway guard; only its headroom moved with the
+ * work a code-level audit actually needs.
  */
-export const FOREMAN_MAX_TOOL_CALLS = 40
+export const FOREMAN_MAX_TOOL_CALLS = 60
+
+/**
+ * The window a review gets before it has shown any work.
+ *
+ * A review used to be one model call, so one wall clock measured it fairly. It is now a tool
+ * loop, and a fixed clock prices a reviewer that keeps opening files the same as one that
+ * stopped responding: both end at the same second with no verdict. This is the part a fixed
+ * clock got wrong — time spent working is not time spent waiting.
+ *
+ * What the clock describes is therefore the Lead's patience rather than the review's length.
+ * It starts here and grows with the work the reviewer demonstrates (see
+ * {@link FOREMAN_TOOL_CALL_BUDGET_MS}), up to the ceiling the combo configures. A review that
+ * answers in three calls ends in the base window; a review that never calls a tool has nothing
+ * to renew with and is abandoned in it.
+ */
+export const FOREMAN_BASE_BUDGET_MS = 120_000
+
+/**
+ * What one completed tool call buys the review it is part of.
+ *
+ * The reviewer has to read the code a finding depends on, and every read costs a round trip:
+ * a model turn to decide it, the command, and a model turn to read the result. Buying that
+ * work explicitly is what turns the budget from "how long may a review take" into "how much
+ * work may it do", with the wall clock only deciding how long a user waits for it.
+ *
+ * Thirty seconds against a measured 14.2s of work per call, so a reviewer that keeps producing
+ * evidence keeps its window growing faster than it spends it; one that stops calling tools
+ * stops renewing, and its window runs out on its own.
+ */
+export const FOREMAN_TOOL_CALL_BUDGET_MS = 30_000
+
+/**
+ * The review's wall clock: a base window that each completed tool call extends, bounded by the
+ * ceiling the combo configures.
+ *
+ * It aborts its own signal instead of using `AbortSignal.timeout`, because a timeout cannot be
+ * extended: the whole point is that demonstrating work moves the deadline. The ceiling is the
+ * combo's `timeoutMs` — the longest the Lead is ever made to wait — and it is reached only by
+ * a review that keeps showing work, so the setting still bounds the wait while no longer
+ * deciding how much of the repository a review may read before it runs out.
+ *
+ * Every timer is unref'd: this clock only ends a wait and must never be the reason a Host
+ * process stays alive.
+ */
+export class ForemanReviewClock {
+  readonly controller = new AbortController()
+  private readonly startedAt = Date.now()
+  private deadlineAt: number
+  private timer: ReturnType<typeof setTimeout> | undefined
+
+  constructor(private readonly ceilingMs: number, baseMs: number = FOREMAN_BASE_BUDGET_MS) {
+    this.deadlineAt = this.startedAt + Math.max(1, Math.min(baseMs, ceilingMs))
+    this.#arm()
+  }
+
+  get signal(): AbortSignal { return this.controller.signal }
+
+  /** What is left of the current window, floored at zero. */
+  get remainingMs(): number { return Math.max(0, this.deadlineAt - Date.now()) }
+
+  /** What the review is allowed to wait in total, whether or not it renews. */
+  get ceilingAtMs(): number { return this.startedAt + this.ceilingMs }
+
+  /**
+   * Move the deadline by `ms`, never past the ceiling.
+   *
+   * Extension is measured from the deadline rather than from now, so a fast reviewer banks the
+   * difference instead of losing it: the window tracks work done, not wall time survived.
+   */
+  extend(ms: number = FOREMAN_TOOL_CALL_BUDGET_MS): void {
+    if (this.controller.signal.aborted || ms <= 0) return
+    const ceiling = this.ceilingAtMs
+    this.deadlineAt = Math.min(ceiling, Math.max(this.deadlineAt, Date.now()) + ms)
+    this.#arm()
+  }
+
+  dispose(): void {
+    clearTimeout(this.timer)
+    this.timer = undefined
+  }
+
+  #arm(): void {
+    clearTimeout(this.timer)
+    this.timer = setTimeout(() => this.controller.abort('budget'), this.remainingMs)
+    this.timer.unref?.()
+  }
+}
 
 /**
  * How long one attempt may stay silent before it counts as unanswered.
  *
- * Half the attempt's own budget, and never more than {@link FOREMAN_NO_PROGRESS_TIMEOUT_MS}.
- * Taking a share rather than the whole budget is what makes the distinction useful: if a
- * stall could consume the entire timeout there would be nothing left to retry with, and the
- * report would be the same undifferentiated `TimeoutError` this exists to replace.
+ * Half the window that is left, and never more than {@link FOREMAN_NO_PROGRESS_TIMEOUT_MS}.
+ * Taking a share rather than the whole window is what makes the distinction useful: if a
+ * stall could consume everything there would be nothing left to retry with, and the report
+ * would be the same undifferentiated `TimeoutError` this exists to replace.
  */
-export function foremanStallBudgetMs(attemptBudgetMs: number): number {
-  return Math.max(1, Math.min(FOREMAN_NO_PROGRESS_TIMEOUT_MS, Math.floor(attemptBudgetMs / 2)))
+export function foremanStallBudgetMs(windowMs: number): number {
+  return Math.max(1, Math.min(FOREMAN_NO_PROGRESS_TIMEOUT_MS, Math.floor(windowMs / 2)))
 }
 
 /** One assistant turn as the loop accumulates it: text blocks in order, plus the calls it asked for. */
@@ -62,6 +153,14 @@ export class NativePlanReviewService implements PlanReviewModule {
     private readonly agent: Agent,
     private readonly binding: SessionBinding,
     private readonly auxiliary: NativeAuxiliaryRequests,
+    /**
+     * The window a review gets before it demonstrates work.
+     *
+     * Only a test passes this. A review's renewal is driven by completed tool calls, which are
+     * real round trips, so the default two-minute base makes the difference between "extended"
+     * and "not extended" impossible to observe without waiting two minutes.
+     */
+    private readonly baseBudgetMs: number = FOREMAN_BASE_BUDGET_MS,
   ) {}
 
   async review(candidate: PlanReviewCandidate, externalSignal?: AbortSignal): Promise<PlanReviewOutcome> {
@@ -71,29 +170,32 @@ export class NativePlanReviewService implements PlanReviewModule {
     }
 
     const { timeoutMs } = foremanConfig
-    const startedAt = Date.now()
-    const remaining = (): number => timeoutMs - (Date.now() - startedAt)
+    // One clock for the whole review, shared with the retry: the setting bounds the wait the
+    // Lead actually experiences, not each attempt separately.
+    const clock = new ForemanReviewClock(timeoutMs, this.baseBudgetMs)
+    try {
+      // The root is resolved once, so every tool call and every citation in this review sees
+      // the same workspace even if the session's cwd moves underneath it.
+      const root = this.#workspaceRoot()
 
-    // The root is resolved once, so every tool call and every citation in this review sees the
-    // same workspace even if the session's cwd moves underneath it.
-    const root = this.#workspaceRoot()
+      const first = await this.#attempt(candidate, root, externalSignal, clock)
+      if (first.outcome) return first.outcome
+      // A route the caller cancelled is not retried, and neither is a review that was already
+      // answering: only silence means the gateway never took the first request. A loop that
+      // dispatched tool calls has started its work, and re-running it would repeat half a review.
+      if (first.cause === 'caller' || first.sawChunk) {
+        return this.#abortOutcome(first.cause!, timeoutMs, { callerReason: externalSignal?.reason, ...first })
+      }
 
-    const first = await this.#attempt(candidate, root, externalSignal, Math.max(1, remaining()))
-    if (first.outcome) return first.outcome
-    // A route the caller cancelled is not retried, and neither is a review that was already
-    // answering: only silence means the gateway never took the first request. A loop that
-    // dispatched tool calls has started its work, and re-running it would repeat half a review.
-    if (first.cause === 'caller' || first.sawChunk) {
-      return this.#abortOutcome(first.cause!, timeoutMs, false, externalSignal?.reason)
+      // One retry, out of what is left of the clock rather than on top of it: the setting
+      // bounds the wait the Lead actually experiences, not each attempt separately.
+      if (clock.remainingMs <= 0) return this.#abortOutcome('no-progress', timeoutMs, { ...first })
+      const retried = await this.#attempt(candidate, root, externalSignal, clock)
+      if (retried.outcome) return retried.outcome
+      return this.#abortOutcome(retried.cause!, timeoutMs, { callerReason: externalSignal?.reason, ...retried, hadRetry: true })
+    } finally {
+      clock.dispose()
     }
-
-    // One retry, out of what is left of the configured budget rather than on top of it: the
-    // setting bounds the wait the Lead actually experiences, not each attempt separately.
-    const rest = remaining()
-    if (rest <= 0) return this.#abortOutcome('no-progress', timeoutMs, false)
-    const retried = await this.#attempt(candidate, root, externalSignal, rest)
-    if (retried.outcome) return retried.outcome
-    return this.#abortOutcome(retried.cause!, timeoutMs, true, externalSignal?.reason)
   }
 
   /**
@@ -110,35 +212,30 @@ export class NativePlanReviewService implements PlanReviewModule {
   }
 
   /**
-   * One review, bounded by `budgetMs` in total.
+   * One review, bounded by `clock`.
    *
    * The loop is the whole review, not one call: it streams a request, executes every tool call
    * the answer asked for, appends that turn and its results, and streams again. It ends when a
    * response asks for no tools (that text is the assessment), when a budget aborts it, or when
    * the runaway guard stops a review that never converges.
    *
-   * The two budgets answer different questions. A single total timeout cannot tell "still
-   * thinking" from "the gateway never answered", so it spends the whole budget on a stall and
-   * reports one undifferentiated `TimeoutError`, hiding which problem the user can act on. A
-   * route that produced nothing has not been reviewed at all, so that case is worth one retry;
-   * a review still streaming at its deadline is a slow reviewer whose partial output would be
-   * discarded anyway, and repeating it would only double the wait. The stall budget is per
-   * request: each model turn gets its own window to start answering, while the total budget
-   * covers the whole loop.
+   * Two budgets answer different questions. The stall window asks whether this request ever
+   * started answering, so a route that produced nothing can be reported as a stall and retried
+   * once. The clock asks how long the Lead waits, and it grows with the tool calls the reviewer
+   * completes: a loop that keeps reading the repository is doing the work a code audit is for,
+   * where a loop that stops calling tools has nothing left to renew with and ends in its base
+   * window. Neither number pretends to know how long a review "should" take.
    */
   async #attempt(
     candidate: PlanReviewCandidate,
     root: string | undefined,
     externalSignal: AbortSignal | undefined,
-    budgetMs: number,
+    clock: ForemanReviewClock,
   ): Promise<AttemptResult> {
     const foremanConfig = this.binding.profile.foreman!
     const { route, maxOutputTokens } = foremanConfig
 
-    const total = AbortSignal.timeout(budgetMs)
-    const signals: AbortSignal[] = [total]
-    if (externalSignal) signals.push(externalSignal)
-    const combined = AbortSignal.any(signals)
+    const combined = externalSignal === undefined ? clock.signal : AbortSignal.any([clock.signal, externalSignal])
 
     if (combined.aborted) return { cause: externalSignal?.aborted ? 'caller' : 'total', sawChunk: false, toolCalls: 0 }
 
@@ -157,10 +254,10 @@ export class NativePlanReviewService implements PlanReviewModule {
       if (combined.aborted) {
         return { cause: externalSignal?.aborted ? 'caller' : 'total', sawChunk, toolCalls }
       }
-      // A fresh stall window per request: this is the budget for "did the route start
-      // answering this turn", not for the whole review.
+      // A fresh stall window per request, out of what the review has left: this is the budget
+      // for "did the route start answering this turn", not for the whole review.
       const stalled = new AbortController()
-      const stallTimer = setTimeout(() => stalled.abort('no progress'), foremanStallBudgetMs(budgetMs))
+      const stallTimer = setTimeout(() => stalled.abort('no progress'), foremanStallBudgetMs(clock.remainingMs))
       // Nothing should hold the Host's event loop open for a timer that only ends a wait.
       stallTimer.unref?.()
       const signal = AbortSignal.any([combined, stalled.signal])
@@ -238,6 +335,11 @@ export class NativePlanReviewService implements PlanReviewModule {
             return `${shellSeq}`
           },
         })
+        // The call completed, so the review has demonstrated work: buy it another window.
+        // Recorded before the result is replayed, because the next request has to have a budget
+        // to be sent under — a tool call that returns into an expired clock would pay for the
+        // evidence and then be refused the turn that reads it.
+        clock.extend(FOREMAN_TOOL_CALL_BUDGET_MS)
         messages.push(createToolResultMessage({
           callId: ToolCallId(call.id),
           content: [{ type: 'text', text: result.text }],
@@ -353,14 +455,29 @@ export class NativePlanReviewService implements PlanReviewModule {
     }
   }
 
-  /** Name the budget that ended the attempt, and whether a retry could change the answer. */
-  #abortOutcome(cause: AbortCause, timeoutMs: number, hadRetry: boolean, callerReason?: unknown): PlanReviewOutcome {
+  /**
+   * Name the budget that ended the attempt, and whether a retry could change the answer.
+   *
+   * What the reviewer had already done decides the wording: a route that never answered is a
+   * different problem from a review that stopped answering after reading twenty files, and one
+   * sentence for both sends the user to the wrong fix.
+   */
+  #abortOutcome(cause: AbortCause, timeoutMs: number, attempt: AttemptResult & { callerReason?: unknown; hadRetry?: boolean }): PlanReviewOutcome {
     const route = this.binding.profile.foreman!.route
     const label = `${route.provider}/${route.model}`
+    const { sawChunk, toolCalls, hadRetry = false, callerReason } = attempt
     if (cause === 'caller') {
       // The caller's own words are the most useful thing to report here: they say who
       // stopped it and why, which the budget name alone cannot.
       return { kind: 'unavailable', reason: `Foreman review aborted: ${String(callerReason ?? 'cancelled by the caller')}` }
+    }
+    if (cause === 'no-progress' && sawChunk) {
+      return {
+        kind: 'unavailable',
+        reason: `Foreman review aborted: ${label} stopped answering mid-review`
+          + `${toolCalls > 0 ? ` after ${toolCalls} tool calls` : ''}; the plan was not reviewed. `
+          + 'The route went quiet rather than slow, so retrying is more likely to help than a longer timeout.',
+      }
     }
     if (cause === 'no-progress') {
       return {
@@ -370,9 +487,13 @@ export class NativePlanReviewService implements PlanReviewModule {
           + 'Point the Foreman at a responsive route, or raise its timeout if the gateway queues.',
       }
     }
+    // The count is the difference between "a slow route" and "a reviewer that kept looking":
+    // both end at the ceiling, and only the second is a sign the brief sent it somewhere the
+    // workspace cannot answer.
     return {
       kind: 'unavailable',
-      reason: `Foreman review aborted: ${label} used its whole ${timeoutMs}ms budget while still streaming; `
+      reason: `Foreman review aborted: ${label} used its whole ${timeoutMs}ms ceiling while still streaming`
+        + `${toolCalls > 0 ? ` after ${toolCalls} tool calls` : ''}; `
         + 'raise the Foreman timeout or lower its reasoning effort.',
     }
   }

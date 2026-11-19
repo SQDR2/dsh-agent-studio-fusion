@@ -4,6 +4,21 @@ import { type ScopedToolService } from './tool-seam.js';
 /** The default window of one `read`, matching the Lead's own default. */
 export declare const FOREMAN_READ_DEFAULT_LIMIT = 2000;
 /**
+ * How long one command may run inside a review.
+ *
+ * The reviewer is given the Host's shell so it can check an acceptance claim instead of
+ * trusting it, and until now nothing bounded a single command: the review's wall clock was the
+ * only thing that could end one, so an accidental `find /` or a command waiting on input ran
+ * until the whole review was killed — taking the completed turns with it.
+ *
+ * The clock now grows with the work a review demonstrates, which makes that gap worse rather
+ * than better: a command that produces nothing would be paid for by the calls around it. So
+ * each command gets its own ceiling, and the review says which limit stopped it. Two minutes is
+ * generous against the observed work: the reviews that completed their checks ran `pnpm build`
+ * in 4.9s, and the one runaway command was a filesystem-wide `find` measured at 52.5s.
+ */
+export declare const FOREMAN_COMMAND_TIMEOUT_MS = 120000;
+/**
  * The reviewer's whole tool table: three inspectors and the Host's shell.
  *
  * The shell is what lets a review check an acceptance claim instead of trusting it — run the
@@ -29,6 +44,13 @@ export interface ForemanToolHost {
     readonly callIdPrefix: string;
     /** Monotonic counter for shell call ids. */
     readonly nextCallId: () => string;
+    /**
+     * Override for {@link FOREMAN_COMMAND_TIMEOUT_MS}.
+     *
+     * Only a test passes this: the limit is the Host's, not the model's, and a test cannot wait
+     * two minutes to observe it. Production calls leave it unset.
+     */
+    readonly commandTimeoutMs?: number;
 }
 /**
  * One glob pattern as a path regex.

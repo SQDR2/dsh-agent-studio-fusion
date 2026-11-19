@@ -20,6 +20,53 @@ own tags and releases.
 Entry format: what changed, then what was actually validated. "Not claimed" lines mark what a release did *not* test —
 read them before assuming a platform is covered.
 
+## 1.4.0 — 2026-11-19
+
+### A review's clock now follows its work, not the other way round
+
+- **A Foreman that was steadily working was killed by a clock that could not tell it apart
+  from a dead route.** In session-28dd82b6 the reviewer streamed sixteen turns and twenty-one
+  tool calls at ~115 tokens/s and was ended at exactly 300 000 ms with no verdict: 276 s of
+  that budget was model time and 23 s was tool time, so nothing was stuck — the fixed ceiling
+  simply priced "reading the repository" the same as "not answering". The review now starts
+  with a two-minute window (`FOREMAN_BASE_BUDGET_MS`) and every completed tool call buys it
+  another thirty seconds (`FOREMAN_TOOL_CALL_BUDGET_MS`), up to the ceiling the combo
+  configures. The setting still bounds the longest the Lead is ever made to wait; it no longer
+  decides how much of the repository a review may read before it runs out.
+- **One command can no longer outlive the review that started it.** The Foreman's shell schema
+  carries `command` and `description` only, so a review command had no limit of its own and
+  only the review's clock could end it — an accidental filesystem-wide `find` (measured at
+  52.5 s for the one that ran) or a command waiting on input ran until the whole review was
+  killed, taking the completed turns with it. Each command is now bounded by
+  `FOREMAN_COMMAND_TIMEOUT_MS` (two minutes), the limit is the Host's rather than a parameter
+  the model may raise, and the result says which limit stopped it.
+- **A quiet route and a slow one are reported differently.** A review that stops answering
+  mid-way — having already produced output — is no longer described as a route that "never
+  started answering": the reason names how many tool calls it had completed and says that
+  retrying is more likely to help than a longer timeout. A review that reaches its ceiling
+  while still streaming now names the ceiling and the tool-call count, which is what tells "a
+  slow route" apart from "a brief that sent the reviewer somewhere the workspace cannot
+  answer".
+- **The worst case is bounded twice.** `FOREMAN_MAX_TOOL_CALLS` rose from 40 to 60: a review
+  that reads the files a finding depends on makes a dozen calls before it writes anything, and
+  the review in the case above had made twenty-one when it was killed. At the measured
+  14.2 s per call, the sixty-call guard and the ten-minute default now bound a review from
+  opposite directions instead of the clock always winning.
+- **New reviewers start where the work is, not where it failed.** `FOREMAN_TIMEOUT_MS.max` is
+  fifteen minutes and `FOREMAN_DEFAULT_TIMEOUT_MS` is 600 000 ms; enabling the reviewer in the
+  panel seeds 16 384 output tokens instead of 8 192, because thinking counts as output on a
+  `high` route and two stored reviews had aborted at exactly the 8 192 cap with `max-tokens`.
+
+Validated: `pnpm typecheck`; `pnpm exec vitest run` 854 passed, including five new cases in
+`tests/plan-review.spec.ts` (a review kept alive past its base window by a completed tool
+call, a review ended at its ceiling while still calling tools, the clock's extend/ceiling and
+deadline-abort behaviour, the base window sitting inside the configurable ceiling, and a
+command stopped by its own limit rather than by the review) and two updated assertions
+(`FOREMAN_MAX_TOOL_CALLS`, the seeded output limit); `DSHX_HARNESS=… pnpm test:host` 333
+passed, 1 skipped (the Windows ACL case). Not claimed: the renewal was not replayed against a
+live provider — no review longer than the old five-minute ceiling was run end to end, so the
+case that motivated it is covered by the unit cases rather than by a real model.
+
 ## 1.3.0 — 2026-11-19
 
 ### The Lead runs with your permissions; the Foreman audits the code, not the plan text

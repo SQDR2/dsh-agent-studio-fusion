@@ -40,6 +40,22 @@ const SEARCH_EXCLUSIONS: readonly string[] = [
 /** The default window of one `read`, matching the Lead's own default. */
 export const FOREMAN_READ_DEFAULT_LIMIT = 2000
 
+/**
+ * How long one command may run inside a review.
+ *
+ * The reviewer is given the Host's shell so it can check an acceptance claim instead of
+ * trusting it, and until now nothing bounded a single command: the review's wall clock was the
+ * only thing that could end one, so an accidental `find /` or a command waiting on input ran
+ * until the whole review was killed — taking the completed turns with it.
+ *
+ * The clock now grows with the work a review demonstrates, which makes that gap worse rather
+ * than better: a command that produces nothing would be paid for by the calls around it. So
+ * each command gets its own ceiling, and the review says which limit stopped it. Two minutes is
+ * generous against the observed work: the reviews that completed their checks ran `pnpm build`
+ * in 4.9s, and the one runaway command was a filesystem-wide `find` measured at 52.5s.
+ */
+export const FOREMAN_COMMAND_TIMEOUT_MS = 120_000
+
 /** A file larger than this is inspected as a binary candidate, not parsed as source. */
 const BINARY_PROBE_BYTES = 8192
 
@@ -132,6 +148,13 @@ export interface ForemanToolHost {
   readonly callIdPrefix: string
   /** Monotonic counter for shell call ids. */
   readonly nextCallId: () => string
+  /**
+   * Override for {@link FOREMAN_COMMAND_TIMEOUT_MS}.
+   *
+   * Only a test passes this: the limit is the Host's, not the model's, and a test cannot wait
+   * two minutes to observe it. Production calls leave it unset.
+   */
+  readonly commandTimeoutMs?: number
 }
 
 class ForemanToolError extends Error {}
@@ -353,15 +376,33 @@ export async function executeForemanTool(name: string, rawArguments: string, hos
       const command = requiredString(args, 'command', nativeShellTool)
       const description = requiredString(args, 'description', nativeShellTool)
       if (!host.tools) return { text: `${nativeShellTool}: this Host exposes no tool runtime, so commands are unavailable`, isError: true }
-      const outcome = await executeSingleTool(host.tools, {
-        name: nativeShellTool, arguments: { command, description }, agent: host.agent,
-        callId: `${host.callIdPrefix}-${host.nextCallId()}`, signal: host.signal ?? new AbortController().signal,
-      })
+      // The reviewer may not raise its own limit: its schema carries `command` and
+      // `description` only, so this ceiling is the Host's, not the model's.
+      const limitMs = host.commandTimeoutMs ?? FOREMAN_COMMAND_TIMEOUT_MS
+      const commandTimeout = AbortSignal.timeout(limitMs)
+      const signal = host.signal === undefined ? commandTimeout : AbortSignal.any([host.signal, commandTimeout])
+      const limited = (): boolean => commandTimeout.aborted && host.signal?.aborted !== true
+      const limitNote = `${nativeShellTool}: this command hit the ${limitMs}ms limit one review command may run; narrow it to the files this finding depends on`
+      let outcome
+      try {
+        outcome = await executeSingleTool(host.tools, {
+          name: nativeShellTool, arguments: { command, description }, agent: host.agent,
+          callId: `${host.callIdPrefix}-${host.nextCallId()}`, signal,
+        })
+      } catch (error) {
+        // The command runtime reports a cancelled command as a plain failure; naming this
+        // limit keeps it out of "the shell is broken", where it would hide the real cause.
+        if (limited()) return { text: limitNote, isError: true }
+        throw error
+      }
       const text = outcome.content.map((block) => {
         const typed = block as { type?: string; text?: string }
         return typed.type === 'text' ? typed.text ?? '' : ''
       }).join('')
-      return { text: text === '' ? '(no output)' : text, isError: outcome.isError }
+      const body = text === '' ? '(no output)' : text
+      return limited()
+        ? { text: `${body}\n\n(${limitNote})`, isError: true }
+        : { text: body, isError: outcome.isError }
     }
     return { text: `Unknown tool "${name}": this review may use read, grep, glob and ${nativeShellTool} only`, isError: true }
   } catch (error) {

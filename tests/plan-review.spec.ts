@@ -8,8 +8,9 @@ import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
 import type { ForemanAssessment, PlanReviewCandidate, PlanReviewCheckDefinition, PlanReviewRecord, RequirementCoverage, WorkOrder } from '../src/contracts.js'
 import { OperationId, SessionId, SnapshotId, TaskId, WorkOrderId } from '../src/contracts.js'
 import { assertValidPlanReviewCandidate, candidateDigest, collectForemanFindings, FOREMAN_MAX_FINDINGS, FOREMAN_MAX_REVIEW_ROUNDS, FOREMAN_SYSTEM_PROMPT, foremanAssessmentSchema, lintPlanReviewCandidate, parseForemanAssessment, planReviewGateDecision, semanticCandidateProjection } from '../src/plan-review.js'
-import { FOREMAN_MAX_TOOL_CALLS, NativePlanReviewService } from '../src/host/plan-review.js'
-import { verifyForemanCitations } from '../src/host/plan-review-tools.js'
+import { FOREMAN_BASE_BUDGET_MS, FOREMAN_MAX_TOOL_CALLS, FOREMAN_TOOL_CALL_BUDGET_MS, ForemanReviewClock, NativePlanReviewService } from '../src/host/plan-review.js'
+import { executeForemanTool, verifyForemanCitations } from '../src/host/plan-review-tools.js'
+import { FOREMAN_TIMEOUT_MS } from '../src/profile/foreman.js'
 import { nativeShellTool } from '../src/host/shell.js'
 import { NativeAuxiliaryRequests } from '../src/host/native-auxiliary.js'
 import type { SessionBinding } from '../src/host/bindings.js'
@@ -1201,7 +1202,7 @@ describe('foreman inspection loop, citation check and runaway guard', () => {
   })
 
   it('stops a review that never converges at the runaway guard', async () => {
-    expect(FOREMAN_MAX_TOOL_CALLS).toBe(40)
+    expect(FOREMAN_MAX_TOOL_CALLS).toBe(60)
     let requests = 0
     // A reviewer that keeps reading without ever answering: every turn asks for another read.
     const { service } = makeService(async function* () {
@@ -1607,5 +1608,177 @@ describe('foreman review budgets: a stall is not the same answer as a slow revie
     if (outcome.kind !== 'unavailable') return
     expect(outcome.reason).toContain('User cancelled')
     expect(calls).toBe(1)
+  }, 20_000)
+})
+
+describe('foreman review clock: time follows the work', () => {
+  const candidate = makeCandidate()
+  candidate.order.candidateDigest = candidateDigest(candidate)
+  const readyBody = JSON.stringify({
+    schemaVersion: 1,
+    candidateDigest: candidate.order.candidateDigest,
+    verdict: 'ready',
+    inspected: INSPECTED(),
+    acceptanceAudit: { uncoveredRequirements: [], weakOracles: [], falseGreenScenarios: [] },
+    decisionChallenges: { unsupportedDecisions: [], counterexamples: [], unresolvedCriticalAssumptions: [] },
+    materialAmbiguities: [],
+  })
+
+  /**
+   * The same service, with a base window short enough to observe renewal.
+   *
+   * A review's window is renewed by completed tool calls, which are real round trips: at the
+   * production two-minute base, "extended" and "not extended" differ only after two minutes of
+   * waiting. The base is the one number a test may shorten.
+   */
+  function serviceWithBase(
+    streamFn: (options: GenerateOptions) => AsyncIterable<StreamChunk>,
+    foreman: { route: { provider: string; model: string; reasoningEffort?: string }; maxOutputTokens: number; timeoutMs: number },
+    baseBudgetMs: number,
+    tools?: unknown,
+  ) {
+    const ctx = { llm: { stream: (opts: GenerateOptions) => streamFn(opts) }, tools } as unknown as Context
+    const binding = {
+      sessionId: 'agent-1',
+      taskId: TaskId('task-1'),
+      profile: { digest: 'profile-digest', foreman },
+    } as unknown as SessionBinding
+    return new NativePlanReviewService(ctx, workspaceAgent(), binding, new NativeAuxiliaryRequests(), baseBudgetMs)
+  }
+
+  const toolCallTurn = (id: string, name: string, args: unknown): StreamChunk[] => {
+    const arguments_ = JSON.stringify(args)
+    return [
+      { type: 'tool-call-delta', index: 0, id: ToolCallId(id), name, argumentsDelta: arguments_ },
+      { type: 'block-end', index: 0, block: { type: 'tool-call', id: ToolCallId(id), name, arguments: arguments_ } },
+      { type: 'finish', reason: { kind: 'tool-calls' } },
+    ]
+  }
+
+  // The failure this replaces: a review that was reading the repository at ~115 tokens/s was
+  // killed at a fixed five minutes with sixteen completed turns and twenty-one tool calls, so
+  // the one thing it had proved — that it was working — bought it nothing.
+  it('keeps a review alive past its base window once a tool call has been completed', async () => {
+    let turn = 0
+    const service = serviceWithBase(async function* () {
+      turn += 1
+      if (turn === 1) {
+        yield* toolCallTurn('read-1', 'read', { file_path: 'src/plan-review.ts', offset: 1, limit: 1 })
+        return
+      }
+      // A first chunk proves the route is answering, then the turn streams on well past the
+      // base window. Only the completed tool call can have moved the deadline.
+      yield { type: 'text-delta', index: 0, text: readyBody.slice(0, 10) } as StreamChunk
+      await new Promise(resolve => setTimeout(resolve, 250))
+      yield { type: 'text-delta', index: 0, text: readyBody.slice(10) } as StreamChunk
+      yield { type: 'finish', reason: { kind: 'stop' } } as StreamChunk
+    }, { route: { provider: 'gz', model: 'worker' }, maxOutputTokens: 8192, timeoutMs: 5_000 }, 80)
+
+    const outcome = await service.review(candidate)
+    expect(outcome.kind).toBe('ready')
+  }, 20_000)
+
+  // Renewal is not a licence to run forever: the configured ceiling is the longest the Lead is
+  // ever made to wait, and a review that keeps calling tools still ends there. The work here is
+  // a slow command rather than a slow model turn, because only command time is a real round
+  // trip at test scale — a model turn stretched to the same duration would be measured against
+  // a stall window derived from the window it is spending.
+  it('ends at the configured ceiling even while the review keeps making tool calls', async () => {
+    let calls = 0
+    const tools = {
+      execute: async () => {
+        await new Promise(resolve => setTimeout(resolve, 40))
+        return { isError: false, content: [{ type: 'text', text: 'ok' }] }
+      },
+    }
+    const service = serviceWithBase(async function* () {
+      calls += 1
+      yield* toolCallTurn(`shell-${calls}`, nativeShellTool, { command: 'pnpm test', description: 'run the suite' })
+    }, { route: { provider: 'gz', model: 'crawler' }, maxOutputTokens: 8192, timeoutMs: 300 }, 60, tools)
+
+    const outcome = await service.review(candidate)
+    expect(outcome.kind).toBe('unavailable')
+    if (outcome.kind !== 'unavailable') return
+    expect(outcome.reason).toContain('300ms ceiling')
+    expect(outcome.reason).toContain('while still streaming')
+    // The count is what tells "a slow route" apart from "a reviewer the brief sent nowhere".
+    expect(outcome.reason).toMatch(/after \d+ tool calls/)
+    expect(calls).toBeLessThan(FOREMAN_MAX_TOOL_CALLS)
+  }, 20_000)
+
+  it('extends by work and never past its ceiling', () => {
+    const clock = new ForemanReviewClock(1_000, 50)
+    try {
+      expect(clock.remainingMs).toBeLessThanOrEqual(50)
+      clock.extend(600)
+      expect(clock.remainingMs).toBeGreaterThan(500)
+      clock.extend(10_000)
+      expect(clock.remainingMs).toBeLessThanOrEqual(1_000)
+      expect(clock.signal.aborted).toBe(false)
+    } finally { clock.dispose() }
+  })
+
+  it('aborts its own signal when the window runs out', async () => {
+    const clock = new ForemanReviewClock(40, 40)
+    try {
+      await new Promise(resolve => setTimeout(resolve, 60))
+      expect(clock.signal.aborted).toBe(true)
+      // Renewal after the deadline cannot resurrect a review that already ended.
+      clock.extend(10_000)
+      expect(clock.signal.aborted).toBe(true)
+    } finally { clock.dispose() }
+  })
+
+  it('starts the base window inside the ceiling a combo may configure', () => {
+    expect(FOREMAN_BASE_BUDGET_MS).toBeGreaterThan(0)
+    expect(FOREMAN_TOOL_CALL_BUDGET_MS).toBeGreaterThan(0)
+    expect(FOREMAN_BASE_BUDGET_MS).toBeLessThan(FOREMAN_TIMEOUT_MS.max)
+    expect(FOREMAN_MAX_TOOL_CALLS).toBe(60)
+  })
+})
+
+describe('foreman command limit: one command cannot outlive the review', () => {
+  it('stops a command at its own limit and says which limit it was', async () => {
+    let seen: AbortSignal | undefined
+    const tools = {
+      execute: (input: { signal?: AbortSignal }) => new Promise((_resolve, reject) => {
+        seen = input.signal
+        input.signal?.addEventListener('abort', () => reject(new Error('command aborted')), { once: true })
+      }),
+    }
+    const result = await executeForemanTool(
+      nativeShellTool,
+      JSON.stringify({ command: 'find / -name nothing', description: 'search the whole filesystem' }),
+      {
+        root: WORKSPACE_ROOT, tools: tools as never, agent: workspaceAgent(), signal: undefined,
+        callIdPrefix: 'foreman:task-1', nextCallId: () => '1', commandTimeoutMs: 30,
+      },
+    )
+    expect(result.isError).toBe(true)
+    expect(result.text).toContain('30ms limit')
+    // The limit reaches the command as an abort, not as a promise nobody is waiting for.
+    expect(seen?.aborted).toBe(true)
+  }, 20_000)
+
+  it('still lets the review itself cancel a running command', async () => {
+    const review = new AbortController()
+    const tools = {
+      execute: (input: { signal?: AbortSignal }) => new Promise((_resolve, reject) => {
+        input.signal?.addEventListener('abort', () => reject(new Error('review cancelled')), { once: true })
+      }),
+    }
+    const pending = executeForemanTool(
+      nativeShellTool,
+      JSON.stringify({ command: 'sleep 600', description: 'wait forever' }),
+      {
+        root: WORKSPACE_ROOT, tools: tools as never, agent: workspaceAgent(), signal: review.signal,
+        callIdPrefix: 'foreman:task-1', nextCallId: () => '1', commandTimeoutMs: 60_000,
+      },
+    )
+    review.abort('User cancelled')
+    const result = await pending
+    // The command limit is not what ended this one, so it must not claim to be.
+    expect(result.isError).toBe(true)
+    expect(result.text).not.toContain('limit one review command may run')
   }, 20_000)
 })
