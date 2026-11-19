@@ -234,7 +234,7 @@ alternative span is gone.
    tool, job, sandbox and subagent services.
 5. Cold-boot the plugin alone in a temporary home: `dshx verify-boot <plugin dir>`.
 6. Install into a real DSH and run a short task with a Fusion pair; check the Lead read-only probe from the README.
-7. Update the supported version in `README.md`, `README.en.md`, `INSTALL*.md` and this file.
+7. Update the supported version in `README.md`, `INSTALL*.md` and this file.
 
 ## Other plugins that rewrite the tool table
 

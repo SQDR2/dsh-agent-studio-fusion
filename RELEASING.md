@@ -1,6 +1,6 @@
 # Releasing
 
-[中文](RELEASING.zh.md) · [Install](INSTALL.md) · [README](README.en.md)
+[中文](RELEASING.zh.md) · [Install](INSTALL.md) · [README](README.md)
 
 Maintainer notes. Users do not need this page.
 

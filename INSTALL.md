@@ -1,6 +1,6 @@
 # Install DSH Agent Studio
 
-[中文](INSTALL.zh.md) · Product pages: [README.md](README.md) (中文), [README.en.md](README.en.md)
+[中文](INSTALL.zh.md) · Product page: [README.md](README.md) (中文)
 
 Requires **DeepSeek Harness `>=0.2.1-rc.5 <0.2.2-0 || >=0.2.2-rc.2 <0.3.0-0`** on **Node 24 or newer**. Other versions are not supported;
 the 0.2.0 series is no longer supported.
