@@ -86,7 +86,7 @@ export class NativeWorkflow {
   denyEffect(binding: SessionBinding): string {
     const id = `workflow-effect-denied:${binding.taskId}`
     if (!this.store.readDocument(id)) this.store.writeDocument(id, 0, { schemaVersion: 1, taskId: binding.taskId })
-    return 'FUSION_LEAD_READ_ONLY: execution belongs to the Sidekick. Use fusion_delegate for workspace changes or commands; fusion_explore for investigation. Lead takeover requires a current implementation report and a recorded rework review.'
+    return 'FUSION_LEAD_DELEGATE_FIRST: this workflow hands execution to the Sidekick. Use fusion_delegate for workspace changes or commands, and fusion_explore for investigation; Lead takeover requires a current implementation report and a recorded rework review.'
   }
 
   deniedEffect(binding: SessionBinding): boolean { return Boolean(this.store.readDocument(`workflow-effect-denied:${binding.taskId}`)) }

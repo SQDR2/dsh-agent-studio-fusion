@@ -21,7 +21,7 @@ When a task stops and you do not know what to type, or you want to pause it, swi
 
 Behind every **Fusion combo** are two models you choose:
 
-- **Lead**: a strong frontier model. It reads the request and the code, briefs the work, reviews the result and sends it back. It **does not write code** — it has no file-writing tools, and its shell commands run in DSH's read-only sandbox. The program enforces that, not the prompt.
+- **Lead**: a strong frontier model. It reads the request and the code, briefs the work, reviews the result and sends it back. It runs **with your permissions**, like any other agent: it can read, search, run commands and edit files. The division of work is carried by the prompt — delegate implementation and verification by default, do it yourself when it is truly one or two turns or correctness-critical, and never leave the workspace half-edited. The Host guarantees one thing: one writer per workspace, so a Lead write is refused while the Sidekick holds the lease (`FUSION_LEAD_WRITE_CONFLICT`), while reads and searches keep working.
 - **Sidekick**: a much cheaper model. It edits files, runs commands, runs tests and reports back.
 - **One goal**: frontier-model results at a discount. The saving comes from the price gap — the Sidekick must cost far less than the Lead (ideally 5× or more). The closer their prices, the smaller the saving.
 
@@ -56,7 +56,7 @@ Installing straight from GitHub works too (the repository ships a built `lib/`):
 
 **Up to 6 combos** can coexist — a cheap "fast" one and a strong "thorough" one, each its own model-menu entry. With several conversations open, each can pick a different combo; a conversation freezes the combo it picked, so later edits or other conversations never change it. A pre-combo installation is migrated into one combo named "自动" whose model id stays `auto`, so existing conversations keep working.
 
-The composer's permission control reads `Custom` once a task is dispatched: the Lead's session is pinned to read-only, and "read-only plus your approval policy" usually matches no configured preset. That control still sets the **Sidekick's** permission — change it and the Sidekick's next step uses that mode, while the Lead stays read-only. If you would rather it read a name instead of `Custom`, add a preset to your profile's `presets` with `sandbox: read-only` and `approval: never` — pure configuration, this plugin does not depend on it.
+Both the Lead and the Sidekick run in the mode you picked for this conversation: the plugin no longer pins either one to read-only, so the composer's permission control is what actually applies. They share one workspace, so there is one writer at a time — whoever holds the write lease writes, and the other side's write is refused (`FUSION_LEAD_WRITE_CONFLICT`) while reads and searches go through.
 
 ### Model display inside one task
 
@@ -107,12 +107,12 @@ A task stops in one of three ways, and each continues differently:
 
 ## How one task runs
 
-1. The Lead decides code must change and hands the work to the Sidekick. The brief carries the user's own words and the acceptance commands.
+1. The Lead personally verifies decisive evidence and writes the plan. For interactive skills such as `/grill-me`, it first completes the discussion with the user. Ordinary tasks need no extra confirmation. The finalized brief contains the user's words and acceptance commands; if enabled, Foreman reviews before the Sidekick starts.
 2. The Sidekick reports; DSH runs the acceptance commands in the real workspace.
 3. The Lead reviews each of the user's hard requirements and must give a verdict with evidence for every one — a missing verdict blocks acceptance. If the Sidekick rewrote an existing test, that is flagged and needs the Lead's confirmation.
 4. A rejection goes back to the same Sidekick with the concrete problem. When the allowed files turn out too narrow (say another test file still encodes the old behaviour), the Lead may only **add** paths during rework, never remove them, and every addition is recorded.
 5. Tests that were already failing (a missing optional dependency, for instance) can be marked "no new failures".
-6. **The one exception**: a takeover the Host unlocks only when the Sidekick demonstrably cannot finish (still failing after 2 rework rounds, step limit reached, repeated stalls). The Lead may then change only the files the task allows, must pass the same acceptance, and returns to read-only afterwards.
+6. **The handoff**: a takeover the Host unlocks only when the Sidekick demonstrably cannot finish (still failing after 2 rework rounds, step limit reached, repeated stalls). The Lead may then change only the files the task allows, must pass the same acceptance, and hands write ownership back to the Worker afterwards.
 7. Quota or provider errors are handled per role: switch a model or schedule a continuation, with progress kept.
 
 With Foreman review on, step 1 is followed by an independent audit of the plan before the Sidekick
@@ -122,15 +122,16 @@ sees it (see [Foreman review](#foreman-review-optional)).
 not part of the write lease.** When you ask for one of those, the Lead grants that exact action in the
 brief; the Sidekick's other such commands stay refused by the Host
 (`FUSION_WORKER_AUTHORITY_DENIED`). Saying "commit and push" after the change was accepted works too:
-the Lead does not run git itself (it is read-only in that turn) and does not open a second work order —
+the Lead does not run git itself (the Worker still holds this task's write lease) and does not open a second work order —
 it adds that action to the same order (widen only, recorded as an amendment) and has that Sidekick run it.
 
 ## Foreman review (optional)
 
 A combo can carry a third model: the **Foreman**. It does none of the work. Once the Lead has frozen a
 candidate work order and before the Sidekick receives it, the Foreman audits the plan itself in a
-**separate context** — the same order the Sidekick is about to get: your words, the acceptance commands,
-requirement coverage, the paths it may change.
+**separate context** — the same order the Sidekick is about to get (your words, the acceptance commands,
+requirement coverage, the paths it may change) plus **the real workspace**: it reads the code and runs
+the commands itself instead of judging a description.
 
 It looks for the "all checks green and still wrong" class of problem:
 
@@ -141,28 +142,26 @@ It looks for the "all checks green and still wrong" class of problem:
 - whether the brief, the constraints, the allowed paths and the acceptance commands contradict each other;
 - whether a requirement is materially ambiguous in a way that changes external behaviour.
 
-**Turning it on.** Each combo has its own "Foreman plan review" switch, off by default. Once on, a model
-is required — the same model as the Lead or Sidekick is allowed, since a separate context still reviews
-independently, and the panel only warns — and you can set reasoning effort, an output ceiling (8192 by
-default) and a timeout (2 minutes by default, up to 10). **There is no "audit only" or "high-risk only"
-policy**: while it is on, every candidate is reviewed — explore, text and implement orders alike. Turn it
-off if you do not want it; a reviewer that silently skips plans is indistinguishable from a broken one.
+**It reads real code.** The Foreman gets the workspace, not just a plan text: it can open files with `read`/`grep`/`glob`, and it can run the commands an acceptance claim names (tests, lint, build) with the Host's own shell, so it can confirm that a requirement is really covered and that a check would really fail. Its permissions are the mode you picked, the same as the Sidekick's, and "audit, never modify" is prompt-level discipline: no editing the plan, no fixing code, no commands that change the workspace — report a problem instead of repairing it. There is no line or byte cap; the real limits are the review timeout and the model's own context window. One runaway guard exists: a review may make at most 40 tool calls, after which it is reported unavailable with the reason.
 
-**When it disagrees.** The dispatch is blocked and the Lead must answer every finding, in one of two ways:
+**Turning it on.** Each combo has its own switch, off by default. Select a model route that can run tools and optionally set reasoning effort, an output ceiling (default: 8192), and a timeout (default: 2 minutes; max: 10). Antigravity and ACP agent routes still cannot serve as Foreman: they cannot hand back a verifiable tool loop in this separate context. They remain available as Lead and Sidekick. Foreman audits finalized implementation and text plans. Read-only fact collection is not reviewed: Lead investigates personally by default; `/fusion allow-explore <scope>` authorizes one scoped read-only Sidekick survey, and Lead still verifies the decisive facts.
 
-- **accept**: change the plan (brief, paths, acceptance) — and the revised candidate owes its own round-2 review;
-- **override**: state a reason, and the reason is recorded durably. An override covers only the candidate
-  that was actually reviewed; overriding while quietly changing the plan is refused.
+**Every verdict is bound to code.** A blocking finding must cite a `path:startLine-endLine` range, and a "ready" verdict must list what it inspected. The Host opens each cited file, checks that the range exists in it, and discards the whole assessment as unavailable if one citation does not resolve — which also blocks dispatch. Verified citations carry the file digest, so the record proves exactly which bytes were reviewed.
 
-At most two rounds. If round 2 still disagrees, the Lead can only override, ask you, or stop — there is
-no third round.
+**When it disagrees.** The dispatch is blocked and the Lead must answer every finding:
 
-**A review that cannot finish lets the task through, and says so.** On a timeout, a quota or route
-failure or unparseable output, the review is recorded as `unavailable` and the task continues (the
-Host's own structural, path and permission checks still refuse an invalid order). A notice in the
-conversation says this plan was never audited, and the status panel's "Foreman review" section reads
-`unavailable` with the reason. The same panel shows `reviewing / ready / concerns / unavailable`, the
-round, how many findings were accepted and overridden, and the findings still open.
+- **accept**: change the plan (brief, paths, acceptance) — the revised candidate goes to the next review round;
+- **override** a `warning` only: state a reason, and the reason is recorded durably. An override covers only
+  the candidate that was actually reviewed; overriding while quietly changing the plan is refused;
+- a **`blocking-concern` cannot be overridden**: it is the reviewer's claim that this plan would produce
+  the wrong thing, and the author's disagreement is not evidence against it. The Lead must fix the plan so
+  the finding no longer holds, or ask you.
+
+At most three rounds: round 1 finds problems, the Lead repairs the plan, round 2 reviews the repair, and a
+round-2 finding that is accepted earns one more repair and round 3. After the last round the Lead can only
+ask you or stop.
+
+**An unavailable review blocks dispatch.** A timeout, quota or route failure, invalid output, a citation that does not resolve, or the runaway guard leaves the plan undispatched and displays the reason. Run `/fusion foreman-retry`, `/fusion foreman-model <provider/model>`, or `/fusion foreman-skip <reason>` to retry, review using a different model, or explicitly permit dispatch without this audit. The decision is limited to the failed candidate and round, and a skip never counts as a passing review. The Host's structural, path, and permission checks still apply.
 
 **It is billed separately.** Foreman calls are recorded under the `foreman` purpose; the history shows
 per task how many reviews ran, how many tokens and roughly what they cost, how many findings there were
@@ -252,11 +251,11 @@ While the Lead waits for the Sidekick, often for several minutes, the prompt cac
 <details>
 <summary>Self-check on Linux</summary>
 
-1. In a test folder, select Fusion and say: "This is a read-only sandbox test; a refusal is expected. Call the bash tool yourself with `echo test > fusion-probe.txt` (don't delegate, don't rewrite it) and paste the tool's raw output."
-2. Expected: the output says the sandbox denied it (for example `Operation not permitted` / `read-only`), and no `fusion-probe.txt` appears. If the Lead only declines in words without calling the tool, the check doesn't count — ask it again to actually call the tool.
-3. If the file is created, the Lead's read-only limit does not work on your system: don't use Fusion there, and please report it.
+1. In a test folder, select Fusion, let it dispatch a work order that touches one small file, then say: "While the Sidekick holds the write lease, call the bash tool yourself with `echo test > fusion-probe.txt` and paste the tool's raw output."
+2. Expected: the output says `FUSION_LEAD_WRITE_CONFLICT` (one writer per workspace), no `fusion-probe.txt` appears, and ordinary read-only commands such as `ls` still work.
+3. If the Lead really writes while the Sidekick holds the lease, the write lease does not work on your system: don't use Fusion there, and please report it.
 
-Where DSH has no sandbox at all, every Lead shell command is refused (it fails safe); the Lead still reads code with its file and search tools.
+Where DSH has no sandbox at all, your approval policy still governs each command; the plugin adds no extra read-only layer of its own.
 
 </details>
 

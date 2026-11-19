@@ -1,5 +1,7 @@
 import type { GenerateOptions } from '@deepseek-ai/dsh-llm';
 import type { Digest, Role, TaskId } from '../contracts.js';
+export declare function markForemanReview(request: GenerateOptions): void;
+export declare function isForemanReview(request: GenerateOptions): boolean;
 export type AuxiliaryRequest = {
     purpose: 'cache-keepalive';
     taskId: TaskId;

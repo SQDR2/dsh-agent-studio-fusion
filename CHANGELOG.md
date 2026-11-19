@@ -20,6 +20,53 @@ own tags and releases.
 Entry format: what changed, then what was actually validated. "Not claimed" lines mark what a release did *not* test —
 read them before assuming a platform is covered.
 
+## Unreleased
+
+### The Lead runs with your permissions; the Foreman audits the code, not the plan text
+
+- **The Lead is no longer forced into a read-only sandbox.** It used to be pinned to
+  `read-only` whenever it did not hold the write lease, which made the expensive reviewer
+  unable to run the check it was reviewing and contradicted the prompt telling it to verify
+  its own judgement. Both roles now run in the mode the user picked, and the one remaining
+  rule is the concurrency boundary: exactly one writer per workspace, so a Lead write while
+  the Sidekick holds the lease is refused with `FUSION_LEAD_WRITE_CONFLICT` (reads and
+  searches keep working). `FUSION_LEAD_READ_ONLY` and `leadShellProblem` are gone, and the
+  Lead's enforced-v3 catalog now carries `write`, `edit` and `job_kill`. Discipline is the
+  prompt's job: model-lead.md and lead.md were rewritten to say the Lead owns the outcome,
+  delegates by default, and must never leave a half-edited workspace.
+- **The Foreman now reviews against the real repository.** It gets `read`/`grep`/`glob`
+  plus the Host's own shell, so it can open the files a finding depends on and run the
+  command an acceptance claim names. "Audit only, never modify" is now a prompt clause
+  (`FOREMAN_SYSTEM_PROMPT`) rather than a second sandbox.
+- **Every verdict is bound to code.** A `blocking-concern` must cite a
+  `path:startLine-endLine` range and a `ready` verdict must list the ranges it inspected;
+  the Host opens each cited file, checks the range exists, and discards the whole assessment
+  as unavailable when one citation does not resolve. Verified citations carry the digest of
+  the bytes that were read.
+- **A blocking concern can no longer be overridden.** Accepting it is the only way past it,
+  which sends the revision through another round; only `warning` findings may be overridden
+  with a reason. A review that cannot produce a verdict now stops the dispatch instead of
+  letting the plan through unaudited: the user chooses `/fusion foreman-retry`,
+  `/fusion foreman-model <provider/model>` or `/fusion foreman-skip <reason>`, and the
+  decision is bound to that exact failed candidate and round.
+- **Three review rounds, derived from one constant.** `FOREMAN_MAX_REVIEW_ROUNDS` is now the
+  single source for the gate, the coordinator and the reducer, which had kept a hard-coded
+  "1 or 2" that refused the third round the gate was willing to run.
+- **A review cannot run away.** One review may make at most 40 tool calls
+  (`FOREMAN_MAX_TOOL_CALLS`); past that it is reported unavailable with the reason instead of
+  consuming its whole timeout without converging.
+- **Entry gates:** `fusion_plan_discussion(open|finalize)` keeps an interactive skill's
+  discussion open until it is really finished (a `/grill-me` invocation opens it
+  automatically), `/fusion allow-explore <scope>` authorizes one bounded read-only survey
+  that is neither reviewed nor dispatched, and `fusion_finish_direct` refuses to close a task
+  with a discussion or a review still pending.
+
+Validated: `pnpm typecheck`; `pnpm exec vitest run` 847 passed; `DSHX_HARNESS=… pnpm test:host`
+333 passed, 1 skipped (the Windows ACL case). Not claimed: no live conversation was run
+against this build, so the five end-to-end scenarios in
+[`docs/PLAN-LEAD-FOREMAN-V2.md`](docs/PLAN-LEAD-FOREMAN-V2.md) §S6 are covered by the native
+Host suite rather than by a real model.
+
 ## 1.2.3 — 2026-11-18
 
 ### A Foreman review that never started is no longer reported as a generic timeout

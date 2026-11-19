@@ -30,17 +30,14 @@ export interface FusionStatus {
     modelControl?: ControlView
     models: { lead: PhysicalRoute; worker: PhysicalRoute; compactor: PhysicalRoute | null }
     /**
-     * Role-separated sandbox modes, present while Fusion confines the Lead. The
-     * composer's own permission control follows the conversation (Lead) session,
-     * so the UI shows these instead of the derived preset name.
+     * Per-role sandbox modes, present while Fusion owns the conversation. Both roles run
+     * under the mode the user chose; the field stays so the UI can name whichever role is
+     * working without re-deriving Fusion's state.
      */
     permissions?: {
-      /**
-       * What the Lead's own work is confined to. The session is widened only for the
-       * checks Fusion runs itself and for the Lead during a Host-unlocked takeover.
-       */
+      /** What the Lead runs under: the user's mode for this conversation. */
       lead: SandboxMode
-      /** What the Sidekick runs under: the mode the user chose for this conversation. */
+      /** What the Sidekick runs under: the same user mode. */
       worker: SandboxMode
       /** The role working right now; null while the task waits. */
       active: Role | null
@@ -174,10 +171,10 @@ export function projectPlanReviewMetrics(events: readonly FusionEvent[]): PlanRe
   let planReviewRevisions = 0
   let errorAccepts = 0
 
-  // A plan-review revision is the reviewer's own round 2, and only a candidate the Lead
-  // actually revised earns one. It is deliberately NOT a rework round: rework measures the
-  // Worker repeating implementation work, and counting reviewer iterations there would make
-  // Foreman look like it caused the rework it exists to prevent (plan §8.2).
+  // A plan-review revision is any later review round after an accepted finding, and only a
+  // candidate the Lead actually revised earns one. It is deliberately NOT a rework round:
+  // rework measures the Worker repeating implementation work, and counting reviewer iterations
+  // there would make Foreman look like it caused the rework it exists to prevent (plan §8.2).
   let pendingAcceptedRevision = false
   // An error accept is an accept recorded over a protocol-invalid binding, or one whose
   // report left requirements unresolved. A completed-but-unverified report is not an error:
@@ -193,9 +190,9 @@ export function projectPlanReviewMetrics(events: readonly FusionEvent[]): PlanRe
       } else if (event.payload.assessment.verdict === 'ready') {
         ready++
       }
-      // Arriving at a second review means the Lead revised the candidate in response to the
-      // findings; an interrupted round-2 that never completed is not a revision.
-      if (event.payload.round === 2 && pendingAcceptedRevision) {
+      // Arriving at any later review round means the Lead revised the candidate in response to
+      // the findings; an interrupted request that never completed is not a revision.
+      if (event.payload.round > 1 && pendingAcceptedRevision) {
         planReviewRevisions++
         pendingAcceptedRevision = false
       }

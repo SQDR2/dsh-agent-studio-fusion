@@ -2,7 +2,7 @@ import type { Context } from '@deepseek-ai/cordis';
 import type { Agent } from '@deepseek-ai/dsh-agent';
 import type { GenerateOptions } from '@deepseek-ai/dsh-llm';
 import type { ToolExecution, ToolRunContext } from '@deepseek-ai/dsh-tools';
-import type { ForemanDisposition, FusionEvent, RequirementCoverage, Role, TaskId } from '../contracts.js';
+import type { Digest, ForemanDisposition, FusionEvent, PhysicalRoute, RequirementCoverage, Role, TaskId } from '../contracts.js';
 import { type PlanReviewModule } from '../plan-review.js';
 import { WorkspaceWriteLease } from '../execution/write-lease.js';
 import type { ResolvedProfile } from '../profile/resolve.js';
@@ -227,7 +227,14 @@ export declare class FusionCoordinator {
     /** Whether this task's Worker is dispatched over an ACP route (an agent process, not a model route). */
     acpRunsWorker(binding: SessionBinding): boolean;
     wait(agent: Agent, exec: ToolRunContext): Promise<string>;
-    delegate(agent: Agent, args: DelegateInput, exec: ToolRunContext, mode?: 'explore' | 'implement' | 'text'): Promise<string>;
+    /** Only the registered human command calls this; it is not a model tool. */
+    authorizeExploration(agent: Agent, commandId: string, scope: string): void;
+    /** Authorize the next attempt or bypass of exactly the failed candidate and round. */
+    authorizeForemanRecovery(agent: Agent, commandId: string, action: 'retry' | 'skip', options?: {
+        route?: PhysicalRoute;
+        note?: string;
+    }): void;
+    delegate(agent: Agent, args: DelegateInput, exec: ToolRunContext, mode?: 'explore' | 'implement' | 'text', expectedDigest?: Digest): Promise<string>;
     rework(agent: Agent, feedback: string, exec: ToolRunContext, block?: boolean, checks?: readonly CheckDefinition[], addAllowedPaths?: readonly string[], authority?: readonly string[]): Promise<string>;
     review(agent: Agent, decision: 'accept' | 'rework' | 'needs-decision', reason: string, exec: ToolRunContext, verdicts?: readonly {
         index: number;

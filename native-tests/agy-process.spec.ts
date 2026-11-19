@@ -11,25 +11,29 @@
  *     `stop` finish, plus the session binding the adapter persists;
  *   - one tool step: the `tool-calls` span cut, the `agy_tool` arguments the
  *     mirror receives, and the recorded output the mirror replays;
+ *   - Foreman isolation: a shared Lead session stays unchanged, with no CLI
+ *     launch, when the provider cannot guarantee a tool-free audit;
  *   - cleanup: the child process exits, its recording settles, and nothing is
  *     left holding a temp directory.
  *
- * It is NOT a Fusion-worker end-to-end test. No Lead, no work order, no
- * coordinator, no Google login and no network are involved: the fixture only
- * writes NDJSON to stdout. What it proves is that the ported adapter, parser,
- * recorder and mirror work together against a real process boundary.
+ * It is NOT a Fusion-worker end-to-end test. No actual Lead, coordinator,
+ * Google login or network is involved: the fixture only emits NDJSON and
+ * records argv. It proves the adapter, parser, recorder and mirror work
+ * together across a real process boundary.
  *
  * Isolation: HOME, USERPROFILE, DSH_HOME, DSH_STATE_DIR, the agy conversations
  * directory, media dir and the MCP config are all redirected into throwaway temp
  * directories, and the fallback conversation-discovery hook is disabled, so the
- * run cannot read or write the account pool, a system keychain or real user
- * state. The only prompt this test sends is the literal below.
+ * run cannot read or write the account pool, a system keychain or real user state.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import type { GenerateOptions, Message, StreamChunk } from '@deepseek-ai/dsh-llm'
+import { Context } from '@deepseek-ai/cordis'
+import LlmRuntime, { type GenerateOptions, type Message, type StreamChunk } from '@deepseek-ai/dsh-llm'
+import { FOREMAN_SYSTEM_PROMPT } from '../src/plan-review.js'
+import { markForemanReview } from '../src/host/native-auxiliary.js'
 import { AgyAdapter, type AgyAdapterDeps } from '../src/host/agy/adapter.js'
 import { ModelCatalog } from '../src/host/agy/models.js'
 import { SessionStore } from '../src/host/agy/sessions.js'
@@ -37,8 +41,9 @@ import { RunRegistry } from '../src/host/agy/recording.js'
 import { defineAgyMirrorTool, MIRROR_TOOL_NAME } from '../src/host/agy/mirror-tool.js'
 import { probeProcess } from '../src/host/agy/runner.js'
 import { defaultConfig, type PluginConfig } from '../src/host/agy/types.js'
+import { hostPlugin } from './host-plugin.js'
 
-/** The exact prompt literal this check may send. Nothing else is composed here. */
+/** Fixed text for ordinary fixture turns. */
 const PROMPT = 'offline integration check'
 
 const FIXTURE = join(import.meta.dirname, 'fixtures', 'fake-agy.mjs')
@@ -190,6 +195,49 @@ describe('offline AGY process integration (fixture child, real adapter, real mir
     // The session binding names the conversation the fixture reported.
     const binding = store.get('offline-session')
     expect(binding?.conversationId).toBe('conv-offline-1')
+  })
+
+  it('refuses a Foreman audit before spawning a tool-capable CLI or reusing the Lead conversation', async () => {
+    // The main route can skip permissions and expose the MCP bridge; the audit
+    // must never inherit those capabilities from the Lead's session.
+    const { adapter, store, runs, argsFile } = makeAdapter({ mcpBridge: true, forwardSystemPrompt: false })
+    const ctx = new Context()
+    try {
+      await ctx.plugin(hostPlugin(LlmRuntime))
+      ctx.llm.registerAdapter(['antigravity'], adapter)
+      const sessionId = 'offline-foreman-lead' as NonNullable<GenerateOptions['sessionId']>
+      const lead = await collect(ctx.llm.stream(options([user(PROMPT)], { sessionId, tools: [] })))
+      expect(lead.at(-1)).toMatchObject({ type: 'finish', reason: { kind: 'stop' } })
+      const binding = store.get(sessionId)
+      expect(binding?.conversationId).toBe('conv-offline-1')
+      const leadArgv = readFileSync(argsFile, 'utf8')
+      const leadRuns = [...runs.runIds]
+
+      const auditMessages = [user('{"candidateDigest":"offline-audit"}')]
+      const canonical = options(auditMessages, { sessionId, system: FOREMAN_SYSTEM_PROMPT, tools: [] })
+      const marked = options(auditMessages, { sessionId, system: FOREMAN_SYSTEM_PROMPT, tools: [] })
+      markForemanReview(marked)
+      // A copied request stays an audit even if the system prompt was modified
+      // or DSH tool schemas were added. Neither may turn it into active work.
+      const modified = {
+        ...marked,
+        system: `${marked.system}\nOffline extension.`,
+        tools: [{ name: MIRROR_TOOL_NAME, description: 'Fixture tool', parameters: {} }],
+      }
+      for (const request of [canonical, modified]) {
+        const audit = await collect(ctx.llm.stream(request))
+        expect(audit).toEqual([expect.objectContaining({
+          type: 'finish', reason: expect.objectContaining({
+            kind: 'error', failure: expect.objectContaining({ message: expect.stringMatching(/Foreman.*tool.free/i) }),
+          }),
+        })])
+        expect(readFileSync(argsFile, 'utf8')).toBe(leadArgv)
+        expect(store.get(sessionId)).toEqual(binding)
+        expect(runs.runIds).toEqual(leadRuns)
+      }
+    } finally {
+      await ctx.fiber.dispose()
+    }
   })
 
   it('cuts one tool span, records the step, and replays it through the production mirror', async () => {

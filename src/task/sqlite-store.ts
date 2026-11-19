@@ -33,7 +33,8 @@ function processAlive(pid: number): boolean {
  */
 const TASK_DOCUMENT_FAMILIES = [
   'acceptance-amendment', 'activity', 'activity-link', 'brief', 'check', 'check-invocation',
-  'context-recovery', 'context-request', 'effects', 'effects-receipt', 'keepalive',
+  'context-recovery', 'context-request', 'effects', 'effects-receipt', 'explore-grant', 'foreman-input', 'foreman-recovery', 'keepalive',
+  'plan-discussion', 'plan-review-notice',
   'lead-direct', 'lead-takeover', 'native-approval', 'native-effect', 'native-usage', 'progress',
   'restore-index', 'runtime', 'scope-expansion', 'task-activity', 'task-checkpoint', 'task-compaction',
   'task-context', 'task-index', 'task-origin', 'text', 'worker-delivery', 'worker-notice', 'worker-request',

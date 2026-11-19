@@ -127,6 +127,10 @@ describe('independent Fusion settings', () => {
   expect(profile.interactionMode).toBe('model-like')
   expect(choiceFromProfile(profile)).toEqual(pair)
   expect(profile.workflowPolicy).toBe('enforced-v3')
-  expect(prompts.lead).toContain('read-only sandbox')
+  // The Lead is no longer fenced off from the workspace: both roles run in the user's own
+  // mode, and the only remaining boundary is the one-writer-per-workspace lease. The prompt
+  // says so, which is what replaced the read-only sandbox sentence.
+  expect(prompts.lead).toContain('FUSION_LEAD_WRITE_CONFLICT')
+  expect(prompts.lead).not.toContain('read-only sandbox')
   expect(readBinding({ schemaVersion: 1, sessionId: 'new', taskId: 'task', selected: true, profile, prompts }, 'new').profile).toEqual(profile)
 })

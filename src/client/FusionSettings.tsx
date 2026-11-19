@@ -426,7 +426,7 @@ export function FusionSettings() {
                           // A review that finds many problems must still fit its budget, and a
                           // slow reviewer must be allowed to finish: 4096 output tokens and 30
                           // seconds turned real reviews into `max-tokens` and `TimeoutError`
-                          // aborts, which the gate then reads as approval. Two minutes hit the
+                          // aborts, producing no audit verdict. Two minutes hit the
                           // same wall on an implement candidate that produced no stream at all,
                           // so a new reviewer starts at `FOREMAN_DEFAULT_TIMEOUT_MS`.
                           maxOutputTokens: 8192,
@@ -453,8 +453,8 @@ export function FusionSettings() {
             </label>
             {current.pair.foreman && (
               <div className="fusion-foreman-panel">
-                <p>{tr(lang, '工长模型独立审计候选工作单，发现潜在语义缺陷。开启后模型必填，且每一份候选计划都必须先通过审查：没有“仅审查不阻断”或“只审高风险”这类开关。',
-                  'The Foreman independently audits candidate work orders for semantic gaps. The model is required while this is on, and every candidate plan must pass its review: there is no "audit only" or "high-risk only" setting.')}</p>
+                <p>{tr(lang, '工长只审查 Lead 定稿的方案，不参与取证、修改或修复。审查不可用时不派工。请选择不自行执行工具的模型；Antigravity 和 ACP Agent 不支持担任工长。',
+                  'Foreman audits finalized Lead plans only. It does not gather evidence, edit or apply fixes. An unavailable review blocks dispatch. Choose a tool-free model: Antigravity and ACP agents are not supported as Foreman.')}</p>
                 {/* The plan warns against a hard price check and for a same-model arm: the same
                     model in a separate context is a valid experiment, so this is a hint, and
                     saving is never refused for it. */}

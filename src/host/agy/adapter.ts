@@ -11,6 +11,7 @@ import { dirname, join } from 'node:path'
 import { mkdir, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { LlmAdapter, LlmError, type GenerateOptions, type LlmModelInfo, type LlmProviderInfo, type LlmResolvedModelInfo, type RequestMessage, type StreamChunk } from '@deepseek-ai/dsh-llm'
+import { isForemanReview } from '../native-auxiliary.js'
 import { Err, NETWORK_RETRY_DELAYS_MS, accountsShareSingleEgress, isAccountScopedFailure, isAuthoritativeAuthError, looksLikeAuthFailure, looksLikeAuthVerificationJitter, looksLikeContextWindowExceeded, looksLikeEligibilityFailure, looksLikeHardRateLimit, looksLikeNetworkError, looksLikeRateLimit, networkRetryDelayMs, shouldMarkAuthRequired, ELIGIBILITY_ERROR_HINT, PROVIDER_ID, type PluginConfig } from './types.js'
 import { modelFamilyOf, type ManagedAccount, type ModelFamily } from './pool-types.js'
 import type { AccountPoolManager } from './pool.js'
@@ -1027,6 +1028,13 @@ export class AgyAdapter extends LlmAdapter {
   }
 
   override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    if (isForemanReview(options)) {
+      // Plan mode is not a tool boundary. Even without DSH tool schemas the CLI
+      // owns native tools and loads MCP servers from its settings. Reject before
+      // looking up the Lead's session or spawning until there is a verified way
+      // to launch a fresh, tool-free audit conversation with the full protocol.
+      throw new LlmError('Foreman review is unavailable on Antigravity: agy has no verified tool-free mode; choose a tool-free Foreman route', Err.AUX_DISABLED)
+    }
     const cfg = this.deps.getConfig()
     const bin = this.deps.bin()
     if (!bin) throw new LlmError('agy binary not found on PATH — install it via https://antigravity.google/docs/cli/install', Err.AGY_NOT_INSTALLED)

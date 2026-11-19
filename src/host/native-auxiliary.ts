@@ -1,5 +1,17 @@
 import type { GenerateOptions } from '@deepseek-ai/dsh-llm'
 import type { Digest, Role, TaskId } from '../contracts.js'
+import { FOREMAN_SYSTEM_PROMPT } from '../plan-review.js'
+
+// LLM adapters may shallow-copy their call options. Keep this separate from the
+// request-accounting WeakMap, and let the canonical audit protocol fail closed too.
+const foremanReview = Symbol('fusion-foreman-review')
+export function markForemanReview(request: GenerateOptions): void {
+  Object.assign(request, { [foremanReview]: true })
+}
+export function isForemanReview(request: GenerateOptions): boolean {
+  return (request as GenerateOptions & { [foremanReview]?: true })[foremanReview] === true
+    || request.system === FOREMAN_SYSTEM_PROMPT
+}
 
 export type AuxiliaryRequest =
   | {

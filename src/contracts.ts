@@ -252,10 +252,31 @@ export interface ForemanAttributionRecord {
   summary?: string
 }
 
+/**
+ * One file range a Foreman review cites as the code it actually read.
+ *
+ * The path is repo-relative and the range is 1-based and inclusive on both ends, so the
+ * citation names exact bytes rather than a whole file the reviewer may never have opened.
+ * `digest` is filled by the Host after it verified the range against the frozen workspace:
+ * it is the proof of which revision of those bytes the verdict was reached on, and the
+ * reviewer may not supply it (the answer parser rejects it as an unknown field).
+ */
+export interface ForemanCitation {
+  path: string
+  startLine: number
+  endLine: number
+  digest?: Digest
+}
+
 export interface ForemanAssessment {
   schemaVersion: 1
   candidateDigest: string
   verdict: 'ready' | 'concerns'
+  /**
+   * What the reviewer actually inspected. Required, non-empty, when the verdict is
+   * `ready`: an approval that names no code is an assertion, not a review.
+   */
+  inspected?: ForemanCitation[]
   acceptanceAudit: {
     uncoveredRequirements: ForemanFinding[]
     weakOracles: ForemanFinding[]
@@ -283,6 +304,8 @@ export interface ForemanFinding {
   decisionIndexes: number[]
   message: string
   suggestedCorrection: string
+  /** Required, non-empty, on a `blocking-concern`: the code that shows the problem. */
+  evidence?: ForemanCitation[]
 }
 
 export type ForemanDisposition =
@@ -576,7 +599,8 @@ export type FusionEvent =
   | EventEnvelope<'requirements/revised', { reason: string }>
   | EventEnvelope<'profile/frozen', { digest: Digest; profileId: string; version: string }>
   | EventEnvelope<'intent/chosen', { intent: ExecutionIntent }>
-  | EventEnvelope<'plan-review/requested', { workOrderId: WorkOrderId; candidateDigest: Digest; round: number; route: PhysicalRoute; requestedAt?: string }>
+  | EventEnvelope<'plan-review/requested', { workOrderId: WorkOrderId; candidateDigest: Digest; round: number; route: PhysicalRoute; requestedAt?: string; retryOf?: WorkOrderId; commandId?: string }>
+  | EventEnvelope<'plan-review/skip-authorized', { candidateDigest: Digest; round: number; failureWorkOrderId: WorkOrderId; commandId: string; reason: string }>
   | EventEnvelope<'plan-review/completed', { workOrderId: WorkOrderId; candidateDigest: Digest; round: number; assessment: ForemanAssessment; record: PlanReviewRecord }>
   | EventEnvelope<'plan-review/resolved', { workOrderId: WorkOrderId; candidateDigest: Digest; round: number; dispositions: readonly ForemanDisposition[]; revisedCandidateDigest?: Digest; resolvedAt?: string }>
   | EventEnvelope<'plan-review/unavailable', { workOrderId: WorkOrderId; candidateDigest: Digest; round: number; reason: string; record: PlanReviewRecord }>

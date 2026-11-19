@@ -39,6 +39,7 @@ import type { PermissionTurn } from './permission.js'
 import type { AcpAgentProfile, AcpMcpServerHttp } from './types.js'
 import { homedir } from 'node:os'
 import { LlmAdapter, LlmError, resolveRetryPolicy } from '@deepseek-ai/dsh-llm'
+import { isForemanReview } from '../native-auxiliary.js'
 import { DEFAULT_CONTEXT_WINDOW, DEFAULT_MODEL_ID, spawnFacts } from './config.js'
 import { AcpAgentProcess, applyConfigOptions } from './agent-process.js'
 import { addUsage, ChunkTranslator, metaUsage, usageDelta } from './chunk-translator.js'
@@ -342,6 +343,11 @@ export class AcpAdapter extends LlmAdapter {
   }
 
   override async* stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    if (isForemanReview(options)) {
+      // Withholding the DSH bridge does not disable an ACP agent's own tools.
+      yield { type: 'finish', reason: { kind: 'error', failure: failure('AUX_DISABLED', 'Foreman review is unavailable on ACP agent routes: choose a tool-free Foreman model') } }
+      return
+    }
     let finished = false
     try {
       for await (const chunk of this.run(options)) {
