@@ -55,7 +55,7 @@ import { isFusionSourceKind } from '../src/message-source.js'
 import { KEEPALIVE_ATTEMPTS, KEEPALIVE_INTERVAL_MS, KEEPALIVE_PROMPT } from '../src/host/native-keepalive.js'
 import type { KeepaliveClock, KeepaliveRecord } from '../src/host/native-keepalive.js'
 import { WorkOrderId, type PhysicalRoute, type PlanReviewCandidate, type PlanReviewRecord, type RequirementCoverage } from '../src/contracts.js'
-import { candidateDigest, semanticCandidateProjection, type PlanReviewModule, type PlanReviewOutcome } from '../src/plan-review.js'
+import { candidateDigest, FOREMAN_SYSTEM_PROMPT, semanticCandidateProjection, type PlanReviewModule, type PlanReviewOutcome } from '../src/plan-review.js'
 import { snapshotWorkspace } from '../src/host/workspace.js'
 import type { SessionBinding } from '../src/host/bindings.js'
 import type { NativeUsageRecord } from '../src/host/native-usage.js'
@@ -119,6 +119,7 @@ async function setup(script: Script, workerScript?: Script, options: {
    */
   bridgeTransport?: boolean
   foreman?: { route?: PhysicalRoute; maxOutputTokens?: number; timeoutMs?: number } | boolean
+  foremanScript?: Script
   planReview?: (agent: Agent, binding: SessionBinding) => PlanReviewModule
   /**
    * After a bridge dispatch settles, also dispatch the transport's own replay of that step,
@@ -184,6 +185,7 @@ async function setup(script: Script, workerScript?: Script, options: {
   }
   const workerAdapter = workerScript && new MockAdapter(workerScript)
   const auxiliaryAdapter = options.auxiliaryScript && new MockAdapter(options.auxiliaryScript)
+  const foremanAdapter = options.foremanScript && new MockAdapter(options.foremanScript)
   const modelContext = { window: 128_000 }
   class ContextAdapter extends MockAdapter {
     override providerRetryPolicy() {
@@ -193,6 +195,9 @@ async function setup(script: Script, workerScript?: Script, options: {
       if (auxiliaryAdapter && options.maxTokens === 1) {
         this.requests.push(options)
         yield* auxiliaryAdapter.stream(options)
+      } else if (foremanAdapter && options.system === FOREMAN_SYSTEM_PROMPT) {
+        this.requests.push(options)
+        yield* foremanAdapter.stream(options)
       } else if (workerAdapter && options.model === 'worker') {
         this.requests.push(options)
         yield* workerAdapter.stream(options)
@@ -204,7 +209,10 @@ async function setup(script: Script, workerScript?: Script, options: {
     }
   }
   const adapter = new ContextAdapter(script)
-  ctx.llm.registerAdapter(options.bridgeTransport ? ['test-native', 'antigravity'] : ['test-native'], adapter)
+  const providers = new Set(['test-native'])
+  if (options.bridgeTransport) providers.add('antigravity')
+  if (typeof options.foreman === 'object' && options.foreman.route) providers.add(options.foreman.route.provider)
+  ctx.llm.registerAdapter([...providers], adapter)
   // Faithful to dsh-agy-link: `agy` already ran the call in its own loop, and the
   // bridge dispatches it here under a BRIDGE-LOCAL call id (`agy-mcp-N`), which is
   // not the id of any block this session's assistant message emitted.
@@ -5872,6 +5880,60 @@ describe('plan review in coordinator', () => {
       unresolvedCriticalAssumptions: [],
     },
     materialAmbiguities: [],
+  })
+
+  it('audits a silent Foreman’s saved plan on the frozen Lead route before dispatching one Sidekick', async () => {
+    const foremanRoute = { provider: 'test-foreman', model: 'foreman' }
+    const leadRoute = { provider: 'test-native', model: 'lead' }
+    const inspected = { path: 'test_calc.py', startLine: 3, endLine: 5 }
+    const { parent, coordinator, store, adapter, taskId } = await setup([
+      delegateV3(false), textResponse('Waiting for the review verdict.'),
+      toolCallResponse('resume-plan', 'fusion_resume_plan', {}),
+      toolCallResponse('wait-for-sidekick', 'fusion_wait', {}), acceptV3(), textResponse('Verified.'),
+    ], [edit(), report()], {
+      ...options,
+      foreman: { route: foremanRoute, timeoutMs: 1600 },
+      foremanScript: [
+        { hangAfter: [] }, // The configured adapter streams nothing and exits when the stall signal aborts it.
+        request => {
+          const payload = request.messages[0]?.content[0]
+          if (payload?.type !== 'text') throw new Error('Reviewer must receive the saved candidate')
+          const candidate: PlanReviewCandidate = JSON.parse(payload.text)
+          return textResponse(JSON.stringify({ ...testReadyAssessment(candidate.order.candidateDigest), inspected: [inspected] }))
+        },
+      ],
+    })
+    const reviewRequests = () => adapter.requests.filter(request => request.system === FOREMAN_SYSTEM_PROMPT)
+    parent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Correct addition.' }] }))
+    await waitForNative(() => expect(coordinator.state(taskId).latestPlanReview).toBeDefined(), { timeout: 5000 })
+    await parent.whenIdle()
+
+    const audits = reviewRequests()
+    expect(audits.map(({ provider, model }) => ({ provider, model }))).toEqual([foremanRoute, leadRoute])
+    expect(audits[0]?.signal?.aborted).toBe(true)
+    expect(audits[1]?.messages).toHaveLength(1)
+    expect(audits[1]?.messages[0]?.content).toEqual(audits[0]?.messages[0]?.content)
+    expect(audits[1]?.tools?.map(tool => tool.name).sort()).toEqual(['read', 'grep', 'glob', shellTool].sort())
+
+    const events = store.events(taskId)
+    expect(events.filter(event => event.type.startsWith('plan-review/')).map(event => event.type))
+      .toEqual(['plan-review/requested', 'plan-review/fallback', 'plan-review/completed'])
+    const requested = events.find(event => event.type === 'plan-review/requested')!.payload
+    expect(requested).toMatchObject({ route: foremanRoute, round: 1 })
+    expect(events.find(event => event.type === 'plan-review/fallback')?.payload).toMatchObject({
+      route: leadRoute, round: requested.round, workOrderId: requested.workOrderId, candidateDigest: requested.candidateDigest,
+    })
+    expect(coordinator.state(taskId).latestPlanReview).toMatchObject({
+      route: leadRoute, outcome: 'assessment', round: requested.round, requestedAt: requested.requestedAt,
+      workOrderId: requested.workOrderId, candidateDigest: requested.candidateDigest,
+      assessment: { verdict: 'ready', candidateDigest: requested.candidateDigest,
+        inspected: [{ ...inspected, digest: expect.stringMatching(/^[0-9a-f]{64}$/) }] },
+    })
+    const dispatch = events.filter(event => event.type === 'plan-review/completed'
+      || event.type === 'work-order/prepared' || event.type === 'child/accepted')
+    expect(dispatch.map(event => event.type)).toEqual(['plan-review/completed', 'work-order/prepared', 'child/accepted'])
+    expect(dispatch[1]?.payload).toMatchObject({ order: { candidateDigest: requested.candidateDigest } })
+    expect(coordinator.state(taskId), JSON.stringify(toolResults(parent))).toMatchObject({ phase: 'COMPLETED', verification: 'verified' })
   })
 
   it('blocks dispatch on round 1 concerns when policy is gate, without work-order/prepared, child/accepted, or lease, returning finding details in tool result', async () => {

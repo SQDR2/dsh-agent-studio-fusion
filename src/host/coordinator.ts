@@ -63,7 +63,7 @@ import { CachePolicy } from './cache-policy.js'
 import type { ChangeBase } from './change-evidence.js'
 import { evidencePage } from './evidence-page.js'
 import { readNativeEvidence } from './native-evidence.js'
-import { isRouteTransportName, registeredRouteTransport, withRouteTransport } from './route-transport.js'
+import { isRouteTransportName, registeredRouteTransport, routeTransportName, withRouteTransport } from './route-transport.js'
 import type { AcpWorkerFacts } from './acp/bridge.js'
 import { isRead, READ_TOOLS } from './read-tools.js'
 import { backgroundHandoffNeedsInspection, completedToolProblem, dispatchAwaitsInspection, gatedDispatchProblem, gatedTurnStopped, staleRecoveryGate, workerSubmittedProblem } from './task-gates.js'
@@ -1250,11 +1250,12 @@ export class FusionCoordinator {
       const verdict = assessment.verdict === 'ready'
         ? bi('无异议，可以派工', 'ready — the plan may be dispatched')
         : bi(`${findings.length} 条意见需要处理`, `${findings.length} finding(s) need an answer`)
+      const reviewer = `${record.route.provider}/${record.route.model}`
       const message = createUserMessage({ source: { kind: FUSION_SOURCE_KIND, form: 'notice',
         summary: bi('工长审查完成', 'The plan review finished') },
         content: [{ type: 'text', text: bi(
-          `工长审查完成（第 ${record.round} 轮）：${verdict}${blocking ? `，其中 ${blocking} 条阻断` : ''}。调用 fusion_resume_plan 复用这份定稿计划；不要重新提交新的候选。`,
-          `The plan review finished (round ${record.round}): ${verdict}${blocking ? `, ${blocking} blocking` : ''}. Call fusion_resume_plan to reuse the exact finalized plan; do not submit a new candidate.`) }] })
+          `工长审查完成（第 ${record.round} 轮，${reviewer}）：${verdict}${blocking ? `，其中 ${blocking} 条阻断` : ''}。调用 fusion_resume_plan 复用这份定稿计划；不要重新提交新的候选。`,
+          `The plan review finished (round ${record.round}, ${reviewer}): ${verdict}${blocking ? `, ${blocking} blocking` : ''}. Call fusion_resume_plan to reuse the exact finalized plan; do not submit a new candidate.`) }] })
       agent.send(message, 'next-turn', true)
       this.store.writeDocument(id, 0, { schemaVersion: 1, taskId: binding.taskId,
         candidateDigest: record.candidateDigest, round: record.round })
@@ -2892,20 +2893,38 @@ export class FusionCoordinator {
       return { kind: 'dispatched', round, route }
     }
 
-    const service = this.options.planReview
-      ? this.options.planReview(agent, reviewBinding)
-      : new NativePlanReviewService(this.ctx, agent, reviewBinding, this.#auxiliary)
-    const startTime = Date.now()
+    return this.#executePlanReview(agent, binding, reviewBinding, candidate, round, route, requestedAt, false, signal)
+  }
+
+  async #executePlanReview(
+    agent: Agent, binding: SessionBinding, reviewBinding: SessionBinding, candidate: PlanReviewCandidate,
+    round: number, route: PhysicalRoute, requestedAt: string, announce: boolean, signal?: AbortSignal,
+  ): Promise<PlanReviewOutcome> {
+    const startedAt = Date.now()
+    let actualRoute = route
     let outcome: PlanReviewOutcome
     try {
+      const backup = binding.profile.lead
+      // Only reuse a configured model route, never an external agent with its own tools.
+      const fallback = (backup.provider !== route.provider || backup.model !== route.model)
+        && !routeTransportName(backup.provider) && !this.options.acpRoutes?.().has(backup.provider)
+        && !this.state(binding.taskId).pendingPlanReview?.fallbackUsed ? {
+          route: backup,
+          onStart: () => {
+            this.append(binding.taskId, 'plan-review/fallback', {
+              workOrderId: candidate.order.id, candidateDigest: candidate.order.candidateDigest!, round, route: backup,
+            })
+            actualRoute = backup
+          },
+        } : undefined
+      const service = this.options.planReview
+        ? this.options.planReview(agent, reviewBinding)
+        : new NativePlanReviewService(this.ctx, agent, reviewBinding, this.#auxiliary, undefined, fallback)
       outcome = await service.review(candidate, signal)
     } catch (error) {
-      outcome = {
-        kind: 'unavailable',
-        reason: `Foreman review failed: ${error instanceof Error ? error.message : String(error)}`,
-      }
+      outcome = { kind: 'unavailable', reason: `Foreman review failed: ${error instanceof Error ? error.message : String(error)}` }
     }
-    this.#recordPlanReviewOutcome(agent, binding, candidate, round, route, requestedAt, outcome, Date.now() - startTime, false)
+    this.#recordPlanReviewOutcome(agent, binding, candidate, round, actualRoute, requestedAt, outcome, Date.now() - startedAt, announce)
     return outcome
   }
 
@@ -2937,22 +2956,9 @@ export class FusionCoordinator {
       // covers this round, so there is nothing to start and nothing to report as broken.
       return
     }
-    const service = this.options.planReview
-      ? this.options.planReview(agent, reviewBinding)
-      : new NativePlanReviewService(this.ctx, agent, reviewBinding, this.#auxiliary)
-    const startedAt = Date.now()
     void (async () => {
-      let outcome: PlanReviewOutcome
       try {
-        outcome = await service.review(candidate, job.controller.signal)
-      } catch (error) {
-        outcome = {
-          kind: 'unavailable',
-          reason: `Foreman review failed: ${error instanceof Error ? error.message : String(error)}`,
-        }
-      }
-      try {
-        this.#recordPlanReviewOutcome(agent, binding, candidate, round, route, requestedAt, outcome, Date.now() - startedAt, true)
+        await this.#executePlanReview(agent, binding, reviewBinding, candidate, round, route, requestedAt, true, job.controller.signal)
       } catch (error) {
         // A conflict here means the ledger already settled this round (a retry or a
         // reconciliation won the race); the durable record is the one that stands.

@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { realpathSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import type { Context } from '@deepseek-ai/cordis'
@@ -1520,6 +1520,7 @@ describe('foreman review budgets: a stall is not the same answer as a slow revie
   function serviceFor(
     streamFn: (options: GenerateOptions) => AsyncIterable<StreamChunk>,
     foreman: { route: { provider: string; model: string; reasoningEffort?: string }; maxOutputTokens: number; timeoutMs: number },
+    fallback?: { route: { provider: string; model: string }; onStart: () => void },
   ) {
     const ctx = { llm: { stream: (opts: GenerateOptions) => streamFn(opts) } } as unknown as Context
     const binding = {
@@ -1527,8 +1528,29 @@ describe('foreman review budgets: a stall is not the same answer as a slow revie
       taskId: TaskId('task-1'),
       profile: { digest: 'profile-digest', foreman },
     } as unknown as SessionBinding
-    return new NativePlanReviewService(ctx, workspaceAgent(), binding, new NativeAuxiliaryRequests())
+    return new NativePlanReviewService(ctx, workspaceAgent(), binding, new NativeAuxiliaryRequests(), undefined, fallback)
   }
+
+  it('sends the same candidate to the backup reviewer after a zero-output stall', async () => {
+    const calls: GenerateOptions[] = []
+    const onStart = vi.fn()
+    const service = serviceFor(async function* (request) {
+      calls.push(request)
+      if (request.model === 'silent') {
+        await new Promise<void>(resolve => request.signal!.addEventListener('abort', () => resolve(), { once: true }))
+        return
+      }
+      expect(onStart).toHaveBeenCalledOnce()
+      yield { type: 'text-delta', index: 0, text: readyBody }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    }, { route: { provider: 'gz', model: 'silent' }, maxOutputTokens: 8192, timeoutMs: 250 },
+    { route: { provider: 'gz', model: 'backup' }, onStart })
+
+    expect(await service.review(candidate)).toMatchObject({ kind: 'ready' })
+    expect(calls.map(request => request.model)).toEqual(['silent', 'backup'])
+    expect(calls[1]!.messages[0]?.content).toEqual(calls[0]!.messages[0]?.content)
+    expect(calls[1]!.system).toBe(FOREMAN_SYSTEM_PROMPT)
+  })
 
   // The observed failure: the route produced no chunk at all and the call was ended by one
   // flat `TimeoutError` after the whole budget, which reads as approval. A stall must be

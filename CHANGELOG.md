@@ -20,6 +20,11 @@ own tags and releases.
 Entry format: what changed, then what was actually validated. "Not claimed" lines mark what a release did *not* test —
 read them before assuming a platform is covered.
 
+## 1.5.2 — 2026-11-20
+
+- 工长线路在首次等待窗口内没有返回任何流数据时，优先用组合中已配置的 Lead 模型线路重试一次。备用请求仍是独立的工长审查，只收到原候选计划、工长指令和审查工具；不继承 Lead 对话，也不调用 ACP 或 Antigravity 等自带工具的外部代理。
+- 切换线路与审查结论都会写入任务账本，完成通知显示实际审查模型。重试共享原审查的时间预算；取消、已开始的审查和未通过校验的结论不会被当作通过。Host 回归测试覆盖静默、备用审查、引用校验及通过后才派工。
+
 ## 1.5.1 — 2026-11-20
 
 ### 一个死掉的 Host 留下的写租约，锁死了之后所有会话

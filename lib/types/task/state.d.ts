@@ -72,6 +72,7 @@ export interface TaskState {
         readonly round: number;
         readonly route: PhysicalRoute;
         readonly requestedAt: string;
+        readonly fallbackUsed?: true;
     };
 }
 export interface PersistedTask {

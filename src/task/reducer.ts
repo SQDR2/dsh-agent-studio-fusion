@@ -145,6 +145,17 @@ function applyPayload(state: TaskState | undefined, event: FusionEvent): TaskSta
         },
       }
     }
+    case 'plan-review/fallback': {
+      const next = need(state, event), pending = next.pendingPlanReview
+      const { workOrderId, candidateDigest, round, route } = event.payload
+      if (!pending || pending.fallbackUsed || pending.workOrderId !== workOrderId
+        || pending.candidateDigest !== candidateDigest || pending.round !== round
+        || !route.provider.trim() || !route.model.trim()
+        || route.provider === pending.route.provider && route.model === pending.route.model) {
+        throw new FusionError(EVENT_CONFLICT, 'Fallback does not match a pending plan review with a distinct backup route')
+      }
+      return { ...next, pendingPlanReview: { ...pending, route, fallbackUsed: true } }
+    }
     case 'plan-review/completed': {
       const next = need(state, event)
       const pending = next.pendingPlanReview

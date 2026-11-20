@@ -537,6 +537,7 @@ export type FusionEvent =
   | EventEnvelope<'intent/chosen', { intent: ExecutionIntent }>
   | EventEnvelope<'plan-review/requested', { workOrderId: WorkOrderId; candidateDigest: Digest; round: number; route: PhysicalRoute; requestedAt?: string; retryOf?: WorkOrderId; commandId?: string }>
   | EventEnvelope<'plan-review/skip-authorized', { candidateDigest: Digest; round: number; failureWorkOrderId: WorkOrderId; commandId: string; reason: string }>
+  | EventEnvelope<'plan-review/fallback', { workOrderId: WorkOrderId; candidateDigest: Digest; round: number; route: PhysicalRoute }>
   | EventEnvelope<'plan-review/completed', { workOrderId: WorkOrderId; candidateDigest: Digest; round: number; assessment: ForemanAssessment; record: PlanReviewRecord }>
   | EventEnvelope<'plan-review/resolved', { workOrderId: WorkOrderId; candidateDigest: Digest; round: number; dispositions: readonly ForemanDisposition[]; revisedCandidateDigest?: Digest; resolvedAt?: string }>
   | EventEnvelope<'plan-review/unavailable', { workOrderId: WorkOrderId; candidateDigest: Digest; round: number; reason: string; record: PlanReviewRecord }>

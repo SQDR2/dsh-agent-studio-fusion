@@ -4,7 +4,7 @@ import { createAssistantMessage, createToolResultMessage, createUserMessage, Too
 import type { ContentBlock, GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
 import { realpathSync } from 'node:fs'
 import { FUSION_SOURCE_KIND } from '../message-source.js'
-import type { PlanReviewCandidate } from '../contracts.js'
+import type { PhysicalRoute, PlanReviewCandidate } from '../contracts.js'
 import type { SessionBinding } from './bindings.js'
 import { markForemanReview, type NativeAuxiliaryRequests } from './native-auxiliary.js'
 import { FOREMAN_NO_PROGRESS_TIMEOUT_MS } from '../profile/foreman.js'
@@ -194,6 +194,7 @@ export class NativePlanReviewService implements PlanReviewModule {
      * and "not extended" impossible to observe without waiting two minutes.
      */
     private readonly baseBudgetMs: number = FOREMAN_BASE_BUDGET_MS,
+    private readonly fallback?: { route: PhysicalRoute; onStart: () => void },
   ) {}
 
   async review(candidate: PlanReviewCandidate, externalSignal?: AbortSignal): Promise<PlanReviewOutcome> {
@@ -212,21 +213,23 @@ export class NativePlanReviewService implements PlanReviewModule {
       // the same workspace even if the session's cwd moves underneath it.
       const root = this.#workspaceRoot()
 
-      const first = await this.#attempt(candidate, root, externalSignal, clock)
+      const { route } = foremanConfig
+      const first = await this.#attempt(candidate, root, externalSignal, clock, route)
       if (first.outcome) return first.outcome
-      // A route the caller cancelled is not retried, and neither is a review that was already
-      // answering: only silence means the gateway never took the first request. A loop that
-      // dispatched tool calls has started its work, and re-running it would repeat half a review.
-      if (first.cause === 'caller' || first.sawChunk) {
-        return this.#abortOutcome(first.cause!, clock.ceiling, { callerReason: externalSignal?.reason, ...first })
-      }
+      const abort = (attempt: AttemptResult, attemptedRoute: PhysicalRoute, hadRetry = false) =>
+        this.#abortOutcome(attempt.cause!, clock.ceiling, { ...attempt, callerReason: externalSignal?.reason, hadRetry }, attemptedRoute)
+      // Never discard a partial audit, retry a cancellation, or reset the review's budget.
+      if (externalSignal?.aborted) return abort({ ...first, cause: 'caller' }, route)
+      if (first.cause !== 'no-progress' || first.sawChunk || clock.remainingMs <= 0) return abort(first, route)
 
-      // One retry, out of what is left of the clock rather than on top of it: the setting
-      // bounds the wait the Lead actually experiences, not each attempt separately.
-      if (clock.remainingMs <= 0) return this.#abortOutcome('no-progress', clock.ceiling, { ...first })
-      const retried = await this.#attempt(candidate, root, externalSignal, clock)
-      if (retried.outcome) return retried.outcome
-      return this.#abortOutcome(retried.cause!, clock.ceiling, { callerReason: externalSignal?.reason, ...retried, hadRetry: true })
+      const fallback = this.fallback
+      const retryRoute = fallback?.route ?? route
+      fallback?.onStart()
+      const retried = await this.#attempt(candidate, root, externalSignal, clock, retryRoute)
+      const outcome = retried.outcome ?? abort(retried, retryRoute, !fallback)
+      return fallback && outcome.kind === 'unavailable' && !externalSignal?.aborted
+        ? { kind: 'unavailable', reason: `Foreman ${route.provider}/${route.model} did not start answering; backup ${retryRoute.provider}/${retryRoute.model}: ${outcome.reason}` }
+        : outcome
     } finally {
       clock.dispose()
     }
@@ -266,9 +269,9 @@ export class NativePlanReviewService implements PlanReviewModule {
     root: string | undefined,
     externalSignal: AbortSignal | undefined,
     clock: ForemanReviewClock,
+    route: PhysicalRoute,
   ): Promise<AttemptResult> {
-    const foremanConfig = this.binding.profile.foreman!
-    const { route, maxOutputTokens } = foremanConfig
+    const { maxOutputTokens } = this.binding.profile.foreman!
 
     const combined = externalSignal === undefined ? clock.signal : AbortSignal.any([clock.signal, externalSignal])
 
@@ -537,8 +540,7 @@ export class NativePlanReviewService implements PlanReviewModule {
    * different problem from a review that stopped answering after reading twenty files, and one
    * sentence for both sends the user to the wrong fix.
    */
-  #abortOutcome(cause: AbortCause, timeoutMs: number | undefined, attempt: AttemptResult & { callerReason?: unknown; hadRetry?: boolean }): PlanReviewOutcome {
-    const route = this.binding.profile.foreman!.route
+  #abortOutcome(cause: AbortCause, timeoutMs: number | undefined, attempt: AttemptResult & { callerReason?: unknown; hadRetry?: boolean }, route: PhysicalRoute): PlanReviewOutcome {
     const label = `${route.provider}/${route.model}`
     const { sawChunk, toolCalls, hadRetry = false, callerReason } = attempt
     if (cause === 'caller') {

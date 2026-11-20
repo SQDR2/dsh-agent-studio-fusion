@@ -1,6 +1,6 @@
 import type { Context } from '@deepseek-ai/cordis';
 import type { Agent } from '@deepseek-ai/dsh-agent';
-import type { PlanReviewCandidate } from '../contracts.js';
+import type { PhysicalRoute, PlanReviewCandidate } from '../contracts.js';
 import type { SessionBinding } from './bindings.js';
 import { type NativeAuxiliaryRequests } from './native-auxiliary.js';
 import { type PlanReviewModule, type PlanReviewOutcome } from '../plan-review.js';
@@ -127,6 +127,7 @@ export declare class NativePlanReviewService implements PlanReviewModule {
      * and "not extended" impossible to observe without waiting two minutes.
      */
     private readonly baseBudgetMs;
+    private readonly fallback?;
     constructor(ctx: Context, agent: Agent, binding: SessionBinding, auxiliary: NativeAuxiliaryRequests, 
     /**
      * The window a review gets before it demonstrates work.
@@ -135,6 +136,9 @@ export declare class NativePlanReviewService implements PlanReviewModule {
      * real round trips, so the default two-minute base makes the difference between "extended"
      * and "not extended" impossible to observe without waiting two minutes.
      */
-    baseBudgetMs?: number);
+    baseBudgetMs?: number, fallback?: {
+        route: PhysicalRoute;
+        onStart: () => void;
+    } | undefined);
     review(candidate: PlanReviewCandidate, externalSignal?: AbortSignal): Promise<PlanReviewOutcome>;
 }

@@ -559,6 +559,11 @@ export type FusionEvent = EventEnvelope<'task/created', {
     failureWorkOrderId: WorkOrderId;
     commandId: string;
     reason: string;
+}> | EventEnvelope<'plan-review/fallback', {
+    workOrderId: WorkOrderId;
+    candidateDigest: Digest;
+    round: number;
+    route: PhysicalRoute;
 }> | EventEnvelope<'plan-review/completed', {
     workOrderId: WorkOrderId;
     candidateDigest: Digest;
