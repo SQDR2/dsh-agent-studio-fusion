@@ -13,12 +13,32 @@ import { type PlanReviewModule, type PlanReviewOutcome } from '../plan-review.js
  * (which blocks dispatch and offers the documented recovery commands) than left to consume its
  * whole ceiling silently.
  *
- * Sixty, not forty: a review that reads the files a finding depends on makes a dozen calls
- * before it writes anything, and the observed review that aborted at the old ceiling had made
- * twenty-one of them. The bound is the same runaway guard; only its headroom moved with the
- * work a code-level audit actually needs.
+ * A hundred and twenty, not sixty: the review that prompted this bound made forty-two calls
+ * and was still auditing when a ten-minute ceiling ended it, and a code-level audit of a
+ * three-page plan legitimately reads every test, stylesheet and build script it cites. The
+ * bound is the same runaway guard; the difference is that reaching it now asks the reviewer
+ * for its verdict instead of discarding the review (see
+ * {@link FOREMAN_FINAL_ANSWER_INSTRUCTION}).
  */
-export declare const FOREMAN_MAX_TOOL_CALLS = 60;
+export declare const FOREMAN_MAX_TOOL_CALLS = 120;
+/**
+ * How much of a configured ceiling is kept back for the reviewer's own verdict.
+ *
+ * A ceiling is the longest the Lead is asked to wait, not a kill switch: when this much is
+ * left, the loop stops inspecting and asks for the assessment it can already write. Three
+ * minutes covers a final JSON answer even on a `high` reasoning route, where the thinking
+ * before that answer is the expensive part — and a verdict returned late is worth more than
+ * a review discarded on time.
+ */
+export declare const FOREMAN_FINAL_ANSWER_RESERVE_MS = 180000;
+/**
+ * The instruction that turns "out of budget" into "answer with what you have".
+ *
+ * Sent with no tools available, so the turn can only be the assessment. The citations it
+ * names are still verified by the Host afterwards: a hurried verdict is still a verdict about
+ * files that exist, and a `blocking-concern` still needs the code that shows the problem.
+ */
+export declare const FOREMAN_FINAL_ANSWER_INSTRUCTION: string;
 /**
  * The window a review gets before it has shown any work.
  *
@@ -49,13 +69,13 @@ export declare const FOREMAN_BASE_BUDGET_MS = 120000;
 export declare const FOREMAN_TOOL_CALL_BUDGET_MS = 30000;
 /**
  * The review's wall clock: a base window that each completed tool call extends, bounded by the
- * ceiling the combo configures.
+ * ceiling the combo configures — or by nothing at all.
  *
  * It aborts its own signal instead of using `AbortSignal.timeout`, because a timeout cannot be
- * extended: the whole point is that demonstrating work moves the deadline. The ceiling is the
- * combo's `timeoutMs` — the longest the Lead is ever made to wait — and it is reached only by
- * a review that keeps showing work, so the setting still bounds the wait while no longer
- * deciding how much of the repository a review may read before it runs out.
+ * extended: the whole point is that demonstrating work moves the deadline. `ceilingMs` is
+ * optional: when a combo does not configure one, the review keeps renewing for as long as it
+ * keeps working, which is what "let it finish" means. What still ends it is silence (the stall
+ * window), the inspection cap, or the user cancelling the turn the review belongs to.
  *
  * Every timer is unref'd: this clock only ends a wait and must never be the reason a Host
  * process stays alive.
@@ -67,12 +87,14 @@ export declare class ForemanReviewClock {
     private readonly startedAt;
     private deadlineAt;
     private timer;
-    constructor(ceilingMs: number, baseMs?: number);
+    constructor(ceilingMs: number | undefined, baseMs?: number);
     get signal(): AbortSignal;
+    /** The configured ceiling, or undefined when this combo set none. */
+    get ceiling(): number | undefined;
     /** What is left of the current window, floored at zero. */
     get remainingMs(): number;
     /** What the review is allowed to wait in total, whether or not it renews. */
-    get ceilingAtMs(): number;
+    get ceilingAtMs(): number | undefined;
     /**
      * Move the deadline by `ms`, never past the ceiling.
      *

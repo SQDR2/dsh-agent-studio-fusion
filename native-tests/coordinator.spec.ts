@@ -5569,6 +5569,45 @@ describe('plan review in coordinator', () => {
     expect(state.phase).toBe('COMPLETED')
   })
 
+  // The shape session-20b3fa52 asked for: the review runs on its own, the Lead's turn ends as
+  // soon as it is dispatched, and the verdict wakes the Lead instead of killing the audit.
+  it('runs the plan review in the background and keeps the worker undispatched until the verdict', async () => {
+    let reviews = 0
+    const { parent, coordinator, store, taskId } = await setup(
+      [delegateV3(false), textResponse('Waiting for the review verdict.')],
+      [edit(), report()],
+      {
+        ...options,
+        foreman: true,
+        planReview: () => ({
+          review: async candidate => {
+            reviews++
+            return { kind: 'ready', assessment: testReadyAssessment(candidate.order.candidateDigest!) }
+          },
+        }),
+      },
+    )
+    parent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Correct addition.' }] }))
+    await parent.whenIdle()
+
+    // One review ran to its own verdict, and the tool call that asked for it returned first.
+    expect(reviews).toBe(1)
+    const events = store.events(taskId)
+    expect(events.filter(event => event.type === 'plan-review/requested')).toHaveLength(1)
+    expect(events.find(event => event.type === 'plan-review/completed')).toBeDefined()
+    const state = coordinator.state(taskId)
+    expect(state.pendingPlanReview).toBeUndefined()
+    expect(state.latestPlanReview?.assessment?.verdict).toBe('ready')
+    // The verdict alone does not dispatch: the Lead has to resume the saved candidate.
+    expect(state.acceptedChild).toBeUndefined()
+    expect(events.some(event => event.type === 'child/accepted')).toBe(false)
+    // The verdict was announced (once) as a notice, which is what starts the Lead's next turn.
+    const completed = events.find(event => event.type === 'plan-review/completed')!
+    expect(store.readDocument(`plan-review-verdict-notice:${taskId}:${(completed.payload as any).workOrderId}:1`)).toBeDefined()
+    // That next turn actually ran: the scripted reply to the notice is in the transcript.
+    expect(parent.session.deriveMessages().some(message => JSON.stringify(message).includes('Waiting for the review verdict.'))).toBe(true)
+  })
+
   it('blocks dispatch on concerns: a configured Foreman has no shadow bypass', async () => {
     let reviewCalled = false
     const { parent, coordinator, store, taskId } = await setup(

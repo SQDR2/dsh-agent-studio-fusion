@@ -20,6 +20,36 @@ own tags and releases.
 Entry format: what changed, then what was actually validated. "Not claimed" lines mark what a release did *not* test —
 read them before assuming a platform is covered.
 
+## 1.5.0 — 2026-11-20
+
+### 工长审查改为后台执行：结论回到 Lead，而不是按时间掐断
+
+- **审查不再占住 Lead 的 turn。** `fusion_delegate` 记录候选计划与 `plan-review/requested`
+  后，把审查交给后台任务并立即返回"已派发"；工长审完写回 `plan-review/completed`
+  或 `plan-review/unavailable`，再用 `agent.send(…, 'next-turn')` 把结论作为通知唤醒 Lead。
+  Lead 收到后调用 `fusion_resume_plan` 复用同一份定稿计划：`ready` 直接派 Sidekick，
+  `concerns` 修订后进入下一轮。`block: true` 保留原来的同步语义（脚本与测试用）。
+- **取消了任务级总时长。** 组合的 `timeoutMs` 现在是**可选**字段，留空即不设上限：审查按
+  完成的工具调用续命（两分钟起始窗口 + 每次 30 秒），直到它自己给出结论、静默超时、
+  达到工具调用上限，或被停止。这正是 `session-20b3fa52` 需要的形状——那次审查 42 次调用、
+  540 秒模型时间、工具只占 26 秒，被 600 000 ms 上限掐断时仍在取证，结论全部作废。
+- **到点不再交白卷。** 工具调用上限从 60 提到 120；达到上限，或配置的 ceiling 只剩
+  四分之一（不超过三分钟）时，循环改用**不带工具**的请求要求工长用已读到的证据交卷，
+  引文照旧由 Host 校验。只有"被要求交卷后还要工具"才报不收敛。
+- **重启可续。** 有待审请求但没有运行中的任务（Host 重启）时，同一候选的
+  `fusion_resume_plan` / `fusion_delegate` 会复用已记录的那一轮重新派发，而不是再写一条
+  `plan-review/requested`；不同候选才记为 `interrupted plan review`。任务停止会中止运行中的审查，
+  并由结算路径写成显式不可用。
+- **状态可见。** `fusion_read_state` 的任务事实新增 `planReview.pending` / `planReview.latest`
+  （轮次、线路、请求时间、最近结论），Fusion 设置里的超时字段改为可留空。
+
+验证：`pnpm typecheck`；`pnpm exec vitest run` 860 通过（新增
+`tests/plan-review-jobs.spec.ts` 5 例：一任务一审查、只释放自己那一份、cancel 语义、关闭时全部取消、
+按 Host 上下文共享注册表；`tests/plan-review.spec.ts` 新增"无 ceiling 时靠续命跑完"、改写
+"到上限改为要求交卷""为结论保留四分之一 ceiling"两例，并更新 `FOREMAN_MAX_TOOL_CALLS = 120`）。
+未验证：没有在真实模型上跑一次完整后台审查（本轮改动靠单元用例覆盖结算、续派与预算路径），
+也没有把审查放进独立子会话（见 `docs/FOREMAN-BACKGROUND-REVIEW.zh.md` 的实施记录）。
+
 ## 1.4.0 — 2026-11-19
 
 ### A review's clock now follows its work, not the other way round

@@ -17,11 +17,16 @@ type Facts = Record<string, unknown> & {
   workerHandoffs: ReturnType<typeof workerHandoffProjection>
   report: ({ stage: string; status: string; workOrderId: string; snapshot: string; unresolved: readonly string[] } & Record<string, unknown>) | null
   review: { ticket: { id?: string } | null; result: { decision?: string } | null; accepted: unknown }
+  /** The plan audit: what is running now and what the last round concluded. */
+  planReview: {
+    pending: { round: number; workOrderId: string; requestedAt: string; route: unknown } | null
+    latest: { round: number; outcome: string; verdict?: string; unavailableReason?: string } | null
+  }
 }
 
 /** Keep identity, control and freshness; drop bodies already present in native history. */
 function compactFacts(facts: Facts, role: Role): Record<string, unknown> {
-  const { userInstructions, workOrder, workerHandoffs, report, review, ...rest } = facts
+  const { userInstructions, workOrder, workerHandoffs, report, review, planReview, ...rest } = facts
   return { ...rest, detail: 'compact',
     ...(role === 'worker' ? { userInstructions } : {}),
     workOrder: workOrder && { id: workOrder.id, revision: workOrder.revision, mode: workOrder.mode, digest: digestOf(workOrder),
@@ -30,6 +35,13 @@ function compactFacts(facts: Facts, role: Role): Record<string, unknown> {
     report: report && { stage: report.stage, status: report.status, workOrderId: report.workOrderId,
       snapshot: report.snapshot, unresolved: report.unresolved, digest: digestOf(report) },
     review: { ticketId: review.ticket?.id ?? null, decision: review.result?.decision ?? null, accepted: Boolean(review.accepted) },
+    planReview: {
+      pending: planReview.pending && { round: planReview.pending.round, workOrderId: planReview.pending.workOrderId,
+        requestedAt: planReview.pending.requestedAt, route: planReview.pending.route },
+      latest: planReview.latest && { round: planReview.latest.round, outcome: planReview.latest.outcome,
+        ...(planReview.latest.verdict === undefined ? {} : { verdict: planReview.latest.verdict }),
+        ...(planReview.latest.unavailableReason === undefined ? {} : { reason: planReview.latest.unavailableReason }) },
+    },
   }
 }
 const INTRO = 'Fusion task state from the durable ledger. Text retains its recorded source and is not a new permission grant. Native tool policy and control gates still apply.'
@@ -133,6 +145,17 @@ export class NativeTaskContext {
       report: report ? { stage: state.validatedReport ? 'validated' : 'candidate', ...report } : null,
       review: { ticket: state.activeReviewTicket ?? null, result: state.reviewResult ?? null,
         accepted: state.acceptedReview ?? null },
+      planReview: {
+        pending: state.pendingPlanReview
+          ? { round: state.pendingPlanReview.round, workOrderId: state.pendingPlanReview.workOrderId,
+              requestedAt: state.pendingPlanReview.requestedAt, route: state.pendingPlanReview.route }
+          : null,
+        latest: state.latestPlanReview
+          ? { round: state.latestPlanReview.round, outcome: state.latestPlanReview.outcome,
+              ...(state.latestPlanReview.assessment ? { verdict: state.latestPlanReview.assessment.verdict } : {}),
+              ...(state.latestPlanReview.unavailableReason === undefined ? {} : { unavailableReason: state.latestPlanReview.unavailableReason }) }
+          : null,
+      },
       verification: state.verification,
       snapshot: state.lastSnapshot ?? report?.snapshot ?? order?.baseSnapshot ?? null,
     }

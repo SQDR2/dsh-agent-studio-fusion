@@ -12,7 +12,8 @@ export type ForemanManifest = {
     condition: 'on';
     route: PhysicalRoute;
     maxOutputTokens: number;
-    timeoutMs: number;
+    /** Absent when the combo set no ceiling: the reviewer ends on its own verdict. */
+    timeoutMs?: number;
 };
 /**
  * The Foreman condition one benchmark variant actually ran under.

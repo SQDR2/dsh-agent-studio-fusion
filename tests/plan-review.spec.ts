@@ -1201,11 +1201,12 @@ describe('foreman inspection loop, citation check and runaway guard', () => {
     }
   })
 
-  it('stops a review that never converges at the runaway guard', async () => {
-    expect(FOREMAN_MAX_TOOL_CALLS).toBe(60)
+  it('stops a review that never converges at the inspection cap, then asks for the verdict', async () => {
     let requests = 0
+    const seen: GenerateOptions[] = []
     // A reviewer that keeps reading without ever answering: every turn asks for another read.
-    const { service } = makeService(async function* () {
+    const { service } = makeService(async function* (options) {
+      seen.push(options)
       requests += 1
       yield* toolCallTurn(`read-${requests}`, 'read', { file_path: 'src/plan-review.ts', offset: 1, limit: 1 })
     })
@@ -1213,12 +1214,15 @@ describe('foreman inspection loop, citation check and runaway guard', () => {
     const outcome = await service.review(candidate)
     expect(outcome.kind).toBe('unavailable')
     if (outcome.kind !== 'unavailable') return
-    expect(outcome.reason).toContain('runaway guard')
-    expect(outcome.reason).toContain(`asked for ${FOREMAN_MAX_TOOL_CALLS + 1} tool calls`)
-    expect(outcome.reason).toContain(`more than the ${FOREMAN_MAX_TOOL_CALLS} one review may make`)
-    // The bound is checked before the calls run, so the review stops at the limit instead of
-    // overshooting it by a whole turn's worth of work.
-    expect(requests).toBe(FOREMAN_MAX_TOOL_CALLS + 1)
+    // The cap no longer discards the review silently: the reviewer is asked for its verdict
+    // with no tools available, and only a reviewer that ignores that is reported as stuck.
+    expect(outcome.reason).toContain('after it was asked to return its')
+    expect(outcome.reason).toContain('not converging')
+    const finalRequest = seen.at(-1)!
+    expect(finalRequest.tools).toEqual([])
+    expect(JSON.stringify(finalRequest.messages)).toContain('inspection budget')
+    // Exactly one no-tools request is spent: the loop does not ask twice.
+    expect(requests).toBe(FOREMAN_MAX_TOOL_CALLS + 2)
   })
 })
 })
@@ -1633,7 +1637,7 @@ describe('foreman review clock: time follows the work', () => {
    */
   function serviceWithBase(
     streamFn: (options: GenerateOptions) => AsyncIterable<StreamChunk>,
-    foreman: { route: { provider: string; model: string; reasoningEffort?: string }; maxOutputTokens: number; timeoutMs: number },
+    foreman: { route: { provider: string; model: string; reasoningEffort?: string }; maxOutputTokens: number; timeoutMs?: number },
     baseBudgetMs: number,
     tools?: unknown,
   ) {
@@ -1683,27 +1687,54 @@ describe('foreman review clock: time follows the work', () => {
   // a slow command rather than a slow model turn, because only command time is a real round
   // trip at test scale — a model turn stretched to the same duration would be measured against
   // a stall window derived from the window it is spending.
-  it('ends at the configured ceiling even while the review keeps making tool calls', async () => {
+  it('keeps a quarter of a configured ceiling for the verdict', async () => {
     let calls = 0
+    const seen: GenerateOptions[] = []
     const tools = {
       execute: async () => {
-        await new Promise(resolve => setTimeout(resolve, 40))
+        await new Promise(resolve => setTimeout(resolve, 30))
         return { isError: false, content: [{ type: 'text', text: 'ok' }] }
       },
     }
-    const service = serviceWithBase(async function* () {
+    const service = serviceWithBase(async function* (options) {
+      seen.push(options)
       calls += 1
+      // The last inspection is answered with the assessment instead of another command: the
+      // review ends with what it already read rather than at the ceiling with nothing.
+      if (options.tools?.length === 0) {
+        yield { type: 'text-delta', index: 0, text: readyBody } as StreamChunk
+        yield { type: 'finish', reason: { kind: 'stop' } } as StreamChunk
+        return
+      }
       yield* toolCallTurn(`shell-${calls}`, nativeShellTool, { command: 'pnpm test', description: 'run the suite' })
-    }, { route: { provider: 'gz', model: 'crawler' }, maxOutputTokens: 8192, timeoutMs: 300 }, 60, tools)
+    }, { route: { provider: 'gz', model: 'crawler' }, maxOutputTokens: 8192, timeoutMs: 2_000 }, 400, tools)
 
     const outcome = await service.review(candidate)
-    expect(outcome.kind).toBe('unavailable')
-    if (outcome.kind !== 'unavailable') return
-    expect(outcome.reason).toContain('300ms ceiling')
-    expect(outcome.reason).toContain('while still streaming')
-    // The count is what tells "a slow route" apart from "a reviewer the brief sent nowhere".
-    expect(outcome.reason).toMatch(/after \d+ tool calls/)
-    expect(calls).toBeLessThan(FOREMAN_MAX_TOOL_CALLS)
+    expect(outcome.kind).toBe('ready')
+    expect(seen.at(-1)!.tools).toEqual([])
+    // The review was allowed to inspect first; the cap on inspections is what ended it.
+    expect(calls).toBeGreaterThan(1)
+  }, 20_000)
+
+  // A combo may configure no ceiling at all. Then the review ends on its own verdict: the
+  // only thing that stops it is silence, the inspection cap, or the user cancelling.
+  it('keeps renewing with no configured ceiling', async () => {
+    let turn = 0
+    const service = serviceWithBase(async function* () {
+      turn += 1
+      if (turn === 1) {
+        yield* toolCallTurn('read-1', 'read', { file_path: 'src/plan-review.ts', offset: 1, limit: 1 })
+        return
+      }
+      yield { type: 'text-delta', index: 0, text: readyBody.slice(0, 10) } as StreamChunk
+      // Well past the base window: only renewal can keep this review alive.
+      await new Promise(resolve => setTimeout(resolve, 250))
+      yield { type: 'text-delta', index: 0, text: readyBody.slice(10) } as StreamChunk
+      yield { type: 'finish', reason: { kind: 'stop' } } as StreamChunk
+    }, { route: { provider: 'gz', model: 'worker' }, maxOutputTokens: 8192 }, 60)
+
+    const outcome = await service.review(candidate)
+    expect(outcome.kind).toBe('ready')
   }, 20_000)
 
   it('extends by work and never past its ceiling', () => {
@@ -1733,7 +1764,7 @@ describe('foreman review clock: time follows the work', () => {
     expect(FOREMAN_BASE_BUDGET_MS).toBeGreaterThan(0)
     expect(FOREMAN_TOOL_CALL_BUDGET_MS).toBeGreaterThan(0)
     expect(FOREMAN_BASE_BUDGET_MS).toBeLessThan(FOREMAN_TIMEOUT_MS.max)
-    expect(FOREMAN_MAX_TOOL_CALLS).toBe(60)
+    expect(FOREMAN_MAX_TOOL_CALLS).toBe(120)
   })
 })
 

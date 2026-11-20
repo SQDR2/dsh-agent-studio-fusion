@@ -3,7 +3,6 @@ import { describe, expect, it, vi, afterEach } from 'vitest'
 import { create, act, type ReactTestRenderer } from 'react-test-renderer'
 import { FusionSettings } from '../src/client/FusionSettings.js'
 import { pinLanguage } from './client-locale.js'
-import { FOREMAN_DEFAULT_TIMEOUT_MS } from '../src/profile/foreman.js'
 
 const roots: ReactTestRenderer[] = []
 afterEach(async () => {
@@ -267,7 +266,7 @@ describe('FusionSettings combo list', () => {
   // A review that finds many problems must still fit its output budget, and a slow reviewer
   // must be allowed to finish: 4096 tokens and 30 seconds turned real reviews into
   // `max-tokens` and `TimeoutError` discards, and every policy reads a discard as approval.
-  it('starts a new Foreman at a budget and timeout a real review can finish within', async () => {
+  it('starts a new Foreman with an output budget and no time ceiling', async () => {
     pinLanguage('zh-CN')
     const posts: unknown[] = []
     stub(posts)
@@ -277,11 +276,14 @@ describe('FusionSettings combo list', () => {
 
     await act(async () => { root.root.findByProps({ 'aria-label': '启用工长审查' }).props.onChange({ target: { checked: true } }) })
     expect(root.root.findByProps({ 'aria-label': '工长输出 Token 上限' }).props.value).toBe(16384)
-    expect(root.root.findByProps({ 'aria-label': '工长超时毫秒' }).props.value).toBe(FOREMAN_DEFAULT_TIMEOUT_MS)
+    // No ceiling by default: the reviewer ends on its own verdict, and the inspection cap
+    // plus the final-answer request are what bound it.
+    expect(root.root.findByProps({ 'aria-label': '工长超时毫秒' }).props.value).toBe('')
 
     await act(async () => { button(root, '保存组合').props.onClick() })
     expect(root.root.findAllByProps({ role: 'alert' })).toHaveLength(0)
-    expect((posts[0] as any).pairs[0].pair.foreman).toMatchObject({ maxOutputTokens: 16384, timeoutMs: FOREMAN_DEFAULT_TIMEOUT_MS })
+    expect((posts[0] as any).pairs[0].pair.foreman).toMatchObject({ maxOutputTokens: 16384 })
+    expect((posts[0] as any).pairs[0].pair.foreman.timeoutMs).toBeUndefined()
   })
 
   // A five-minute review timeout was refused with one sentence that listed the

@@ -7,7 +7,7 @@ import { useEffect, useState } from 'react'
 import type { PhysicalRoute } from '../contracts.js'
 import type { PairChoice, PairRole, SettingsCatalog } from '../host/settings.js'
 import { missingRoutes } from '../host/settings.js'
-import { FOREMAN_DEFAULT_TIMEOUT_MS, FOREMAN_MAX_OUTPUT_TOKENS, FOREMAN_TIMEOUT_MS } from '../profile/foreman.js'
+import { FOREMAN_MAX_OUTPUT_TOKENS, FOREMAN_TIMEOUT_MS } from '../profile/foreman.js'
 import { settingsChanged } from './settings-events.js'
 import { tr, useLang } from './i18n.js'
 import { FUSION_API_PATH } from '../identity.js'
@@ -277,9 +277,10 @@ export function FusionSettings() {
         return [tr(lang, `第 ${index + 1} 个组合的工长输出上限必须是 1–${FOREMAN_MAX_OUTPUT_TOKENS} 的整数 Token，现在是 ${foreman.maxOutputTokens}。`,
           `Combo ${index + 1}: the Foreman output limit must be an integer of 1–${FOREMAN_MAX_OUTPUT_TOKENS} tokens; it is ${foreman.maxOutputTokens}.`)]
       }
-      if (!Number.isSafeInteger(foreman.timeoutMs) || foreman.timeoutMs < FOREMAN_TIMEOUT_MS.min || foreman.timeoutMs > FOREMAN_TIMEOUT_MS.max) {
-        return [tr(lang, `第 ${index + 1} 个组合的工长超时必须 ${FOREMAN_TIMEOUT_MS.min}–${FOREMAN_TIMEOUT_MS.max} 毫秒（最多 15 分钟），现在是 ${foreman.timeoutMs}。`,
-          `Combo ${index + 1}: the Foreman timeout must be ${FOREMAN_TIMEOUT_MS.min}–${FOREMAN_TIMEOUT_MS.max} ms (up to 15 minutes); it is ${foreman.timeoutMs}.`)]
+      if (foreman.timeoutMs !== undefined
+        && (!Number.isSafeInteger(foreman.timeoutMs) || foreman.timeoutMs < FOREMAN_TIMEOUT_MS.min || foreman.timeoutMs > FOREMAN_TIMEOUT_MS.max)) {
+        return [tr(lang, `第 ${index + 1} 个组合的工长超时必须 ${FOREMAN_TIMEOUT_MS.min}–${FOREMAN_TIMEOUT_MS.max} 毫秒（留空表示不设上限），现在是 ${foreman.timeoutMs}。`,
+          `Combo ${index + 1}: the Foreman timeout must be ${FOREMAN_TIMEOUT_MS.min}–${FOREMAN_TIMEOUT_MS.max} ms (leave it empty for no ceiling); it is ${foreman.timeoutMs}.`)]
       }
       return []
     })
@@ -326,7 +327,7 @@ export function FusionSettings() {
   const foremanNow = current?.pair.foreman
   const foremanTokensInvalid = foremanNow !== undefined
     && (!Number.isSafeInteger(foremanNow.maxOutputTokens) || foremanNow.maxOutputTokens < 1 || foremanNow.maxOutputTokens > FOREMAN_MAX_OUTPUT_TOKENS)
-  const foremanTimeoutInvalid = foremanNow !== undefined
+  const foremanTimeoutInvalid = foremanNow?.timeoutMs !== undefined
     && (!Number.isSafeInteger(foremanNow.timeoutMs) || foremanNow.timeoutMs < FOREMAN_TIMEOUT_MS.min || foremanNow.timeoutMs > FOREMAN_TIMEOUT_MS.max)
   return <div className="fusion-page">
     <style>{styles}</style>
@@ -428,9 +429,10 @@ export function FusionSettings() {
                           // seconds turned real reviews into `max-tokens` and `TimeoutError`
                           // aborts, producing no audit verdict. 8192 then aborted two reviews at
                           // exactly the cap, because thinking counts as output on a `high` route,
-                          // so a new reviewer starts at 16384 and at the documented ceiling.
+                          // so a new reviewer starts at 16384. A new reviewer has no time
+                          // ceiling: it ends on its own verdict, and the inspection cap plus the
+                          // final-answer request are what bound it.
                           maxOutputTokens: 16384,
-                          timeoutMs: FOREMAN_DEFAULT_TIMEOUT_MS,
                         },
                       },
                     }
@@ -509,27 +511,29 @@ export function FusionSettings() {
                   {tr(lang, `输出上限要在 1–${FOREMAN_MAX_OUTPUT_TOKENS} 之间，现在是 ${current.pair.foreman.maxOutputTokens}。`,
                     `The output limit must be 1–${FOREMAN_MAX_OUTPUT_TOKENS}; it is ${current.pair.foreman.maxOutputTokens}.`)}</p>}
                 <label>
-                  {tr(lang, '超时 (ms)', 'Timeout (ms)')}
+                  {tr(lang, '超时 (ms，可留空)', 'Timeout (ms, optional)')}
                   <input
                     aria-label={tr(lang, '工长超时毫秒', 'Foreman timeout (ms)')}
                     aria-invalid={foremanTimeoutInvalid}
                     type="number"
                     min={FOREMAN_TIMEOUT_MS.min}
                     max={FOREMAN_TIMEOUT_MS.max}
-                    value={current.pair.foreman.timeoutMs}
+                    placeholder={tr(lang, '留空 = 不限时', 'empty = no ceiling')}
+                    value={current.pair.foreman.timeoutMs ?? ''}
                     onChange={event => {
-                      const timeoutMs = Number(event.target.value)
-                      update(combo =>
-                        combo.pair.foreman
-                          ? { ...combo, pair: { ...combo.pair, foreman: { ...combo.pair.foreman, timeoutMs } } }
-                          : combo,
-                      )
+                      const raw = event.target.value.trim()
+                      const timeoutMs = raw === '' ? undefined : Number(raw)
+                      update(combo => {
+                        if (!combo.pair.foreman) return combo
+                        const { timeoutMs: _old, ...rest } = combo.pair.foreman
+                        return { ...combo, pair: { ...combo.pair, foreman: { ...rest, ...(timeoutMs === undefined ? {} : { timeoutMs }) } } }
+                      })
                     }}
                   />
                 </label>
                 {foremanTimeoutInvalid && <p className="fusion-field-error" role="alert">
-                  {tr(lang, `超时要 ${FOREMAN_TIMEOUT_MS.min}–${FOREMAN_TIMEOUT_MS.max} 毫秒（最多 15 分钟），现在是 ${current.pair.foreman.timeoutMs}。`,
-                    `The timeout must be ${FOREMAN_TIMEOUT_MS.min}–${FOREMAN_TIMEOUT_MS.max} ms (up to 15 minutes); it is ${current.pair.foreman.timeoutMs}.`)}</p>}
+                  {tr(lang, `超时要 ${FOREMAN_TIMEOUT_MS.min}–${FOREMAN_TIMEOUT_MS.max} 毫秒（最多 15 分钟），留空表示不设上限；现在是 ${current.pair.foreman.timeoutMs}。`,
+                    `The timeout must be ${FOREMAN_TIMEOUT_MS.min}–${FOREMAN_TIMEOUT_MS.max} ms (up to 15 minutes); leave it empty for no ceiling. It is ${current.pair.foreman.timeoutMs}.`)}</p>}
               </div>
             )}
           </div>

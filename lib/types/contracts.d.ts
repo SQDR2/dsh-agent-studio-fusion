@@ -393,7 +393,7 @@ export interface PairProfile {
     foreman?: {
         readonly route: PhysicalRoute;
         readonly maxOutputTokens: number;
-        readonly timeoutMs: number;
+        readonly timeoutMs?: number;
     };
     dataPolicyId: string;
     evidenceCampaignIds: readonly string[];

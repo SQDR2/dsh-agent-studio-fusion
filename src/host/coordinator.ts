@@ -14,6 +14,7 @@ import type { AuthorityAction, Digest, ExplorationReport, ForemanAssessment, For
 import { EpochId, OperationId, PUBLICATION_PROHIBITION, SessionId, SnapshotId, TaskId as asTaskId, WorkOrderId } from '../contracts.js'
 import { candidateDigest, semanticCandidateProjection, assertValidPlanReviewCandidate, lintPlanReviewCandidate, collectForemanFindings, foremanAssessmentSchema, planReviewGateDecision, FOREMAN_MAX_REVIEW_ROUNDS, type PlanReviewModule, type PlanReviewOutcome } from '../plan-review.js'
 import { NativePlanReviewService } from './plan-review.js'
+import { PlanReviewJobs, planReviewJobs, type PlanReviewJob } from './plan-review-jobs.js'
 import { digestOf } from '../digest.js'
 import { WorkspaceWriteLease } from '../execution/write-lease.js'
 import type { LeaseRecord } from '../execution/write-lease.js'
@@ -126,6 +127,22 @@ interface ExplorationGrant { commandId: string; scope: string; used?: true }
 interface PlanningDiscussion { openedAt: number; finalizedAt?: number }
 interface FrozenPlanInput { sourceSeq: number; args: DelegateInput; mode: 'text' | 'implement' }
 const FOREMAN_BLOCKED = 'Foreman review unavailable; Sidekick dispatch is blocked. Ask the user to use /fusion foreman-retry, /fusion foreman-model <provider/model>, or /fusion foreman-skip <reason>. Then call fusion_resume_plan for the exact saved plan.'
+
+/**
+ * What `fusion_delegate` says when the review was dispatched instead of awaited.
+ *
+ * The Lead's turn ends here: the verdict arrives as a notice, and `fusion_resume_plan` is
+ * what reuses the exact candidate without asking the model to reproduce it.
+ */
+function reviewDispatchedReply(round: number, route: PhysicalRoute): string {
+  return bi(
+    `计划审查已派发（第 ${round} 轮，${route.provider}/${route.model}）。工长在后台审完会把结论作为通知发回本会话；收到通知后调用 fusion_resume_plan 复用这份定稿计划，不要重新提交新的候选，也不要在此之前派工。`,
+    `Plan review dispatched (round ${round}, ${route.provider}/${route.model}). The Foreman finishes in the background and sends its verdict back to this conversation as a notice; call fusion_resume_plan with the exact finalized plan when it arrives. Do not submit a new candidate or dispatch a Sidekick before then.`,
+  )
+}
+
+/** A review that was started in the background: its verdict arrives as a notice. */
+type DispatchedPlanReview = { readonly kind: 'dispatched'; readonly round: number; readonly route: PhysicalRoute }
 export interface CoordinatorOptions {
   profile: ResolvedProfile
   workerTools: readonly string[]
@@ -441,6 +458,7 @@ export class FusionCoordinator {
   readonly #stoppingTasks = new Map<TaskId, number>()
   readonly #backgroundStops = new Map<TaskId, Promise<void>>()
   readonly #statusAbort = new AbortController()
+  readonly #reviewJobs: PlanReviewJobs
   #closing = false
 
   readonly modelControl: NativeModelControl
@@ -448,6 +466,7 @@ export class FusionCoordinator {
   readonly roleSandbox: NativeRoleSandbox
 
   constructor(readonly ctx: Context, readonly store: SqliteFusionStore, readonly options: CoordinatorOptions) {
+    this.#reviewJobs = planReviewJobs(ctx)
     this.bindings = new BindingRepository(store)
     this.workflow = new NativeWorkflow(store)
     this.roleSandbox = new NativeRoleSandbox(ctx, store, id => this.bindings.read(id)?.binding)
@@ -1173,7 +1192,7 @@ export class FusionCoordinator {
    * The status panel carries the reason, but it is easy to miss there. Put the reason
    * and the dispatch block in the transcript, which is also the Lead's context.
    */
-  #announcePlanReviewUnavailable(agent: Agent, binding: SessionBinding, record: PlanReviewRecord): void {
+  #announcePlanReviewUnavailable(agent: Agent, binding: SessionBinding, record: PlanReviewRecord, wake = false): void {
     try {
       // Each failed attempt has its own reason; replaying it must not speak twice.
       const id = `plan-review-notice:${binding.taskId}:${record.workOrderId}:${record.round}`
@@ -1184,10 +1203,43 @@ export class FusionCoordinator {
         content: [{ type: 'text', text: bi(
           `工长没有产出审查结论（${reason}），这份候选计划未经独立审查，尚未派工。`,
           `The Foreman produced no verdict (${reason}). This candidate has not been independently audited or dispatched.`) }] })
-      const event = agent.session.append('user/message', message, { surfaceOp: 'append' })
+      // A detached review has no tool result to carry this, so the notice is what starts the
+      // Lead's next turn; a synchronous one already returned the reason to the same turn.
+      let eventSeq: number | undefined
+      if (wake) agent.send(message, 'next-turn', true)
+      else eventSeq = agent.session.append('user/message', message, { surfaceOp: 'append' }).seq
       this.store.writeDocument(id, 0, { schemaVersion: 1, taskId: binding.taskId,
-        candidateDigest: record.candidateDigest, round: record.round, eventSeq: event.seq })
+        candidateDigest: record.candidateDigest, round: record.round, ...(eventSeq === undefined ? {} : { eventSeq }) })
     } catch (error) { this.ctx.logger.warn(`[dsh-fusion] plan-review notice failed: ${String(error)}`) }
+  }
+
+  /**
+   * Say that a background review settled, and how the Lead continues.
+   *
+   * The turn that dispatched the review ended as soon as it was scheduled, so this notice is
+   * what starts the next one. `agent.send(..., 'next-turn')` is the same wake the user
+   * commands use; if the session is gone, the verdict is still in the ledger and in
+   * `fusion_read_state`.
+   */
+  #announcePlanReviewSettled(agent: Agent, binding: SessionBinding, record: PlanReviewRecord): void {
+    try {
+      const id = `plan-review-verdict-notice:${binding.taskId}:${record.workOrderId}:${record.round}`
+      if (this.store.readDocument(id)) return
+      const assessment = record.assessment!
+      const findings = collectForemanFindings(assessment)
+      const blocking = findings.filter(finding => finding.severity === 'blocking-concern').length
+      const verdict = assessment.verdict === 'ready'
+        ? bi('无异议，可以派工', 'ready — the plan may be dispatched')
+        : bi(`${findings.length} 条意见需要处理`, `${findings.length} finding(s) need an answer`)
+      const message = createUserMessage({ source: { kind: FUSION_SOURCE_KIND, form: 'notice',
+        summary: bi('工长审查完成', 'The plan review finished') },
+        content: [{ type: 'text', text: bi(
+          `工长审查完成（第 ${record.round} 轮）：${verdict}${blocking ? `，其中 ${blocking} 条阻断` : ''}。调用 fusion_resume_plan 复用这份定稿计划；不要重新提交新的候选。`,
+          `The plan review finished (round ${record.round}): ${verdict}${blocking ? `, ${blocking} blocking` : ''}. Call fusion_resume_plan to reuse the exact finalized plan; do not submit a new candidate.`) }] })
+      agent.send(message, 'next-turn', true)
+      this.store.writeDocument(id, 0, { schemaVersion: 1, taskId: binding.taskId,
+        candidateDigest: record.candidateDigest, round: record.round })
+    } catch (error) { this.ctx.logger.warn(`[dsh-fusion] plan-review verdict notice failed: ${String(error)}`) }
   }
 
   /** Whether a task waits on human inspection of interrupted effects rather than on a pause. */
@@ -1986,7 +2038,12 @@ export class FusionCoordinator {
 
   async #stopJobs(taskId: TaskId, stopChild?: () => Promise<unknown>): Promise<void> {
     this.#stoppingTasks.set(taskId, (this.#stoppingTasks.get(taskId) ?? 0) + 1)
-    try { await this.effects.stopJobs(taskId); await stopChild?.() }
+    try {
+      // A review belongs to the task it audits: stopping the task stops its audit too, and
+      // the settle path records that as an explicit unavailable verdict.
+      this.#reviewJobs.cancel(taskId, 'the task stopped while its plan review was running')
+      await this.effects.stopJobs(taskId); await stopChild?.()
+    }
     finally {
       const remaining = this.#stoppingTasks.get(taskId)! - 1
       if (remaining) this.#stoppingTasks.set(taskId, remaining)
@@ -2224,12 +2281,19 @@ export class FusionCoordinator {
   }
 
   async #resumeForemanPlan(agent: Agent, exec: ToolRunContext): Promise<string> {
-    const binding = this.#binding(agent, 'lead'), failure = this.state(binding.taskId).latestPlanReview
-    if (failure?.outcome !== 'unavailable') throw new Error('There is no unavailable Foreman review to resume.')
-    const saved = this.store.readDocument(`foreman-input:${binding.taskId}:${failure.workOrderId}`)?.value as FrozenPlanInput | undefined
-    if (!saved) throw new Error('This older interrupted review did not save its plan input. Submit the original candidate through fusion_delegate.')
+    const binding = this.#binding(agent, 'lead'), state = this.state(binding.taskId)
+    if (this.#reviewJobs.get(binding.taskId)) {
+      throw new Error('The plan review is still running; its verdict arrives as a notice in this conversation. Resume after it settles.')
+    }
+    // A settled assessment resumes the same way a failed review does: the saved candidate is
+    // re-submitted and the gate reads the recorded verdict instead of asking again. A pending
+    // request with no job (the Host restarted) re-dispatches the review under its own round.
+    const source = state.pendingPlanReview ?? state.latestPlanReview
+    if (!source) throw new Error('There is no Foreman review to resume.')
+    const saved = this.store.readDocument(`foreman-input:${binding.taskId}:${source.workOrderId}`)?.value as FrozenPlanInput | undefined
+    if (!saved) throw new Error('This older review did not save its plan input. Submit the original candidate through fusion_delegate.')
     const { foremanDispositions: _resolved, ...args } = saved.args
-    return this.delegate(agent, args, exec, saved.mode, failure.candidateDigest)
+    return this.delegate(agent, args, exec, saved.mode, source.candidateDigest)
   }
 
   async delegate(agent: Agent, args: DelegateInput, exec: ToolRunContext, mode: 'explore' | 'implement' | 'text' = 'implement', expectedDigest?: Digest): Promise<string> {
@@ -2353,26 +2417,41 @@ export class FusionCoordinator {
 
     if (priorState.pendingPlanReview) {
       const pending = priorState.pendingPlanReview
-      const record: PlanReviewRecord = {
-        schemaVersion: 1,
-        taskId: binding.taskId,
-        workOrderId: pending.workOrderId,
-        candidateDigest: pending.candidateDigest,
-        round: pending.round,
-        route: pending.route,
-        requestedAt: pending.requestedAt,
-        completedAt: new Date().toISOString(),
-        outcome: 'unavailable',
-        unavailableReason: 'interrupted plan review',
-        durationMs: 0,
+      const sameCandidate = pending.candidateDigest === order.candidateDigest && pending.workOrderId === candidate.order.id
+      const running = this.#reviewJobs.get(binding.taskId)
+      // A review that is still running is not an interruption: its verdict is on the way, and
+      // requesting a second one would record two outcomes for the same pending round.
+      if (running && sameCandidate) return reviewDispatchedReply(pending.round, pending.route)
+      if (running) {
+        throw new Error('A plan review for this task is still running; its verdict arrives as a notice in this conversation. Call fusion_resume_plan after it settles instead of submitting another candidate.')
       }
-      this.append(binding.taskId, 'plan-review/unavailable', {
-        workOrderId: pending.workOrderId,
-        candidateDigest: pending.candidateDigest,
-        round: pending.round,
-        reason: 'interrupted plan review',
-        record,
-      })
+      if (!sameCandidate) {
+        // No job and a different candidate: the review was interrupted (the Host restarted)
+        // or the candidate was superseded. Record it as interrupted instead of leaving the
+        // task pending forever; the Lead may ask for it again with a new candidate.
+        const record: PlanReviewRecord = {
+          schemaVersion: 1,
+          taskId: binding.taskId,
+          workOrderId: pending.workOrderId,
+          candidateDigest: pending.candidateDigest,
+          round: pending.round,
+          route: pending.route,
+          requestedAt: pending.requestedAt,
+          completedAt: new Date().toISOString(),
+          outcome: 'unavailable',
+          unavailableReason: 'interrupted plan review',
+          durationMs: 0,
+        }
+        this.append(binding.taskId, 'plan-review/unavailable', {
+          workOrderId: pending.workOrderId,
+          candidateDigest: pending.candidateDigest,
+          round: pending.round,
+          reason: 'interrupted plan review',
+          record,
+        })
+      }
+      // Same candidate without a job: `#runPlanReview` re-dispatches it from the recorded
+      // request, without appending a second `plan-review/requested` for the same round.
     }
 
     // An authorized read-only survey gathers inputs; it is not a finalized plan.
@@ -2416,7 +2495,8 @@ export class FusionCoordinator {
             this.append(binding.taskId, 'plan-review/skip-authorized', { candidateDigest: record.candidateDigest,
               round: record.round, failureWorkOrderId: record.workOrderId, commandId: recovery.commandId, reason: recovery.note! })
           } else {
-            const outcome = await this.#runPlanReview(agent, binding, candidate, record.round, exec.signal, recovery, frozen)
+            const outcome = await this.#runPlanReview(agent, binding, candidate, record.round, exec.signal, recovery, frozen, args.block !== true)
+            if (outcome.kind === 'dispatched') return reviewDispatchedReply(outcome.round, outcome.route)
             if (outcome.kind === 'concerns') return formatForemanConcerns(outcome.assessment, record.round)
             if (outcome.kind === 'unavailable') return blocked(outcome.reason)
           }
@@ -2498,7 +2578,8 @@ export class FusionCoordinator {
           if (hasAccepted) {
             // The repaired plan owes the next round: one round per revision, up to the bound.
             const nextRound = unresolvedReview.round + 1
-            const nextOutcome = await this.#runPlanReview(agent, binding, candidate, nextRound, exec.signal, undefined, frozen)
+            const nextOutcome = await this.#runPlanReview(agent, binding, candidate, nextRound, exec.signal, undefined, frozen, args.block !== true)
+            if (nextOutcome.kind === 'dispatched') return reviewDispatchedReply(nextOutcome.round, nextOutcome.route)
             if (nextOutcome.kind === 'concerns') {
               return formatForemanConcerns(nextOutcome.assessment, nextRound)
             }
@@ -2524,7 +2605,8 @@ export class FusionCoordinator {
           // Re-running round 1 would ask the answered findings again and spend a third
           // model call on a two-call budget.
           const round = decision.round
-          const outcome = await this.#runPlanReview(agent, binding, candidate, round, exec.signal, undefined, frozen)
+          const outcome = await this.#runPlanReview(agent, binding, candidate, round, exec.signal, undefined, frozen, args.block !== true)
+          if (outcome.kind === 'dispatched') return reviewDispatchedReply(outcome.round, outcome.route)
           if (outcome.kind === 'concerns') {
             return formatForemanConcerns(outcome.assessment, round)
           }
@@ -2657,15 +2739,24 @@ export class FusionCoordinator {
     return list
   }
 
+  /**
+   * Request, dispatch or settle one plan review.
+   *
+   * The request is durable before any model runs: `plan-review/requested` plus the frozen plan
+   * input is what lets a background review be resumed after a restart instead of re-authored.
+   * A background dispatch returns as soon as the review owns its own lifetime; the synchronous
+   * form is kept for `block: true`.
+   */
   async #runPlanReview(
     agent: Agent,
     binding: SessionBinding,
     candidate: PlanReviewCandidate,
     round: number,
-    signal?: AbortSignal,
-    recovery?: ForemanRecovery,
-    frozen?: FrozenPlanInput,
-  ): Promise<PlanReviewOutcome> {
+    signal: AbortSignal | undefined,
+    recovery: ForemanRecovery | undefined,
+    frozen: FrozenPlanInput | undefined,
+    background: boolean,
+  ): Promise<PlanReviewOutcome | DispatchedPlanReview> {
     const currentState = this.state(binding.taskId)
     const priorReview = currentState.planReviews?.findLast(
       r => r.candidateDigest === candidate.order.candidateDigest && r.round === round,
@@ -2677,29 +2768,54 @@ export class FusionCoordinator {
       return { kind: 'unavailable', reason: priorReview.unavailableReason ?? 'prior unavailable review' }
     }
 
-    const requestedAt = new Date().toISOString()
+    // A review whose request is already recorded but whose job is gone (the Host restarted,
+    // or the process stopped before the model answered) is resumed under the same round: the
+    // ledger holds the request, so asking for it again would be a duplicate round.
+    const pending = currentState.pendingPlanReview
+    const resumable = pending !== undefined
+      && pending.workOrderId === candidate.order.id
+      && pending.candidateDigest === candidate.order.candidateDigest
+      && pending.round === round
+    const requestedAt = resumable ? pending!.requestedAt : new Date().toISOString()
     // A human model change continues to apply if the same task needs a second
     // review round. The frozen combo and the other two roles never change.
-    const route = recovery?.route ?? priorReview?.route ?? currentState.latestPlanReview?.route ?? binding.profile.foreman!.route
+    const route = resumable
+      ? pending!.route
+      : recovery?.route ?? priorReview?.route ?? currentState.latestPlanReview?.route ?? binding.profile.foreman!.route
+
+    const running = this.#reviewJobs.get(binding.taskId)
+    if (running) {
+      // One review per task: a second candidate cannot start a competing audit of the same
+      // pending round. The Lead is told to wait for the verdict it already asked for.
+      if (resumable || running.workOrderId === candidate.order.id) return { kind: 'dispatched', round: running.round, route }
+      throw new Error('A plan review is already running for this task; its verdict arrives as a notice in this conversation')
+    }
     const reviewBinding = route === binding.profile.foreman!.route ? binding : {
       ...binding, profile: { ...binding.profile, foreman: { ...binding.profile.foreman!, route } },
     }
     if (frozen) this.store.writeDocument(`foreman-input:${binding.taskId}:${candidate.order.id}`, 0, frozen)
-    this.append(binding.taskId, 'plan-review/requested', {
-      workOrderId: candidate.order.id,
-      candidateDigest: candidate.order.candidateDigest!,
-      round,
-      route,
-      requestedAt,
-      ...(recovery ? { retryOf: recovery.failureWorkOrderId, commandId: recovery.commandId } : {}),
-    })
+    if (!resumable) {
+      this.append(binding.taskId, 'plan-review/requested', {
+        workOrderId: candidate.order.id,
+        candidateDigest: candidate.order.candidateDigest!,
+        round,
+        route,
+        requestedAt,
+        ...(recovery ? { retryOf: recovery.failureWorkOrderId, commandId: recovery.commandId } : {}),
+      })
+    }
 
-    let outcome: PlanReviewOutcome
+    if (background) {
+      this.#startPlanReviewJob(agent, binding, reviewBinding, candidate, round, route, requestedAt)
+      return { kind: 'dispatched', round, route }
+    }
+
+    const service = this.options.planReview
+      ? this.options.planReview(agent, reviewBinding)
+      : new NativePlanReviewService(this.ctx, agent, reviewBinding, this.#auxiliary)
     const startTime = Date.now()
+    let outcome: PlanReviewOutcome
     try {
-      const service = this.options.planReview
-        ? this.options.planReview(agent, reviewBinding)
-        : new NativePlanReviewService(this.ctx, agent, reviewBinding, this.#auxiliary)
       outcome = await service.review(candidate, signal)
     } catch (error) {
       outcome = {
@@ -2707,7 +2823,77 @@ export class FusionCoordinator {
         reason: `Foreman review failed: ${error instanceof Error ? error.message : String(error)}`,
       }
     }
-    const durationMs = Date.now() - startTime
+    this.#recordPlanReviewOutcome(agent, binding, candidate, round, route, requestedAt, outcome, Date.now() - startTime, false)
+    return outcome
+  }
+
+  /**
+   * Start one review in the background.
+   *
+   * The Lead's tool call returns as soon as this is scheduled. The review owns its own
+   * AbortController, and the verdict is recorded and announced from the detached task. The
+   * ledger, not this promise, is the source of truth: a review that loses its process leaves
+   * a pending request that `fusion_resume_plan` re-dispatches.
+   */
+  #startPlanReviewJob(
+    agent: Agent,
+    binding: SessionBinding,
+    reviewBinding: SessionBinding,
+    candidate: PlanReviewCandidate,
+    round: number,
+    route: PhysicalRoute,
+    requestedAt: string,
+  ): void {
+    const job: PlanReviewJob = {
+      taskId: binding.taskId,
+      workOrderId: candidate.order.id,
+      round,
+      controller: new AbortController(),
+    }
+    if (!this.#reviewJobs.start(job)) {
+      // Lost a race against another dispatch for the same task: the running review already
+      // covers this round, so there is nothing to start and nothing to report as broken.
+      return
+    }
+    const service = this.options.planReview
+      ? this.options.planReview(agent, reviewBinding)
+      : new NativePlanReviewService(this.ctx, agent, reviewBinding, this.#auxiliary)
+    const startedAt = Date.now()
+    void (async () => {
+      let outcome: PlanReviewOutcome
+      try {
+        outcome = await service.review(candidate, job.controller.signal)
+      } catch (error) {
+        outcome = {
+          kind: 'unavailable',
+          reason: `Foreman review failed: ${error instanceof Error ? error.message : String(error)}`,
+        }
+      }
+      try {
+        this.#recordPlanReviewOutcome(agent, binding, candidate, round, route, requestedAt, outcome, Date.now() - startedAt, true)
+      } catch (error) {
+        // A conflict here means the ledger already settled this round (a retry or a
+        // reconciliation won the race); the durable record is the one that stands.
+        this.ctx.logger.warn(`[dsh-fusion] plan review settle failed: ${String(error)}`)
+      } finally {
+        this.#reviewJobs.finish(job)
+      }
+    })()
+  }
+
+  /** Record one settled review, then tell the Lead how the work continues. */
+  #recordPlanReviewOutcome(
+    agent: Agent,
+    binding: SessionBinding,
+    candidate: PlanReviewCandidate,
+    round: number,
+    route: PhysicalRoute,
+    requestedAt: string,
+    outcome: PlanReviewOutcome,
+    durationMs: number,
+    /** True when the review ran detached: its verdict has to travel to the Lead as a notice. */
+    announce: boolean,
+  ): void {
     const completedAt = new Date().toISOString()
     if (outcome.kind === 'ready' || outcome.kind === 'concerns') {
       const record: PlanReviewRecord = {
@@ -2730,6 +2916,7 @@ export class FusionCoordinator {
         assessment: outcome.assessment,
         record,
       })
+      if (announce) this.#announcePlanReviewSettled(agent, binding, record)
     } else {
       const record: PlanReviewRecord = {
         schemaVersion: 1,
@@ -2751,9 +2938,10 @@ export class FusionCoordinator {
         reason: outcome.reason,
         record,
       })
-      this.#announcePlanReviewUnavailable(agent, binding, record)
+      // The transcript note is useful either way; only a detached review has to wake the
+      // Lead, because its tool call has already returned.
+      this.#announcePlanReviewUnavailable(agent, binding, record, announce)
     }
-    return outcome
   }
 
   async #baseline(agent: Agent, binding: SessionBinding, root: string, order: WorkOrder, checks: readonly FrozenCheck[], exec: ToolRunContext, leadHolds: boolean): Promise<FrozenCheck[]> {

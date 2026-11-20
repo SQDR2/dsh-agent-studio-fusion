@@ -28,7 +28,8 @@ export type ForemanManifest =
       condition: 'on'
       route: PhysicalRoute
       maxOutputTokens: number
-      timeoutMs: number
+      /** Absent when the combo set no ceiling: the reviewer ends on its own verdict. */
+      timeoutMs?: number
     }
 
 /**
@@ -47,7 +48,7 @@ export function projectForemanManifest(profile: PairProfile,
     condition: 'on',
     route: profile.foreman.route,
     maxOutputTokens: profile.foreman.maxOutputTokens,
-    timeoutMs: profile.foreman.timeoutMs,
+    ...(profile.foreman.timeoutMs === undefined ? {} : { timeoutMs: profile.foreman.timeoutMs }),
   }
 }
 

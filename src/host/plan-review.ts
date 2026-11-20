@@ -33,12 +33,38 @@ interface AttemptResult {
  * (which blocks dispatch and offers the documented recovery commands) than left to consume its
  * whole ceiling silently.
  *
- * Sixty, not forty: a review that reads the files a finding depends on makes a dozen calls
- * before it writes anything, and the observed review that aborted at the old ceiling had made
- * twenty-one of them. The bound is the same runaway guard; only its headroom moved with the
- * work a code-level audit actually needs.
+ * A hundred and twenty, not sixty: the review that prompted this bound made forty-two calls
+ * and was still auditing when a ten-minute ceiling ended it, and a code-level audit of a
+ * three-page plan legitimately reads every test, stylesheet and build script it cites. The
+ * bound is the same runaway guard; the difference is that reaching it now asks the reviewer
+ * for its verdict instead of discarding the review (see
+ * {@link FOREMAN_FINAL_ANSWER_INSTRUCTION}).
  */
-export const FOREMAN_MAX_TOOL_CALLS = 60
+export const FOREMAN_MAX_TOOL_CALLS = 120
+
+/**
+ * How much of a configured ceiling is kept back for the reviewer's own verdict.
+ *
+ * A ceiling is the longest the Lead is asked to wait, not a kill switch: when this much is
+ * left, the loop stops inspecting and asks for the assessment it can already write. Three
+ * minutes covers a final JSON answer even on a `high` reasoning route, where the thinking
+ * before that answer is the expensive part — and a verdict returned late is worth more than
+ * a review discarded on time.
+ */
+export const FOREMAN_FINAL_ANSWER_RESERVE_MS = 180_000
+
+/**
+ * The instruction that turns "out of budget" into "answer with what you have".
+ *
+ * Sent with no tools available, so the turn can only be the assessment. The citations it
+ * names are still verified by the Host afterwards: a hurried verdict is still a verdict about
+ * files that exist, and a `blocking-concern` still needs the code that shows the problem.
+ */
+export const FOREMAN_FINAL_ANSWER_INSTRUCTION =
+  'The inspection budget for this review is spent. Return the assessment now, as the single JSON object '
+  + 'defined by the schema, using only evidence you have already read. Do not ask for more tools and do not '
+  + 'explain this instruction. If your findings are incomplete, report the ones you can support and set '
+  + 'verdict to "concerns" rather than claiming "ready" without inspected ranges.'
 
 /**
  * The window a review gets before it has shown any work.
@@ -72,13 +98,13 @@ export const FOREMAN_TOOL_CALL_BUDGET_MS = 30_000
 
 /**
  * The review's wall clock: a base window that each completed tool call extends, bounded by the
- * ceiling the combo configures.
+ * ceiling the combo configures — or by nothing at all.
  *
  * It aborts its own signal instead of using `AbortSignal.timeout`, because a timeout cannot be
- * extended: the whole point is that demonstrating work moves the deadline. The ceiling is the
- * combo's `timeoutMs` — the longest the Lead is ever made to wait — and it is reached only by
- * a review that keeps showing work, so the setting still bounds the wait while no longer
- * deciding how much of the repository a review may read before it runs out.
+ * extended: the whole point is that demonstrating work moves the deadline. `ceilingMs` is
+ * optional: when a combo does not configure one, the review keeps renewing for as long as it
+ * keeps working, which is what "let it finish" means. What still ends it is silence (the stall
+ * window), the inspection cap, or the user cancelling the turn the review belongs to.
  *
  * Every timer is unref'd: this clock only ends a wait and must never be the reason a Host
  * process stays alive.
@@ -89,18 +115,24 @@ export class ForemanReviewClock {
   private deadlineAt: number
   private timer: ReturnType<typeof setTimeout> | undefined
 
-  constructor(private readonly ceilingMs: number, baseMs: number = FOREMAN_BASE_BUDGET_MS) {
-    this.deadlineAt = this.startedAt + Math.max(1, Math.min(baseMs, ceilingMs))
+  constructor(private readonly ceilingMs: number | undefined, baseMs: number = FOREMAN_BASE_BUDGET_MS) {
+    const first = Math.max(1, baseMs)
+    this.deadlineAt = this.startedAt + (ceilingMs === undefined ? first : Math.min(first, ceilingMs))
     this.#arm()
   }
 
   get signal(): AbortSignal { return this.controller.signal }
 
+  /** The configured ceiling, or undefined when this combo set none. */
+  get ceiling(): number | undefined { return this.ceilingMs }
+
   /** What is left of the current window, floored at zero. */
   get remainingMs(): number { return Math.max(0, this.deadlineAt - Date.now()) }
 
   /** What the review is allowed to wait in total, whether or not it renews. */
-  get ceilingAtMs(): number { return this.startedAt + this.ceilingMs }
+  get ceilingAtMs(): number | undefined {
+    return this.ceilingMs === undefined ? undefined : this.startedAt + this.ceilingMs
+  }
 
   /**
    * Move the deadline by `ms`, never past the ceiling.
@@ -110,8 +142,9 @@ export class ForemanReviewClock {
    */
   extend(ms: number = FOREMAN_TOOL_CALL_BUDGET_MS): void {
     if (this.controller.signal.aborted || ms <= 0) return
+    const next = Math.max(this.deadlineAt, Date.now()) + ms
     const ceiling = this.ceilingAtMs
-    this.deadlineAt = Math.min(ceiling, Math.max(this.deadlineAt, Date.now()) + ms)
+    this.deadlineAt = ceiling === undefined ? next : Math.min(ceiling, next)
     this.#arm()
   }
 
@@ -170,8 +203,9 @@ export class NativePlanReviewService implements PlanReviewModule {
     }
 
     const { timeoutMs } = foremanConfig
-    // One clock for the whole review, shared with the retry: the setting bounds the wait the
-    // Lead actually experiences, not each attempt separately.
+    // One clock for the whole review, shared with the retry: a configured ceiling bounds the
+    // wait the Lead actually experiences, not each attempt separately. No ceiling means the
+    // review renews for as long as it keeps working.
     const clock = new ForemanReviewClock(timeoutMs, this.baseBudgetMs)
     try {
       // The root is resolved once, so every tool call and every citation in this review sees
@@ -184,15 +218,15 @@ export class NativePlanReviewService implements PlanReviewModule {
       // answering: only silence means the gateway never took the first request. A loop that
       // dispatched tool calls has started its work, and re-running it would repeat half a review.
       if (first.cause === 'caller' || first.sawChunk) {
-        return this.#abortOutcome(first.cause!, timeoutMs, { callerReason: externalSignal?.reason, ...first })
+        return this.#abortOutcome(first.cause!, clock.ceiling, { callerReason: externalSignal?.reason, ...first })
       }
 
       // One retry, out of what is left of the clock rather than on top of it: the setting
       // bounds the wait the Lead actually experiences, not each attempt separately.
-      if (clock.remainingMs <= 0) return this.#abortOutcome('no-progress', timeoutMs, { ...first })
+      if (clock.remainingMs <= 0) return this.#abortOutcome('no-progress', clock.ceiling, { ...first })
       const retried = await this.#attempt(candidate, root, externalSignal, clock)
       if (retried.outcome) return retried.outcome
-      return this.#abortOutcome(retried.cause!, timeoutMs, { callerReason: externalSignal?.reason, ...retried, hadRetry: true })
+      return this.#abortOutcome(retried.cause!, clock.ceiling, { callerReason: externalSignal?.reason, ...retried, hadRetry: true })
     } finally {
       clock.dispose()
     }
@@ -217,7 +251,8 @@ export class NativePlanReviewService implements PlanReviewModule {
    * The loop is the whole review, not one call: it streams a request, executes every tool call
    * the answer asked for, appends that turn and its results, and streams again. It ends when a
    * response asks for no tools (that text is the assessment), when a budget aborts it, or when
-   * the runaway guard stops a review that never converges.
+   * the review has spent its inspections — in which case it is asked for the verdict it can
+   * already write, rather than discarded.
    *
    * Two budgets answer different questions. The stall window asks whether this request ever
    * started answering, so a route that produced nothing can be reported as a stall and retried
@@ -249,6 +284,9 @@ export class NativePlanReviewService implements PlanReviewModule {
     let toolCalls = 0
     let sawChunk = false
     let shellSeq = 0
+    // Set once the review has been asked for its verdict: the next answer is the assessment,
+    // and a request for more tools at that point is non-convergence rather than progress.
+    let concluding = false
 
     for (;;) {
       if (combined.aborted) {
@@ -268,7 +306,7 @@ export class NativePlanReviewService implements PlanReviewModule {
         ...(route.reasoningEffort ? { reasoningEffort: route.reasoningEffort as GenerateOptions['reasoningEffort'] } : {}),
         system: FOREMAN_SYSTEM_PROMPT,
         messages: [...messages],
-        tools,
+        tools: concluding ? [] : tools,
         maxTokens: maxOutputTokens,
         signal,
         sessionId: this.agent.id,
@@ -303,19 +341,56 @@ export class NativePlanReviewService implements PlanReviewModule {
         }
       }
 
-      // The guard is checked before the calls run, so the review stops at the bound instead of
-      // overshooting it by a whole turn's worth of work.
-      if (toolCalls + answered.calls.length > FOREMAN_MAX_TOOL_CALLS) {
+      // The guard is checked before the calls run. Reaching it does not throw the review away:
+      // it stops inspecting and asks for the verdict in the next request, with no tools
+      // available, so the audit ends in an assessment rather than in a discarded transcript.
+      // The same applies when a configured ceiling is close enough that the verdict would no
+      // longer fit inside it.
+      // Keep a quarter of a configured ceiling for the verdict, never more than the reserve
+      // constant — and never more than three quarters of the base window, because a reserve
+      // larger than the first window would declare the review out of room before it had
+      // inspected anything.
+      const reserveMs = clock.ceiling === undefined
+        ? 0
+        : Math.min(
+          FOREMAN_FINAL_ANSWER_RESERVE_MS,
+          Math.max(1, Math.floor(clock.ceiling / 4)),
+          Math.max(1, Math.floor(this.baseBudgetMs * 0.75)),
+        )
+      const atInspectionCap = toolCalls + answered.calls.length > FOREMAN_MAX_TOOL_CALLS
+      // No ceiling means the review is never "out of room": it ends on its verdict.
+      const outOfRoom = reserveMs > 0 && clock.remainingMs <= reserveMs
+      if (concluding) {
         return {
           outcome: {
             kind: 'unavailable',
-            reason: `Foreman review stopped by the runaway guard: it asked for `
-              + `${toolCalls + answered.calls.length} tool calls, more than the ${FOREMAN_MAX_TOOL_CALLS} one review may make, `
-              + 'without returning an assessment. The plan was not reviewed; inspect the transcript for what it kept looking for.',
+            reason: `Foreman review asked for ${answered.calls.length} more tool call(s) after it was asked to return its `
+              + 'assessment; the plan was not reviewed. The reviewer is not converging, so point it at a different route '
+              + 'or give it a plan it can audit with fewer inspections.',
           },
           sawChunk,
           toolCalls,
         }
+      }
+      if (atInspectionCap || outOfRoom) {
+        messages.push(createAssistantMessage({
+          content: answered.blocks,
+          source: { provider: route.provider, model: route.model },
+        }))
+        for (const call of answered.calls) {
+          toolCalls++
+          messages.push(createToolResultMessage({
+            callId: ToolCallId(call.id),
+            content: [{ type: 'text', text: 'Not run: the review has reached its inspection budget. Return the assessment with the evidence already read.' }],
+            isError: true,
+          }))
+        }
+        messages.push(createUserMessage({
+          content: [{ type: 'text', text: FOREMAN_FINAL_ANSWER_INSTRUCTION }],
+          source: { kind: FUSION_SOURCE_KIND },
+        }))
+        concluding = true
+        continue
       }
 
       messages.push(createAssistantMessage({
@@ -462,7 +537,7 @@ export class NativePlanReviewService implements PlanReviewModule {
    * different problem from a review that stopped answering after reading twenty files, and one
    * sentence for both sends the user to the wrong fix.
    */
-  #abortOutcome(cause: AbortCause, timeoutMs: number, attempt: AttemptResult & { callerReason?: unknown; hadRetry?: boolean }): PlanReviewOutcome {
+  #abortOutcome(cause: AbortCause, timeoutMs: number | undefined, attempt: AttemptResult & { callerReason?: unknown; hadRetry?: boolean }): PlanReviewOutcome {
     const route = this.binding.profile.foreman!.route
     const label = `${route.provider}/${route.model}`
     const { sawChunk, toolCalls, hadRetry = false, callerReason } = attempt
@@ -492,7 +567,7 @@ export class NativePlanReviewService implements PlanReviewModule {
     // workspace cannot answer.
     return {
       kind: 'unavailable',
-      reason: `Foreman review aborted: ${label} used its whole ${timeoutMs}ms ceiling while still streaming`
+      reason: `Foreman review aborted: ${label} used its whole ${timeoutMs === undefined ? 'configured' : `${timeoutMs}ms`} ceiling while still streaming`
         + `${toolCalls > 0 ? ` after ${toolCalls} tool calls` : ''}; `
         + 'raise the Foreman timeout or lower its reasoning effort.',
     }

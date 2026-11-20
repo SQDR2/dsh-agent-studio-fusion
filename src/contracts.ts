@@ -438,7 +438,7 @@ export interface PairProfile {
   /** Optional explicit summary route; absence preserves the role model and old digests. */
   compactor?: { readonly route: PhysicalRoute; readonly maxOutputTokens: number }
   /** Optional independent plan auditor; when set, every candidate plan is audited. */
-  foreman?: { readonly route: PhysicalRoute; readonly maxOutputTokens: number; readonly timeoutMs: number }
+  foreman?: { readonly route: PhysicalRoute; readonly maxOutputTokens: number; readonly timeoutMs?: number }
   dataPolicyId: string
   evidenceCampaignIds: readonly string[]
 }

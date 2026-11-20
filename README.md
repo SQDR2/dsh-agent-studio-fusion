@@ -172,6 +172,7 @@ DSHX_HARNESS=<dsh 源码 checkout> pnpm build        # 重建 lib/（Host 模块
 | [RELEASING.zh.md](RELEASING.zh.md) | 发版步骤 |
 | [docs/PLAN-LEAD-FOREMAN-V2.md](docs/PLAN-LEAD-FOREMAN-V2.md) | Lead / 工长流程改造的计划与阶段状态 |
 | [docs/FOREMAN-WORKFLOW-PLAN.md](docs/FOREMAN-WORKFLOW-PLAN.md) | 工长工作流的历史设计提案（现行规则以本文为准） |
+| [docs/FOREMAN-BACKGROUND-REVIEW.zh.md](docs/FOREMAN-BACKGROUND-REVIEW.zh.md) | 工长改为后台子会话审查的实施计划（评审稿） |
 | [docs/DEVIN-LOCAL-FUSION.md](docs/DEVIN-LOCAL-FUSION.md) | Devin CLI 的 Fusion 二进制取证与本仓库逐项对比 |
 | [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) | 支持的 Host 版本与兼容性说明 |
 | [docs/EVIDENCE.md](docs/EVIDENCE.md) | 证据链说明 |
