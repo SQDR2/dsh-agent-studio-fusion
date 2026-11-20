@@ -43,6 +43,8 @@ import { FusionCoordinator } from '../src/host/coordinator.js'
 import { AcpToolBridge } from '../src/host/acp/bridge.js'
 import { SqliteFusionStore } from '../src/task/sqlite-store.js'
 import { sha256Hex } from '../src/digest.js'
+import { canonicalWorkspace, leasePath } from '../src/execution/write-lease.js'
+import { spawnSync } from 'node:child_process'
 import { newLedger } from '../src/usage/ledger.js'
 import { completeProfile } from '../src/profile/resolve.js'
 import { loadPromptBundle } from '../src/prompts.js'
@@ -288,10 +290,10 @@ async function setup(script: Script, workerScript?: Script, options: {
     chunk.type === 'tool-call-delta' && chunk.name === 'fusion_explore' && chunk.id === 'explore')) {
     expect(await planningCommand(`allow-explore ${EXPLORATION_SCOPE}`)).toMatchObject({ kind: 'success' })
   }
-  return { ctx, parent, coordinator, store, adapter, taskId, workspace, selectionRef, authorization, modelContext, planningCommand }
+  return { ctx, parent, coordinator, store, adapter, taskId, workspace, leaseRoot: join(root, 'leases'), selectionRef, authorization, modelContext, planningCommand }
 }
 
-const delegate = (block = true, checkTimeoutSeconds?: number) => toolCallResponse('delegate', 'fusion_delegate', {
+const delegate = (block = true, checkTimeoutSeconds?: number, id = 'delegate') => toolCallResponse(id, 'fusion_delegate', {
   block,
   goal: 'Correct addition', brief: 'Fix calc.py add and preserve the test. Submit a report after implementing.',
   constraints: ['Do not change test_calc.py'], allowedPaths: ['calc.py'],
@@ -318,6 +320,38 @@ const delegateV3 = (block = true, requirements = ['addition'], coverage?: Requir
 const acceptV3 = (id = 'review-accept') => toolCallResponse(id, 'fusion_review_result', { decision: 'accept',
   reason: 'The implementation adds both inputs and the frozen native test passed.',
   requirements: [{ index: 1, met: true, evidence: 'calc.py add returns a + b; test_calc passed natively' }] })
+
+
+/** A pid no live process owns: a child that has already exited. */
+function gonePid(): number {
+  const child = spawnSync(process.execPath, ['-e', ''])
+  if (!child.pid) throw new Error('could not spawn a child to obtain a dead pid')
+  return child.pid
+}
+
+/**
+ * Write the durable lease record a killed Host leaves behind: the workspace's only
+ * record is a claim by a process that no longer exists.
+ */
+function seedWorkspaceLease(leaseRoot: string, cwd: string, record: { pid: number; acquiredAt?: string }): void {
+  const workspaceId = canonicalWorkspace(cwd)
+  const file = `${leasePath(workspaceId, leaseRoot)}.sqlite`
+  mkdirSync(dirname(file), { recursive: true })
+  const db = new DatabaseSync(file)
+  const generation = 7
+  try {
+    db.exec('PRAGMA busy_timeout=5000; PRAGMA synchronous=FULL; BEGIN IMMEDIATE;')
+    db.exec('CREATE TABLE IF NOT EXISTS lease (id INTEGER PRIMARY KEY CHECK(id=1), generation INTEGER NOT NULL, record TEXT); '
+      + 'INSERT OR IGNORE INTO lease VALUES (1, 0, NULL); PRAGMA user_version=1;')
+    db.prepare('UPDATE lease SET generation=?, record=? WHERE id=1').run(generation, JSON.stringify({
+      workspaceId, holder: 'session-crashed', taskId: 'task-crashed', generation,
+      activeOperationIds: ['op-crashed'], owner: '4242:crashed', pid: record.pid,
+      acquiredAt: record.acquiredAt ?? new Date(Date.now() - 3_600_000).toISOString(),
+      liveProcessRefs: [record.pid],
+    }))
+    db.exec('COMMIT')
+  } finally { db.close() }
+}
 
 const EXPLORATION_SCOPE = 'Read calc.py and test_calc.py, and report the addition behavior with source ranges.'
 const explore = (block = true) => toolCallResponse('explore', 'fusion_explore', { goal: EXPLORATION_SCOPE, brief: EXPLORATION_SCOPE, block })
@@ -513,6 +547,40 @@ describe('delegation preflight and direct preparation', () => {
       .filter(record => record.nativeJob)
     expect(jobs).toHaveLength(1)
     expect(jobs[0]!.nativeJob?.status).toBe('completed')
+  })
+
+  it('refuses a workspace whose recorded writer is still live, before any work order is recorded', async () => {
+    const { parent, coordinator, store, taskId, workspace, leaseRoot } = await setup([
+      delegate(), textResponse('Blocked while another writer holds the workspace.'),
+    ], [edit(), report()])
+    seedWorkspaceLease(leaseRoot, workspace, { pid: process.pid, acquiredAt: new Date().toISOString() })
+    parent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Correct addition and preserve the tests.' }] }))
+    await parent.whenIdle()
+    expect(JSON.stringify(toolResults(parent))).toContain('workspace is held by session-crashed')
+    expect(coordinator.state(taskId).lease).toBeUndefined()
+    // A refusal must not leave a work order behind: that is what made the task answer
+    // "A Worker already owns this task" forever after one busy lease.
+    expect(store.events(taskId).filter(event => event.type === 'work-order/prepared')).toEqual([])
+    expect(store.events(taskId).filter(event => event.type === 'lease/reclaimed')).toEqual([])
+  })
+
+  it('takes the workspace back from a Host that is gone instead of refusing every delegation', async () => {
+    const { parent, coordinator, store, taskId, workspace, leaseRoot } = await setup([
+      delegate(), review('accept'), textResponse('Verified.'),
+    ], [edit(), report()])
+    // The record a killed Host leaves: its process is gone and nothing was left running.
+    seedWorkspaceLease(leaseRoot, workspace, { pid: gonePid() })
+    parent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Correct addition and preserve the tests.' }] }))
+    await parent.whenIdle()
+    expect(coordinator.state(taskId), JSON.stringify(toolResults(parent))).toMatchObject({ phase: 'COMPLETED', verification: 'verified' })
+    const reclaimed = store.events(taskId).filter(event => event.type === 'lease/reclaimed')
+    expect(reclaimed).toHaveLength(1)
+    expect(reclaimed[0]!.payload).toMatchObject({ priorHolder: 'session-crashed', generation: 8 })
+    // The Worker's writer is the generation the takeover created; the Host keeps using the
+    // same workspace for its own checks afterwards.
+    const events = store.events(taskId)
+    const takeover = events.findIndex(event => event.type === 'lease/reclaimed')
+    expect(events.slice(takeover).find(event => event.type === 'lease/acquired')!.payload.lease.generation).toBe(8)
   })
 })
 

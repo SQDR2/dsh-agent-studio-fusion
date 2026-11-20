@@ -624,6 +624,13 @@ export type FusionEvent = EventEnvelope<'task/created', {
 }> | EventEnvelope<'lease/released', {
     workspaceId: string;
     generation: number;
+}> | EventEnvelope<'lease/reclaimed', {
+    workspaceId: string;
+    generation: number;
+    priorHolder: SessionId;
+    priorOwner: string;
+    priorPid: number;
+    basis: string;
 }> | EventEnvelope<'approval/pending', {
     approval: LogicalApproval;
 }> | EventEnvelope<'approval/answered', {

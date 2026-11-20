@@ -555,6 +555,7 @@ export type FusionEvent =
   | EventEnvelope<'review/completed', ReviewCompletedPayload>
   | EventEnvelope<'lease/acquired', { lease: WriteLease }>
   | EventEnvelope<'lease/released', { workspaceId: string; generation: number }>
+  | EventEnvelope<'lease/reclaimed', { workspaceId: string; generation: number; priorHolder: SessionId; priorOwner: string; priorPid: number; basis: string }>
   | EventEnvelope<'approval/pending', { approval: LogicalApproval }>
   | EventEnvelope<'approval/answered', { approvalId: string; state: 'approved' | 'rejected' | 'withdrawn' }>
   | EventEnvelope<'budget/blocked', { reason: string }>

@@ -68,6 +68,7 @@ import type { AcpWorkerFacts } from './acp/bridge.js'
 import { isRead, READ_TOOLS } from './read-tools.js'
 import { backgroundHandoffNeedsInspection, completedToolProblem, dispatchAwaitsInspection, gatedDispatchProblem, gatedTurnStopped, staleRecoveryGate, workerSubmittedProblem } from './task-gates.js'
 import { AUTHORITY_ACTIONS, AUTHORITY_DENIED, workerAuthorityProblem } from './authority.js'
+import { FusionError, LEASE_BUSY } from '../errors.js'
 
 /**
  * A bounded, factual rendering of the exploration the Lead collected: what was read, the
@@ -802,6 +803,24 @@ export class FusionCoordinator {
           record,
         })
       }
+      // A lease left by a process that no longer exists is not a lock, it is debris. Left in
+      // place it refuses every write in this workspace, in every session, forever — the audit
+      // in session-20b3fa52 ended with the Host process gone and its record still naming it,
+      // and the next session could not delegate at all. The record is only dropped when the
+      // writer is provably gone and its task left no unfinished command; otherwise the task
+      // keeps the lease and still owes the human inspection below.
+      const recordedLease = (() => {
+        if (!state.lease) return undefined
+        try { return this.leases.current(state.lease.workspaceId) } catch { return undefined }
+      })()
+      const abandoned = state.lease && recordedLease
+        && recordedLease.holder === state.lease.holder && recordedLease.generation === state.lease.generation
+        ? this.#abandonedLease(recordedLease) : undefined
+      if (abandoned && recordedLease) {
+        this.leases.release(recordedLease)
+        this.append(binding.taskId, 'lease/released', { workspaceId: recordedLease.workspaceId, generation: recordedLease.generation })
+        this.ctx.logger.warn(`[dsh-fusion] released a workspace lease left by ${recordedLease.holder} (pid ${recordedLease.pid}): ${abandoned}`)
+      }
       // A recorded Worker stop is the Host's own note that the handoff ended; it decides two of
       // the traces below (a still-queued dispatch and a `background` flag), because both describe
       // a handoff rather than an effect.
@@ -834,7 +853,7 @@ export class FusionCoordinator {
         state.control,
         workerStopped,
       )
-      const unfinished = Boolean(state.lease || pendingDispatch || uncertainCheck || interruptedCompaction
+      const unfinished = Boolean(state.lease && !abandoned || pendingDispatch || uncertainCheck || interruptedCompaction
         || interruptedApproval || interruptedEffect || uncertainBrief || detachedWorker || state.pendingApprovalIds.length)
       if (unfinished && state.control.mode !== 'completed' && !state.control.recovering) {
         this.append(binding.taskId, 'recovery/needed', { reason: 'Host runtime was replaced with a recorded writer, pending dispatch/approval, uncertain check, unfinished compaction or a runtime it did not start' })
@@ -2022,10 +2041,46 @@ export class FusionCoordinator {
   }
 
   #acquire(binding: SessionBinding, root: string, holder: string, operationId: ReturnType<typeof OperationId>): void {
-    const lease = this.leases.acquire({ cwd: root, holder: SessionId(holder), taskId: binding.taskId, operationId })
+    const input = { cwd: root, holder: SessionId(holder), taskId: binding.taskId, operationId }
+    let lease: LeaseRecord
+    try {
+      lease = this.leases.acquire(input)
+    } catch (error) {
+      // A writer that died mid-turn leaves its record behind, and that record is not a lock
+      // any more: nothing can release it, and it refuses every later write in the workspace.
+      // Taking it over here is what makes the workspace usable again after a crash rather
+      // than after a manual edit of the lease registry.
+      const prior = error instanceof FusionError && error.code === LEASE_BUSY ? this.leases.current(root) : undefined
+      const basis = prior ? this.#abandonedLease(prior) : undefined
+      if (!prior || !basis) throw error
+      lease = this.leases.reclaim(prior, input)
+      this.ctx.logger.warn(`[dsh-fusion] reclaimed an abandoned workspace lease from ${prior.holder} (pid ${prior.pid}): ${basis}`)
+      this.append(binding.taskId, 'lease/reclaimed', { workspaceId: lease.workspaceId, generation: lease.generation,
+        priorHolder: prior.holder, priorOwner: prior.owner, priorPid: prior.pid, basis })
+    }
     this.#held.set(binding.taskId, lease)
     try { this.append(binding.taskId, 'lease/acquired', { lease }) }
     catch (error) { this.leases.release(lease); this.#held.delete(binding.taskId); throw error }
+  }
+
+  /**
+   * Why a recorded writer can no longer be writing, or `undefined` while it might be.
+   *
+   * A dead pid is not proof by itself. The kernel recycles ids, so the lease carries the
+   * moment its process started and `WorkspaceWriteLease#alive` compares that; and a command
+   * the writer started can outlive it, so an unsettled native effect in its task keeps the
+   * lease refused. Anything this Host cannot prove is treated as still writing.
+   */
+  #abandonedLease(lease: LeaseRecord): string | undefined {
+    if (this.leases.alive(lease)) return undefined
+    try {
+      const unfinished = this.effects.pending(lease.taskId).length + this.effects.strandedRetained(lease.taskId).length
+      if (unfinished) return undefined
+    } catch {
+      // An unreadable effect journal is not evidence that no command is running.
+      return undefined
+    }
+    return `the process that wrote it (pid ${lease.pid}) is gone and its task left no unfinished native effect`
   }
 
   #release(id: TaskId): void {
@@ -2680,19 +2735,46 @@ export class FusionCoordinator {
         ? `Text-only assignment: no workspace and no acceptance command. Submit the answer through fusion_submit_result. ${textReportInstruction({ ...order, briefRevision: this.#runtime(binding.taskId).briefRevision ?? 0 })}`
         : `Acceptance commands:\n${JSON.stringify(args.checks)}${knownText}`}`
     const payload = this.store.putArtifact(binding.taskId, Buffer.from(brief), 'text/plain')
+    // The writer is claimed before the order that names it is durable, not after.
+    //
+    // Acquiring afterwards looked harmless and was not: a workspace held by another
+    // (or by a crashed Host) refused the lease one line after `work-order/prepared`
+    // had already been recorded, so a single busy refusal left a work order with no
+    // Worker behind it, and every later attempt answered "A Worker already owns this
+    // task" — the workspace never got a chance to free up. Taking the lease first
+    // means the refusal writes nothing into the task (session-20b3fa52's crash left
+    // exactly this order behind, and the session after it could not delegate at all).
+    if (mode === 'implement') {
+      try {
+        this.#acquire(binding, base.root, childId, order.operationId)
+      } catch (error) {
+        // A direct Lead that just released its own writer gets it back, so a refused
+        // handoff cannot strip the task of the only writer it had.
+        if (directHandoff) {
+          try { this.#acquire(binding, base.root, agent.id, OperationId(randomUUID())) }
+          catch (restore) { this.#trackingFailed(agent, `Direct preparation needs recovery after a refused handoff: ${String(restore)}`) }
+        }
+        throw error
+      }
+    }
     const prepared = this.state(binding.taskId)
-    this.store.transact(binding.taskId, prepared.seq, persisted => ({
-      events: [{ schemaVersion: 1, id: randomUUID(), taskId: binding.taskId, seq: prepared.seq + 1, revision: prepared.revision,
-        type: 'work-order/prepared', createdAt: new Date().toISOString(), causeId: exec.callId, payload: { order, reservedChild: childId } }],
-      outbox: [...persisted.outbox, { taskId: binding.taskId, operationId: order.operationId, kind: 'native-worker', state: 'prepared', reservedChild: childId, payloadRef: payload.id }],
-    }))
+    try {
+      this.store.transact(binding.taskId, prepared.seq, persisted => ({
+        events: [{ schemaVersion: 1, id: randomUUID(), taskId: binding.taskId, seq: prepared.seq + 1, revision: prepared.revision,
+          type: 'work-order/prepared', createdAt: new Date().toISOString(), causeId: exec.callId, payload: { order, reservedChild: childId } }],
+        outbox: [...persisted.outbox, { taskId: binding.taskId, operationId: order.operationId, kind: 'native-worker', state: 'prepared', reservedChild: childId, payloadRef: payload.id }],
+      }))
+    } catch (error) {
+      // No order was recorded, so no Worker owns this writer.
+      if (mode === 'implement') this.#release(binding.taskId)
+      throw error
+    }
     // Reuse native history, while the new work order owns checks and permissions.
     // Persist the rebinding before dispatch so an interrupted handoff is gated.
     if (resident) this.scopes.detach(resident)
     this.store.writeDocument(`child:${childId}`, priorChild?.revision ?? 0, { parent: agent.id, taskId: binding.taskId })
     this.bindings.assignWorker(agent.id, binding.taskId, childId)
     if (resident) this.#attachKnown(resident)
-    if (mode === 'implement') this.#acquire(binding, base.root, childId, order.operationId)
     let started = false
     try {
       this.store.advanceOutbox(binding.taskId, order.operationId, 'prepared', 'dispatched')
@@ -3451,9 +3533,8 @@ export class FusionCoordinator {
       if (child) await this.transport.release(agent, child.id)
       const lease = textOnly ? undefined : this.leases.current(root!)
       if (lease && lease.taskId !== binding.taskId) throw new Error('Another task owns the workspace lease')
-      if (lease && lease.pid !== process.pid) {
-        try { process.kill(lease.pid, 0); throw new Error('The old Host is still live; settle it before reconciling this lease') }
-        catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error }
+      if (lease && lease.pid !== process.pid && this.leases.alive(lease)) {
+        throw new Error('The old writer is still live; settle it before reconciling this lease')
       }
       const snapshot: WorkspaceSnapshot = textOnly ? { schemaVersion: 1, root: root ?? `native:${agent.id}`, entries: [], excludedDirectoryNames: [], id: SnapshotId(`inspection:${randomUUID()}`) } : snapshotWorkspace(root!)
       const evidence = this.store.putArtifact(binding.taskId, Buffer.from(JSON.stringify({ schemaVersion: 1,

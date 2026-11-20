@@ -447,6 +447,11 @@ function applyPayload(state: TaskState | undefined, event: FusionEvent): TaskSta
       return { ...need(state, event), lease: event.payload.lease }
     case 'lease/released':
       return { ...need(state, event), lease: undefined }
+    case 'lease/reclaimed':
+      // Recorded on the task that took the workspace over, so that an interrupted
+      // writer's lock never disappears without a trace in the history that inherits
+      // it. This task never owned the reclaimed record itself.
+      return { ...need(state, event), lease: undefined }
     case 'approval/pending':
       return applyApprovalPending(state, event)
     case 'approval/answered':

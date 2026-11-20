@@ -11,6 +11,72 @@ export interface LeaseRecord extends WriteLease {
   readonly pid: number
   readonly acquiredAt: string
   readonly liveProcessRefs: readonly number[]
+  /**
+   * When the writing process started, to the second.
+   *
+   * A pid is an id the kernel recycles, not an identity: after a crash the next
+   * process on this machine frequently gets the same number, and reading that as
+   * "the old writer is still here" is what keeps a workspace locked forever. The
+   * start time is the part of the identity the kernel does not reuse. Absent on
+   * records written before this field existed, and on hosts without `/proc`.
+   */
+  readonly ownerStartedAt?: string
+}
+
+/** One process incarnation: the pid and the moment that process started, if knowable. */
+export interface ProcessIncarnation {
+  readonly pid: number
+  readonly startedAt: number | undefined
+}
+
+/** Linux reports `/proc/<pid>/stat` clock ticks per second; 100 on every mainstream build. */
+const CLOCK_TICKS_PER_SECOND = 100
+/** A start time this far from the recorded one is another process, not clock skew. */
+const INCARNATION_TOLERANCE_MS = 1_000
+
+let bootTimeMs: number | undefined
+function bootTime(): number | undefined {
+  if (bootTimeMs !== undefined) return bootTimeMs
+  try {
+    const match = /^btime\s+(\d+)$/m.exec(fs.readFileSync('/proc/stat', 'utf8'))
+    if (match) bootTimeMs = Number(match[1]) * 1_000
+  } catch {
+    // No procfs: liveness falls back to a signal probe with no start time.
+  }
+  return bootTimeMs
+}
+
+/**
+ * This exact process incarnation, or `undefined` when no such process can still be
+ * running. A zombie has a `/proc` entry and cannot write, so it is reported gone.
+ *
+ * `startedAt` is `undefined` on a platform without procfs: callers may still ask
+ * "is this pid present", but they cannot tell a recycled id from the original.
+ */
+export function processIncarnation(pid: number): ProcessIncarnation | undefined {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return undefined
+  if (process.platform === 'linux') {
+    try {
+      const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8')
+      const close = stat.lastIndexOf(')')
+      if (close < 0) return undefined
+      // Fields after "<comm>" begin at field 3 (`state`); starttime is field 22.
+      const fields = stat.slice(close + 2).split(' ')
+      if (fields[0] === 'Z' || fields[0] === 'X') return undefined
+      const ticks = Number(fields[19])
+      const boot = bootTime()
+      return { pid, startedAt: Number.isSafeInteger(ticks) && boot !== undefined
+        ? boot + ticks * (1_000 / CLOCK_TICKS_PER_SECOND) : undefined }
+    } catch {
+      return undefined
+    }
+  }
+  try {
+    process.kill(pid, 0)
+    return { pid, startedAt: undefined }
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'EPERM' ? { pid, startedAt: undefined } : undefined
+  }
 }
 
 export function canonicalWorkspace(cwd: string): string {
@@ -61,35 +127,92 @@ export function leasePath(workspaceId: string, root = DURABLE_LEASE_ROOT): strin
   return path.join(root, `${key}.lock`)
 }
 
+export interface LeaseInput {
+  cwd: string
+  holder: SessionId
+  taskId: TaskId
+  operationId: OperationId
+  liveProcessRefs?: readonly number[]
+}
+
 export class WorkspaceWriteLease {
   constructor(private readonly root = DURABLE_LEASE_ROOT) {
     if (!path.isAbsolute(root)) throw new TypeError('lease registry directory must be absolute')
     adoptLegacyLeaseRoot(root)
   }
 
-  acquire(input: {
-    cwd: string
-    holder: SessionId
-    taskId: TaskId
-    operationId: OperationId
-    liveProcessRefs?: readonly number[]
-  }): LeaseRecord {
+  acquire(input: LeaseInput): LeaseRecord {
     const workspaceId = canonicalWorkspace(input.cwd)
     return this.#transaction(workspaceId, db => {
       const row = this.#row(db)
       const prior = this.#record(row, workspaceId)
-      if (prior) throw new FusionError(LEASE_BUSY, `workspace is held by ${prior.holder}; reconcile before handoff`)
-      if (row.generation === Number.MAX_SAFE_INTEGER) throw new FusionError(LEASE_GENERATION, 'lease generation exhausted')
-      const refs = [...new Set([process.pid, ...(input.liveProcessRefs ?? [])])]
-      if (refs.some(pid => !Number.isSafeInteger(pid) || pid <= 0)) throw new FusionError(LEASE_BUSY, 'invalid process reference')
-      const record: LeaseRecord = {
-        workspaceId, holder: input.holder, taskId: input.taskId, generation: row.generation + 1,
-        activeOperationIds: [input.operationId], owner: `${process.pid}:${randomUUID()}`, pid: process.pid,
-        acquiredAt: new Date().toISOString(), liveProcessRefs: refs,
-      }
-      db.prepare('UPDATE lease SET generation=?, record=? WHERE id=1').run(record.generation, JSON.stringify(record))
-      return record
+      if (prior) throw new FusionError(LEASE_BUSY, `workspace is held by ${prior.holder} (pid ${prior.pid}, since ${prior.acquiredAt}); finish or stop that writer, or let its process exit so the abandoned lease is taken over`)
+      return this.#write(db, row, workspaceId, input)
     })
+  }
+
+  /**
+   * Take over a lease whose writer is gone.
+   *
+   * This is a compare-and-swap on the record the caller inspected, not a blind
+   * overwrite: if another process acquired, released or reclaimed the lease in
+   * the meantime, the swap fails and the caller keeps the busy error. The caller
+   * is responsible for having proved the writer is gone; `alive` answers that
+   * question, and `Coordinator#abandonedLease` adds the effect-journal half.
+   */
+  reclaim(prior: LeaseRecord, input: LeaseInput): LeaseRecord {
+    const workspaceId = canonicalWorkspace(input.cwd)
+    if (prior.workspaceId !== workspaceId) throw new FusionError(LEASE_BUSY, 'the inspected lease belongs to a different workspace')
+    return this.#transaction(workspaceId, db => {
+      const row = this.#row(db)
+      const current = this.#record(row, workspaceId)
+      if (!current || current.owner !== prior.owner || current.generation !== prior.generation) {
+        throw new FusionError(LEASE_BUSY, 'the workspace writer changed while it was being inspected')
+      }
+      if (this.alive(current)) throw new FusionError(LEASE_BUSY, `workspace is still held by ${current.holder}; its process is live`)
+      return this.#write(db, row, workspaceId, input)
+    })
+  }
+
+  /**
+   * Whether the process that wrote this record can still be running.
+   *
+   * A present pid is not enough. The recorded start time decides a recycled id,
+   * and a record written before the current process on that pid existed cannot be
+   * held by it — which is how a record from before this field existed is judged.
+   * Any other recorded process reference counts as live, because a command the
+   * writer started may outlive it.
+   */
+  alive(record: LeaseRecord): boolean {
+    return this.#sameWriter(record)
+      || record.liveProcessRefs.some(pid => pid !== record.pid && processIncarnation(pid) !== undefined)
+  }
+
+  /** Whether the process on the recorded pid is still the one that wrote the record. */
+  #sameWriter(record: LeaseRecord): boolean {
+    const current = processIncarnation(record.pid)
+    if (!current) return false
+    if (current.startedAt === undefined) return true
+    const recordedStart = record.ownerStartedAt === undefined ? undefined : Date.parse(record.ownerStartedAt)
+    if (recordedStart !== undefined && Number.isFinite(recordedStart)) {
+      return Math.abs(current.startedAt - recordedStart) <= INCARNATION_TOLERANCE_MS
+    }
+    return current.startedAt <= Date.parse(record.acquiredAt) + INCARNATION_TOLERANCE_MS
+  }
+
+  #write(db: DatabaseSync, row: { generation: number }, workspaceId: string, input: LeaseInput): LeaseRecord {
+    if (row.generation === Number.MAX_SAFE_INTEGER) throw new FusionError(LEASE_GENERATION, 'lease generation exhausted')
+    const refs = [...new Set([process.pid, ...(input.liveProcessRefs ?? [])])]
+    if (refs.some(pid => !Number.isSafeInteger(pid) || pid <= 0)) throw new FusionError(LEASE_BUSY, 'invalid process reference')
+    const startedAt = processIncarnation(process.pid)?.startedAt
+    const record: LeaseRecord = {
+      workspaceId, holder: input.holder, taskId: input.taskId, generation: row.generation + 1,
+      activeOperationIds: [input.operationId], owner: `${process.pid}:${randomUUID()}`, pid: process.pid,
+      acquiredAt: new Date().toISOString(), liveProcessRefs: refs,
+      ...(startedAt === undefined ? {} : { ownerStartedAt: new Date(startedAt).toISOString() }),
+    }
+    db.prepare('UPDATE lease SET generation=?, record=? WHERE id=1').run(record.generation, JSON.stringify(record))
+    return record
   }
 
   assertGeneration(lease: WriteLease, generation: number): void {
@@ -136,6 +259,8 @@ export class WorkspaceWriteLease {
     if (value.workspaceId !== workspaceId || value.generation !== row.generation
       || typeof value.owner !== 'string' || typeof value.holder !== 'string' || typeof value.taskId !== 'string'
       || !Number.isSafeInteger(value.pid) || Number(value.pid) <= 0 || typeof value.acquiredAt !== 'string'
+      || (value.ownerStartedAt !== undefined
+        && (typeof value.ownerStartedAt !== 'string' || !Number.isFinite(Date.parse(value.ownerStartedAt))))
       || !Array.isArray(value.activeOperationIds) || !Array.isArray(value.liveProcessRefs)) {
       throw new FusionError(LEASE_BUSY, 'durable lease requires reconciliation')
     }

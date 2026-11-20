@@ -20,6 +20,35 @@ own tags and releases.
 Entry format: what changed, then what was actually validated. "Not claimed" lines mark what a release did *not* test —
 read them before assuming a platform is covered.
 
+## 1.5.1 — 2026-11-20
+
+### 一个死掉的 Host 留下的写租约，锁死了之后所有会话
+
+- **写租约现在能被回收。** 租约是持久的，持有者却是会消失的进程：pid 775175 在
+  `session-20b3fa52` 的非优雅退出中消失，记录留在
+  `~/.local/state/dsh-fusion/leases/*.lock.sqlite` 里；下一个会话
+  `session-11691513` 的第一次 `fusion_delegate` 直接被拒
+  （`workspace is held by session-20b3fa52; reconcile before handoff`），工长审查
+  连派发的机会都没有。现在启动对账会释放这类记录，运行中的 `#acquire` 也能用 CAS 接管，
+  并把 `lease/reclaimed`（含旧持有者、pid 与依据）写进账本。
+- **"pid 死了"不再等于"可以直接抢"，但也必须能证明它真的死了。** 记录里新增
+  `ownerStartedAt`：存活判断变成"同一 pid **且** 同一启动时刻"，内核复用 pid 不再让它
+  误判为存活；没有该字段的旧记录按单向规则判断（占用该 pid 的进程若启动得比租约写入还晚，
+  就不可能是写者）。写者消失但它启动的命令还有未收尾记录时，仍然不释放，仍然要人工
+  `/fusion recover`。
+- **一次被拒的派工不再留下无法撤回的订单。** `#acquire` 现在跑在
+  `work-order/prepared` 之前：租约被拒时任务里什么都没有，工作区空出来后同一次
+  `fusion_delegate` 就能重试。之前订单先落账、outbox 已有 `prepared` 行却没有任何 Worker
+  拥有它，之后每次委派都答 "A Worker already owns this task"。直接接管
+  （`directHandoff`）的 Lead 在被拒后会重新取回自己的写租约。
+- **`/fusion recover` 不再被 pid 复用卡住**，与上面共用同一套存活判断。
+
+验证：`pnpm typecheck`；`pnpm exec vitest run` 864 通过（`tests/lease.spec.ts` 新增 4 例：
+接管已死写者、写者仍存活时拒绝、写者消失但记录了仍存活进程时拒绝、pid 复用与旧记录判断、
+CAS 冲突）；`DSHX_HARNESS=… pnpm test:host` 336 通过 / 1 跳过（新增 2 例：写者存活时
+拒绝且不落订单；写者已消失时接管并走完派工验收）。未验证：没有在真实重启里跑过整条链路
+（本机修复要等下一次 Host 启动）；Windows 无 `/proc`，存活判断退化为 `kill(pid, 0)`。
+
 ## 1.5.0 — 2026-11-20
 
 ### 工长审查改为后台执行：结论回到 Lead，而不是按时间掐断
