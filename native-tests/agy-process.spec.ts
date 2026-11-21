@@ -35,6 +35,7 @@ import LlmRuntime, { type GenerateOptions, type Message, type StreamChunk } from
 import { FOREMAN_SYSTEM_PROMPT } from '../src/plan-review.js'
 import { markForemanReview } from '../src/host/native-auxiliary.js'
 import { AgyAdapter, type AgyAdapterDeps } from '../src/host/agy/adapter.js'
+import { streamAgyForeman } from '../src/host/agy/foreman.js'
 import { ModelCatalog } from '../src/host/agy/models.js'
 import { SessionStore } from '../src/host/agy/sessions.js'
 import { RunRegistry } from '../src/host/agy/recording.js'
@@ -86,7 +87,7 @@ afterEach(() => {
 })
 
 /** An adapter whose only outside dependency is the fixture child process. */
-function makeAdapter(overrides: Partial<PluginConfig> = {}) {
+function makeAdapter(overrides: Partial<PluginConfig> = {}, foreman?: AgyAdapterDeps['foreman']) {
   const argsFile = join(root, 'argv.json')
   process.env.FAKE_AGY_ARGS_FILE = argsFile
   const cfg: PluginConfig = {
@@ -124,6 +125,7 @@ function makeAdapter(overrides: Partial<PluginConfig> = {}) {
     store,
     bin: () => FIXTURE,
     acquire: () => Promise.resolve(() => {}),
+    foreman,
     runs,
   }
   const adapter = new AgyAdapter(deps)
@@ -238,6 +240,108 @@ describe('offline AGY process integration (fixture child, real adapter, real mir
     } finally {
       await ctx.fiber.dispose()
     }
+  })
+
+  it('uses the selected Antigravity model for audit without launching agy or enabling upstream tools', async () => {
+    const bodies: Record<string, unknown>[] = []
+    const replies = ['{"foremanTool":{"name":"read","arguments":{"file_path":"index.ts"}}}', '{"verdict":"ready"}']
+    const { adapter, store, runs, argsFile } = makeAdapter({ mcpBridge: true }, request => streamAgyForeman(
+      request, { accessToken: 'fake', project: 'test-project', version: null },
+      async (url, init) => {
+        expect(url).toMatch(/streamGenerateContent\?alt=sse$/)
+        bodies.push(JSON.parse(String(init?.body)))
+        const text = replies.shift()!
+        return new Response(`data: ${JSON.stringify({ response: { candidates: [{ finishReason: 'STOP', content: { parts: [{ text }] } }] } })}\n\n`)
+      },
+    ))
+    const ctx = new Context()
+    try {
+      await ctx.plugin(hostPlugin(LlmRuntime))
+      ctx.llm.registerAdapter(['antigravity'], adapter)
+      const sessionId = 'offline-foreman-fresh' as NonNullable<GenerateOptions['sessionId']>
+      const request = options([user('original candidate')], {
+        model: 'gemini-4-hydrogen', system: FOREMAN_SYSTEM_PROMPT, sessionId,
+        tools: [{ name: 'read', description: 'Read evidence', parameters: {} }],
+      })
+      markForemanReview(request)
+      const first = await collect(ctx.llm.stream(request))
+      expect(first).toContainEqual(expect.objectContaining({ type: 'block-end', block: expect.objectContaining({ type: 'tool-call', name: 'read' }) }))
+      expect(first.at(-1)).toMatchObject({ type: 'finish', reason: { kind: 'tool-calls' } })
+      const second = await collect(ctx.llm.stream({ ...request, messages: [...request.messages, user('fixture inspected evidence')], tools: [] }))
+      expect(second).toContainEqual(expect.objectContaining({ type: 'block-end', block: { type: 'text', text: '{"verdict":"ready"}' } }))
+      expect(second.at(-1)).toMatchObject({ type: 'finish', reason: { kind: 'stop' } })
+      expect(bodies).toHaveLength(2)
+      for (const body of bodies) {
+        expect(body).toMatchObject({ project: 'test-project', model: 'gemini-4-hydrogen' })
+        expect(body.request).not.toHaveProperty('tools')
+        expect(body.request).not.toHaveProperty('toolConfig')
+        expect(JSON.stringify(body)).not.toContain(sessionId)
+      }
+      expect(JSON.stringify(bodies[1])).toContain('fixture inspected evidence')
+      expect(existsSync(argsFile)).toBe(false)
+      expect(store.get(sessionId)).toBeUndefined()
+      expect(runs.runIds).toHaveLength(0)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('assembles fragmented SSE without including provider thoughts in the audit verdict', async () => {
+    const event = (parts: object[], finishReason?: string) => `data: ${JSON.stringify({ response: {
+      candidates: [{ content: { parts }, finishReason }],
+    } })}\r\n\r\n`
+    const encoded = new TextEncoder().encode(event([{ text: 'private reasoning', thought: true }, { text: '{"证' }])
+      + event([{ text: '据":true}' }], 'STOP'))
+    const response = new Response(new ReadableStream({ start(controller) {
+      for (const byte of encoded) controller.enqueue(Uint8Array.of(byte))
+      controller.close()
+    } }))
+    const chunks = await collect(streamAgyForeman(options([user('audit')]),
+      { accessToken: 'fake', project: 'test-project', version: null }, async () => response))
+    expect(chunks).toContainEqual({ type: 'block-end', index: 1, block: { type: 'text', text: '{"证据":true}' } })
+    expect(JSON.stringify(chunks)).not.toContain('private reasoning')
+    expect(chunks.at(-1)).toEqual({ type: 'finish', reason: { kind: 'stop' } })
+  })
+
+  it('cancels a stalled evidence response without waiting for transport teardown', async () => {
+    const aborter = new AbortController()
+    const reason = new Error('review deadline')
+    let cancelled: unknown
+    const request = options([user('audit')], { signal: aborter.signal })
+    const pending = collect(streamAgyForeman(request, { accessToken: 'fake', project: 'test-project', version: null }, async () => {
+      const response = new Response(new ReadableStream({
+        start() { setTimeout(() => aborter.abort(reason), 0) },
+        cancel(value) { cancelled = value; return new Promise(() => {}) },
+      }))
+      return response
+    }))
+    await expect(pending).rejects.toBe(reason)
+    expect(cancelled).toBe(reason)
+  }, 1500)
+
+  it('reports an upstream rejection without waiting for the error body to close', async () => {
+    let cancelled = false
+    const request = options([user('audit')])
+    const connection = { accessToken: 'fake', project: 'test-project', version: null }
+    await expect(collect(streamAgyForeman(request, connection, async () => {
+      return new Response(new ReadableStream({ cancel() { cancelled = true; return new Promise(() => {}) } }), { status: 429 })
+    }))).rejects.toThrow('HTTP 429')
+    expect(cancelled).toBe(true)
+  }, 1500)
+
+  it('fails closed if direct inference returns a native tool call or a rate limit', async () => {
+    const request = options([user('audit')], { model: 'gemini-4-hydrogen', system: FOREMAN_SYSTEM_PROMPT })
+    const connection = { accessToken: 'fake', project: 'test-project', version: null }
+    const malformed = async () => new Response('data: ' + JSON.stringify({ candidates: [{ finishReason: 'STOP', content: {
+      parts: [{ functionCall: { name: 'bash', args: { command: 'echo unexpected' } } }],
+    } }] }) + '\n\n')
+    await expect(collect(streamAgyForeman(request, connection, malformed))).rejects.toThrow('unexpected native tool call')
+    let attempts = 0
+    await expect(collect(streamAgyForeman(request, connection, async () => {
+      attempts++
+      return new Response('upstream details must not escape', { status: 429 })
+    }))).rejects.toThrow('HTTP 429: upstream rate or quota limit')
+    expect(attempts).toBe(1)
   })
 
   it('cuts one tool span, records the step, and replays it through the production mirror', async () => {

@@ -459,6 +459,8 @@ export interface AgyAdapterDeps {
   log?: (msg: string) => void
   /** Recordings shared with the agy_tool mirror (native tool-card mirroring). */
   runs: RunRegistry
+  /** Inference-only transport; never use the CLI for a Foreman request. */
+  foreman?: (options: GenerateOptions) => AsyncIterable<StreamChunk>
   /**
    * Resolve the DSH session's working directory. Called with the raw
    * session id; return an absolute path to run agy inside that workspace.
@@ -1029,11 +1031,12 @@ export class AgyAdapter extends LlmAdapter {
 
   override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
     if (isForemanReview(options)) {
-      // Plan mode is not a tool boundary. Even without DSH tool schemas the CLI
-      // owns native tools and loads MCP servers from its settings. Reject before
-      // looking up the Lead's session or spawning until there is a verified way
-      // to launch a fresh, tool-free audit conversation with the full protocol.
-      throw new LlmError('Foreman review is unavailable on Antigravity: agy has no verified tool-free mode; choose a tool-free Foreman route', Err.AUX_DISABLED)
+      // Plan mode is not a tool boundary. Never start agy, load its MCP
+      // servers or access a Lead/Sidekick CLI conversation for this request.
+      if (!this.deps.foreman) throw new LlmError('Foreman review is unavailable on Antigravity without an inference-only transport; agy itself is not tool-free', Err.AUX_DISABLED)
+      const release = await this.deps.acquire(options.signal)
+      try { yield* this.deps.foreman(options) } finally { release() }
+      return
     }
     const cfg = this.deps.getConfig()
     const bin = this.deps.bin()

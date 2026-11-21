@@ -95,6 +95,8 @@ export declare class ForemanReviewClock {
     get remainingMs(): number;
     /** What the review is allowed to wait in total, whether or not it renews. */
     get ceilingAtMs(): number | undefined;
+    /** What is left of the configured ceiling, or undefined when this combo set none. */
+    get ceilingRemainingMs(): number | undefined;
     /**
      * Move the deadline by `ms`, never past the ceiling.
      *

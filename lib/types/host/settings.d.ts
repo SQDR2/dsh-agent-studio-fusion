@@ -11,6 +11,7 @@ export interface SettingsCatalog {
     groups: readonly {
         id: string;
         name: string;
+        foremanUnsupported?: 'acp-agent';
         models: readonly {
             id: string;
             name: string;
@@ -24,6 +25,7 @@ export interface SettingsCatalog {
         }[];
     }[];
 }
+export declare function foremanUnsupportedMessage(route: PhysicalRoute, group?: SettingsCatalog['groups'][number]): readonly [string, string] | undefined;
 /** Saved Lead route from a raw settings or profile document, or undefined when unconfigured or pointed at Fusion itself. */
 export declare function savedLeadRoute(value: unknown): {
     provider: string;

@@ -7,4 +7,4 @@
  */
 export declare const AGY_FETCH_TIMEOUT_MS = 10000;
 /** fetch() honoring env proxies, or an explicit per-account proxy URL. */
-export declare function agyFetch(url: string, init?: RequestInit, proxyUrl?: string): Promise<Response>;
+export declare function agyFetch(url: string, init?: RequestInit, proxyUrl?: string, timeoutMs?: number | null): Promise<Response>;

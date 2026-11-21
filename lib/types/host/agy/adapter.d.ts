@@ -106,6 +106,8 @@ export interface AgyAdapterDeps {
     log?: (msg: string) => void;
     /** Recordings shared with the agy_tool mirror (native tool-card mirroring). */
     runs: RunRegistry;
+    /** Inference-only transport; never use the CLI for a Foreman request. */
+    foreman?: (options: GenerateOptions) => AsyncIterable<StreamChunk>;
     /**
      * Resolve the DSH session's working directory. Called with the raw
      * session id; return an absolute path to run agy inside that workspace.

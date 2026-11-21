@@ -17,7 +17,7 @@ import { join } from 'node:path'
 import { mkdirSync, writeFileSync, existsSync, readFileSync } from 'node:fs'
 import { dshHome, overridesPath, readOverrides, resolveConfig, stateDir } from './config.js'
 import { PLUGIN_ID, PROVIDER_ID, type PluginConfig } from './types.js'
-import type { ManagedAccount } from './pool-types.js'
+import { modelFamilyOf, type ManagedAccount } from './pool-types.js'
 import { AgyAdapter } from './adapter.js'
 import { defineAgyAskTool } from './ask-tool.js'
 import { AuthHelper } from './auth.js'
@@ -33,6 +33,7 @@ import { AccountPoolManager } from './pool.js'
 import { PoolAuthFlow } from './pool-auth.js'
 import { QuotaService } from './quota.js'
 import { WarmupService, type WarmupResult } from './warmup.js'
+import { streamAgyForeman } from './foreman.js'
 import { detectSystemProxy } from './wincred.js'
 import { resolvePrimaryCredential, findDuplicateCredentialIdentities } from './credential-slot.js'
 import { homedir } from 'node:os'
@@ -331,6 +332,17 @@ export function installAgy(ctx: Context, entryConfig: Record<string, unknown> = 
     pool,
     bin,
     acquire: (signal) => semaphore.acquire(signal),
+    async *foreman(options) {
+      const account = pool.selectAccount(modelFamilyOf(options.model))
+      if (!account) throw new Error('No eligible Antigravity account for this Foreman model')
+      const accessToken = await quota.getValidAccessToken(account)
+      options.signal?.throwIfAborted()
+      if (!accessToken) throw new Error('Could not authenticate the Antigravity Foreman account')
+      const proxy = account.proxyUrl?.trim() || getConfig().proxyUrl || detectSystemProxy() || undefined
+      const project = await warmup.fetchProjectId(accessToken, proxy, options.signal)
+      if (!project) throw new Error('Could not resolve the Antigravity Foreman project for this account')
+      yield* streamAgyForeman(options, { accessToken, project, proxy, version: version() })
+    },
     log,
     runs,
     getMediaBaseUrl: () => (webServerPort.current ? `http://127.0.0.1:${webServerPort.current}/plugins/agy-worker/media` : null),

@@ -15,6 +15,8 @@ export interface ToolFacts {
 export interface PermissionTurn {
     dshSessionId: string | undefined;
     signal: AbortSignal | undefined;
+    /** Per-turn policy override (e.g. 'reject' for an isolated Foreman review). */
+    policy?: PermissionPolicy;
     /**
      * Tool calls this turn announced, by id. Agents may ask about a call by id alone and leave
      * its title and kind to the earlier `tool_call`.

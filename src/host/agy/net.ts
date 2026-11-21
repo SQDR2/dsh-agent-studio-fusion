@@ -39,13 +39,12 @@ function agentFor(proxyUrl?: string): EnvHttpProxyAgent | ProxyAgent {
 export const AGY_FETCH_TIMEOUT_MS = 10_000
 
 /** fetch() honoring env proxies, or an explicit per-account proxy URL. */
-export function agyFetch(url: string, init: RequestInit = {}, proxyUrl?: string): Promise<Response> {
-  // AbortSignal.any keeps the caller's signal AND applies the default timeout;
-  // falling back to the caller's signal alone would silently drop the timeout.
+export function agyFetch(url: string, init: RequestInit = {}, proxyUrl?: string, timeoutMs: number | null = AGY_FETCH_TIMEOUT_MS): Promise<Response> {
+  // Keep the caller's signal and the default timeout. Streaming inference opts
+  // out of the short HTTP timeout and uses Foreman's own abort budget instead.
   const callerSignal = (init as { signal?: AbortSignal | null }).signal ?? undefined
-  const signal = callerSignal !== undefined
-    ? AbortSignal.any([AbortSignal.timeout(AGY_FETCH_TIMEOUT_MS), callerSignal])
-    : AbortSignal.timeout(AGY_FETCH_TIMEOUT_MS)
+  const timeout = timeoutMs === null ? undefined : AbortSignal.timeout(timeoutMs)
+  const signal = timeout && callerSignal ? AbortSignal.any([timeout, callerSignal]) : timeout ?? callerSignal
   return undiciFetch(url, {
     ...(init as object),
     signal,

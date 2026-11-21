@@ -761,6 +761,34 @@ describe('FusionSettings layout after sidebar integration', () => {
 })
 
 describe('Foreman settings guidance', () => {
+  it('keeps a saved ACP reviewer visible, but disables ACP only in the Foreman picker', async () => {
+    pinLanguage('zh-CN')
+    const devin = { provider: 'devin', model: 'default' }
+    const hydrogen = { provider: 'antigravity', model: 'gemini-4-hydrogen' }
+    const catalog = { groups: [
+      { id: 'devin', name: 'Devin', foremanUnsupported: 'acp-agent', models: [{ id: 'default', name: 'Default' }] },
+      { id: 'antigravity', name: 'Antigravity', models: [{ id: 'gemini-4-hydrogen', name: 'Hydrogen' }] },
+    ] }
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      if (url.includes('view=cache')) return { ok: true, json: async () => ({ checked: '2026-11-01', models: [] }) }
+      if (url.includes('view=history')) return { ok: true, json: async () => ({ totalTasks: 0, totals: {}, tasks: [], groups: [] }) }
+      return { ok: true, json: async () => ({ revision: 1, catalog, maxPairs: 6, authorized: true,
+        pairs: [{ id: 'combo-1', name: 'Original', pair: { lead: devin, worker: hydrogen,
+          foreman: { route: devin, maxOutputTokens: 4096 } } }] }) }
+    }))
+    let root!: ReactTestRenderer
+    await act(async () => { root = create(React.createElement(FusionSettings)) })
+    roots.push(root)
+    const select = (role: string) => root.root.findByProps({ 'aria-label': `${role} 模型` })
+    const group = (role: string, label: string) => select(role).findAllByType('optgroup').find(node => node.props.label === label)
+    expect(group('工长', 'Devin')?.props.disabled).toBe(true)
+    expect(group('工长', 'Antigravity')?.props.disabled).toBe(false)
+    expect(group('Lead', 'Devin')?.props.disabled).toBe(false)
+    expect(group('Sidekick', 'Devin')?.props.disabled).toBe(false)
+    expect(select('工长').props.value).toBe(JSON.stringify(['devin', 'default']))
+    expect(root.root.findAllByProps({ role: 'alert' }).some(node => node.children.join('').includes('devin/default'))).toBe(true)
+  })
+
   it('hints at a shared model without ever refusing to save', async () => {
     pinLanguage('zh-CN')
     const catalog = { groups: [{ id: 'p1', name: 'Provider 1', models: [{ id: 'm1', name: 'Model 1' }] }] }

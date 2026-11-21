@@ -50,7 +50,7 @@ export declare class WarmupService {
     /**
      * Fetch cloudaicompanionProject via loadCodeAssist (official Antigravity project resolution).
      */
-    fetchProjectId(accessToken: string, proxyUrl?: string): Promise<string>;
+    fetchProjectId(accessToken: string, proxyUrl?: string, signal?: AbortSignal): Promise<string>;
     /**
      * Send a minimal probe to upstream v1internal:streamGenerateContent (fallback: generateContent).
      */

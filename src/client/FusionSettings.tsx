@@ -166,7 +166,9 @@ export function ModelChoice({ role, route, catalog, onChange }: {
 }) {
   const lang = useLang()
   const name = role === 'compactor' ? tr(lang, '压缩', 'Compaction') : role === 'Foreman' ? tr(lang, '工长', 'Foreman') : role
-  const model = catalog.groups.find(group => group.id === route?.provider)?.models.find(model => model.id === route?.model)
+  const selectedGroup = catalog.groups.find(group => group.id === route?.provider)
+  const model = selectedGroup?.models.find(model => model.id === route?.model)
+  const unsupported = role === 'Foreman' && selectedGroup?.foremanUnsupported === 'acp-agent'
   // A saved route the catalog no longer offers would otherwise fall back to the
   // placeholder, silently reading as "nothing chosen" — and hiding which model
   // went away. Keep it listed, disabled and labelled, until it is replaced.
@@ -181,13 +183,15 @@ export function ModelChoice({ role, route, catalog, onChange }: {
     }}>
       <option value="" disabled={role !== 'compactor'}>{role === 'compactor' ? tr(lang, '使用当前角色模型', 'Use the role\'s own model') : tr(lang, '选择已连接的模型', 'Choose a connected model')}</option>
       {stale && route && <option value={key(route)} disabled>{tr(lang, `已不可用：${route.provider}/${route.model}`, `No longer available: ${route.provider}/${route.model}`)}</option>}
-      {catalog.groups.map(group => <optgroup key={group.id} label={group.name}>
+      {catalog.groups.map(group => <optgroup key={group.id} label={group.name} disabled={role === 'Foreman' && group.foremanUnsupported === 'acp-agent'}>
         {group.models.map(model => <option key={model.id} value={key({ provider: group.id, model: model.id })}>{model.name}</option>)}
       </optgroup>)}
     </select></label>
     {stale && route && <p role="alert">{tr(lang, `这个角色保存的模型 ${route.provider}/${route.model} 已不可用，请重新选择。`,
       `This role's saved model ${route.provider}/${route.model} is no longer available; choose another.`)}</p>}
-    {model?.reasoning && route && <label>{tr(lang, '推理强度', 'Reasoning')}<select aria-label={tr(lang, `${name} 推理强度`, `${name} reasoning`)} value={route.reasoningEffort ?? ''} onChange={event => {
+    {unsupported && route && <p role="alert">{tr(lang, `工长不能使用 ACP Agent 线路 ${route.provider}/${route.model}，请选择其他线路。`,
+      `Foreman cannot use ACP agent route ${route.provider}/${route.model}; choose another route.`)}</p>}
+    {!unsupported && model?.reasoning && route && <label>{tr(lang, '推理强度', 'Reasoning')}<select aria-label={tr(lang, `${name} 推理强度`, `${name} reasoning`)} value={route.reasoningEffort ?? ''} onChange={event => {
       const { reasoningEffort: _old, ...physical } = route
       onChange({ ...physical, ...(event.target.value ? { reasoningEffort: event.target.value } : {}) })
     }}>
@@ -423,7 +427,8 @@ export function FusionSettings() {
                       pair: {
                         ...rest,
                         foreman: {
-                          route: combo.pair.lead ?? { provider: '', model: '' },
+                          route: combo.pair.lead && !state.catalog.groups.some(group => group.id === combo.pair.lead?.provider && group.foremanUnsupported)
+                            ? combo.pair.lead : { provider: '', model: '' },
                           // A review that finds many problems must still fit its budget, and a
                           // slow reviewer must be allowed to finish: 4096 output tokens and 30
                           // seconds turned real reviews into `max-tokens` and `TimeoutError`
@@ -455,8 +460,8 @@ export function FusionSettings() {
             </label>
             {current.pair.foreman && (
               <div className="fusion-foreman-panel">
-                <p>{tr(lang, '工长只审查 Lead 定稿的方案，不参与取证、修改或修复。审查不可用时不派工。请选择不自行执行工具的模型；Antigravity 和 ACP Agent 不支持担任工长。',
-                  'Foreman audits finalized Lead plans only. It does not gather evidence, edit or apply fixes. An unavailable review blocks dispatch. Choose a tool-free model: Antigravity and ACP agents are not supported as Foreman.')}</p>
+                <p>{tr(lang, '工长只审查 Lead 定稿的方案，可通过 Fusion 检查证据，但不负责修改或修复。Antigravity 审查直接请求模型，不启动 agy；ACP Agent 在隔离空目录与禁用原生工具权限下运行，仅通过 Fusion 查证。审查不可用时不派工。',
+                  'Foreman audits finalized Lead plans and can inspect evidence through Fusion, but does not edit or apply fixes. Antigravity reviews use direct model inference without starting agy; ACP agents run in an isolated empty sandbox with native tools rejected and inspect only through Fusion. An unavailable review blocks dispatch.')}</p>
                 {/* The plan warns against a hard price check and for a same-model arm: the same
                     model in a separate context is a valid experiment, so this is a hint, and
                     saving is never refused for it. */}

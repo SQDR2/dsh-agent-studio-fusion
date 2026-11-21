@@ -14,9 +14,15 @@ export interface PairChoice {
   foreman?: PairProfile['foreman']
 }
 export interface SettingsCatalog {
-  groups: readonly { id: string; name: string; models: readonly {
+  groups: readonly { id: string; name: string; foremanUnsupported?: 'acp-agent'; models: readonly {
     id: string; name: string; reasoning?: { efforts: readonly { id: string; name: string }[]; defaultEffort?: string }
   }[] }[]
+}
+
+export function foremanUnsupportedMessage(route: PhysicalRoute, group?: SettingsCatalog['groups'][number]): readonly [string, string] | undefined {
+  if (group?.foremanUnsupported !== 'acp-agent') return
+  return [`工长不能使用 ACP Agent 线路 ${route.provider}/${route.model}：无法限制 Agent 自行运行工具`,
+    `Foreman cannot use ACP agent route ${route.provider}/${route.model}: its native tools cannot be isolated`]
 }
 
 /** Saved Lead route from a raw settings or profile document, or undefined when unconfigured or pointed at Fusion itself. */
@@ -58,7 +64,7 @@ export function validatePairChoice(value: unknown, catalog: SettingsCatalog, com
     ? bi(`组合「${combo}」：${zh}`, `Combo "${combo}": ${en}`) : bi(zh, en)
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(say('请选择 Lead 和 Worker', 'Choose a Lead and a Sidekick'))
   const raw = value as Record<string, unknown>
-  const route = (role: string, candidate: unknown): PhysicalRoute => {
+  const route = (role: string, candidate: unknown, foreman = false): PhysicalRoute => {
     const item = candidate as Record<string, unknown> | undefined
     if (!item || typeof item.provider !== 'string' || typeof item.model !== 'string') throw new Error(say(`请选择 ${role} 模型`, `Choose the ${role} model`))
     if (isFusionProvider(item.provider)) throw new Error(say('Fusion 必须选择真实模型', 'Fusion needs real models, not Fusion itself'))
@@ -69,6 +75,8 @@ export function validatePairChoice(value: unknown, catalog: SettingsCatalog, com
     // guessing which of the two roles went stale.
     if (!model) throw new Error(say(`${role} 模型已不可用：${item.provider}/${item.model}。请为该角色重新选择模型`,
       `The ${role} model is no longer available: ${item.provider}/${item.model}. Choose a model for that role again`))
+    const unsupported = foreman && foremanUnsupportedMessage({ provider: item.provider, model: item.model }, group)
+    if (unsupported) throw new Error(say(...unsupported))
     if (item.reasoningEffort !== undefined && (typeof item.reasoningEffort !== 'string'
       || !model.reasoning?.efforts.some(effort => effort.id === item.reasoningEffort))) {
       throw new Error(say(`${role} 不支持所选推理强度`, `${role} does not support the selected reasoning level`))
@@ -93,7 +101,7 @@ export function validatePairChoice(value: unknown, catalog: SettingsCatalog, com
     ...(outputTokens === undefined ? {} : { outputTokens }),
     ...(cacheKeepalive === undefined ? {} : { cacheKeepalive }),
     ...(compactor === undefined ? {} : { compactor: { ...compactor, route: route('压缩 · Compaction', compactor.route) } }),
-    ...(foreman === undefined ? {} : { foreman: { ...foreman, route: route('工长 · Foreman', foreman.route) } }) }
+    ...(foreman === undefined ? {} : { foreman: { ...foreman, route: route('工长 · Foreman', foreman.route, true) } }) }
 }
 
 /** New sessions can opt into this Worker cap. Frozen sessions keep their saved profile. */

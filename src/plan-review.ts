@@ -818,11 +818,12 @@ export function foremanAssessmentSchema(): Readonly<Record<string, unknown>> {
   return {
     type: 'object',
     additionalProperties: false,
-    required: ['schemaVersion', 'candidateDigest', 'verdict', 'acceptanceAudit', 'decisionChallenges', 'materialAmbiguities'],
+    required: ['schemaVersion', 'candidateDigest', 'verdict', 'inspected', 'acceptanceAudit', 'decisionChallenges', 'materialAmbiguities'],
     properties: {
       schemaVersion: { type: 'integer', enum: [1] },
       candidateDigest: { type: 'string', description: 'The candidate digest supplied with this candidate, copied exactly.' },
       verdict: { type: 'string', enum: ['ready', 'concerns'] },
+      inspected: citations,
       acceptanceAudit: {
         type: 'object',
         additionalProperties: false,

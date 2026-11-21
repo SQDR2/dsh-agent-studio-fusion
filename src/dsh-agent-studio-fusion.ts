@@ -18,7 +18,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import { FusionCatalogAdapter, FUSION_PROVIDER, FUSION_MODEL, installNativeFusionSelection } from './host/native-selection.js'
 import type { FusionModelEntry } from './host/native-selection.js'
 import type { ResolvedProfile } from './profile/resolve.js'
-import { choiceFromProfile, modelProfileFromChoice, validatePairChoice, type PairChoice } from './host/settings.js'
+import { choiceFromProfile, foremanUnsupportedMessage, modelProfileFromChoice, validatePairChoice, type PairChoice, type SettingsCatalog } from './host/settings.js'
 import { MAX_PAIRS, choiceFromStoredProfile, modelOfProfileId, profileIdOf, readPairs, validatePairs, writePairs } from './host/pairs.js'
 import { CachePolicy, cacheView } from './host/cache-policy.js'
 import { CACHE_DEFAULTS_CHECKED } from './host/cache-defaults.js'
@@ -97,7 +97,7 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
   const cachePolicy = new CachePolicy(store)
   backfillHistory(store)
   const budget = new NativeRequestBudget(store, config.authorizationPath)
-  const physicalCatalog = async (): Promise<ModelCatalog> => {
+  const physicalCatalog = async (): Promise<ModelCatalog & SettingsCatalog> => {
     const sessionController = ctx.get('sessionController') as { modelCatalog: () => Promise<ModelCatalog> } | undefined
     if (sessionController) {
       const catalog = await sessionController.modelCatalog()
@@ -500,7 +500,11 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
         const controller = await getRuntime({ profile: binding.profile, prompts: binding.prompts })
         const planning = await runPlanningCommand(invocation, controller, async route => {
           const catalog = await physicalCatalog()
-          if (!catalog.groups.find(group => group.id === route.provider)?.models.some(model => model.id === route.model)) throw new Error('Choose a registered physical Foreman model.')
+          const settings: SettingsCatalog = catalog
+          const group = settings.groups.find(group => group.id === route.provider)
+          if (!group?.models.some(model => model.id === route.model)) throw new Error('Choose a registered physical Foreman model.')
+          const unsupported = foremanUnsupportedMessage(route, group)
+          if (unsupported) throw new Error(bi(...unsupported))
           if (needsBudget(binding.profile)) budget.check(effectiveRoutes(binding).concat(route))
         })
         if (planning) return planning

@@ -14,6 +14,7 @@ import { FOREMAN_TIMEOUT_MS } from '../src/profile/foreman.js'
 import { nativeShellTool } from '../src/host/shell.js'
 import { NativeAuxiliaryRequests } from '../src/host/native-auxiliary.js'
 import type { SessionBinding } from '../src/host/bindings.js'
+import { streamAgyForeman } from '../src/host/agy/foreman.js'
 
 function makeCandidate(patch?: {
   order?: Partial<WorkOrder>
@@ -923,6 +924,29 @@ describe('NativePlanReviewService execution and fail-open behavior', () => {
     materialAmbiguities: [],
   })
 
+  it('runs a Hydrogen audit through the normal evidence loop and verifies its final citations', async () => {
+    const route = { provider: 'antigravity', model: 'gemini-4-hydrogen', reasoningEffort: 'high' }
+    let calls = 0
+    const { service } = makeService(options => streamAgyForeman(options,
+      { accessToken: 'fixture', project: 'fixture', version: null },
+      async (_url, init) => {
+        const request = JSON.parse(String(init?.body))
+        expect(request.model).toBe(route.model)
+        expect(request.request).not.toHaveProperty('tools')
+        expect(request.request.generationConfig.thinkingConfig).toEqual({ thinkingLevel: 'HIGH' })
+        const transcript = JSON.parse(request.request.contents[0].parts[0].text)
+        const payload = calls++ === 0 ? { foremanTool: { name: 'read', arguments: {
+          file_path: 'src/plan-review.ts', offset: 1, limit: 2,
+        } } } : validReadyObj()
+        if (calls === 2) expect(transcript.at(-1)).toMatchObject({ role: 'tool', content: [{ type: 'text', text: expect.stringContaining('1') }] })
+        return new Response(`data: ${JSON.stringify({ response: { candidates: [{ finishReason: 'STOP', content: { parts: [{ text: JSON.stringify(payload) }] } }] } })}\n\n`)
+      },
+    ), { route, maxOutputTokens: 16384, timeoutMs: 10000 })
+    const outcome = await service.review(candidate)
+    expect(calls).toBe(2)
+    expect(outcome).toMatchObject({ kind: 'ready', assessment: { inspected: [{ path: 'src/plan-review.ts', digest: expect.stringMatching(/^[a-f0-9]{64}$/) }] } })
+  })
+
   it('fails open with unavailable when foreman profile is not configured', async () => {
     const { service, binding } = makeService(async function* () {}, undefined)
     delete (binding.profile as { foreman?: unknown }).foreman
@@ -1182,6 +1206,42 @@ describe('foreman inspection loop, citation check and runaway guard', () => {
     }
   })
 
+  it('replays reasoning blocks and adapter replayState across Foreman tool turns', async () => {
+    const requests: GenerateOptions[] = []
+    const replayState = {
+      response: { kind: 'pi-ai', version: 2, api: 'openai-completions', provider: 'gz', model: 'deepseek-v4.1-flash', stopReason: 'toolUse' },
+      blocks: [{ type: 'reasoning', thinkingSignature: 'reasoning_content' }, { type: 'tool-call' }],
+    }
+    const { service } = makeService(async function* (options) {
+      requests.push(options)
+      if (requests.length === 1) {
+        const args = JSON.stringify({ file_path: 'src/plan-review.ts', offset: 1, limit: 2 })
+        yield* [
+          { type: 'block-start', index: 0, blockType: 'reasoning' },
+          { type: 'reasoning-delta', index: 0, text: 'Need to inspect src/plan-review.ts first.' },
+          { type: 'block-end', index: 0, block: { type: 'reasoning', text: 'Need to inspect src/plan-review.ts first.' } },
+          { type: 'block-start', index: 1, blockType: 'tool-call' },
+          { type: 'tool-call-delta', index: 1, id: ToolCallId('read-1'), name: 'read', argumentsDelta: args },
+          { type: 'block-end', index: 1, block: { type: 'tool-call', id: ToolCallId('read-1'), name: 'read', arguments: args } },
+          { type: 'finish', reason: { kind: 'tool-calls' }, replayState },
+        ] as StreamChunk[]
+        return
+      }
+      yield* mockTextStream(JSON.stringify(validReadyObj()))
+    })
+
+    const outcome = await service.review(candidate)
+    expect(outcome.kind).toBe('ready')
+    expect(requests).toHaveLength(2)
+    const assistant = requests[1]!.messages[1] as unknown as { role: string; content: readonly unknown[]; source: { replayState?: unknown } }
+    expect(assistant.role).toBe('assistant')
+    expect(assistant.content).toEqual([
+      { type: 'reasoning', text: 'Need to inspect src/plan-review.ts first.' },
+      { type: 'tool-call', id: ToolCallId('read-1'), name: 'read', arguments: JSON.stringify({ file_path: 'src/plan-review.ts', offset: 1, limit: 2 }) },
+    ])
+    expect(assistant.source.replayState).toEqual(replayState)
+  })
+
   it('discards the whole assessment when it cites code that does not exist', async () => {
     const { service } = makeService(async function* () {
       yield* mockTextStream(JSON.stringify({
@@ -1349,11 +1409,19 @@ describe('plan review candidate composition and assessment schema', () => {
       properties: Record<string, any>
     }
     expect(schema.additionalProperties).toBe(false)
-    expect(schema.required).toEqual(['schemaVersion', 'candidateDigest', 'verdict', 'acceptanceAudit', 'decisionChallenges', 'materialAmbiguities'])
+    expect(schema.required).toEqual(['schemaVersion', 'candidateDigest', 'verdict', 'inspected', 'acceptanceAudit', 'decisionChallenges', 'materialAmbiguities'])
     expect(Object.keys(schema.properties).sort()).toEqual(
-      ['acceptanceAudit', 'candidateDigest', 'decisionChallenges', 'materialAmbiguities', 'schemaVersion', 'verdict'])
+      ['acceptanceAudit', 'candidateDigest', 'decisionChallenges', 'inspected', 'materialAmbiguities', 'schemaVersion', 'verdict'])
     expect(schema.properties.verdict.enum).toEqual(['ready', 'concerns'])
     expect(schema.properties.schemaVersion.enum).toEqual([1])
+    expect(schema.properties.inspected).toMatchObject({
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['path', 'startLine', 'endLine'],
+      },
+    })
 
     const audit = schema.properties.acceptanceAudit
     expect(audit.additionalProperties).toBe(false)

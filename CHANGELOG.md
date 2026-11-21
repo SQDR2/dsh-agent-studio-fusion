@@ -20,6 +20,13 @@ own tags and releases.
 Entry format: what changed, then what was actually validated. "Not claimed" lines mark what a release did *not* test —
 read them before assuming a platform is covered.
 
+## 1.5.3 — 2026-11-21
+
+- **恢复全可选模型的工长计划审查，同时维持独立审查与工具隔离。**
+  - **DeepSeek / Chat Completions 线路（如 `gz/deepseek-v4.1-flash`、`gz/gpt-6.2-sol`）**：`NativePlanReviewService` 在多轮工具审查中保留 `reasoning` 块与适配器 `replayState`，避免下一轮回放丢失 `reasoning_content`；`ForemanReviewClock` 改按距离总时长上限 `ceilingRemainingMs` 判断 `outOfRoom` 并在收尾轮次顺延预算，避免首轮慢思考后第 1 个工具调用即被预算拒绝；`foremanAssessmentSchema()` 补齐根级 `inspected` 引用声明。
+  - **ACP 代理线路（如 `devin/*`）**：新增 `streamAcpForeman`，每次审查轮次在新建的空临时目录中以 `mcpServers: []` 开启一次性独立会话、强制 `policy: 'reject'` 拒绝权限请求、遇到任何原生 `tool_call` / `tool_call_update` 事件立即 `cancel` 并按 `ACP_AUDIT_PROTOCOL` 失败关闭，所有仓库只读检查均通过 Host 代理的 `{"foremanTool":...}` JSON 协议与引文摘要校验执行，绝不复用 Lead 会话或撤销 Sidekick MCP 桥接。
+  - **Antigravity 线路（`antigravity/*`）**：新增 `streamAgyForeman`，直接通过 `agy` 认证后的本地推理端口执行无原生工具的 `{"foremanTool":...}` 审查协议，不启动带原生工具的 `agy` Agent CLI 子进程。
+
 ## 1.5.2 — 2026-11-20
 
 - 工长线路在首次等待窗口内没有返回任何流数据时，优先用组合中已配置的 Lead 模型线路重试一次。备用请求仍是独立的工长审查，只收到原候选计划、工长指令和审查工具；不继承 Lead 对话，也不调用 ACP 或 Antigravity 等自带工具的外部代理。

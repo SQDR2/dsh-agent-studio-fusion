@@ -44,6 +44,7 @@ import { DEFAULT_CONTEXT_WINDOW, DEFAULT_MODEL_ID, spawnFacts } from './config.j
 import { AcpAgentProcess, applyConfigOptions } from './agent-process.js'
 import { addUsage, ChunkTranslator, metaUsage, usageDelta } from './chunk-translator.js'
 import { ContextWindows, inferContextWindow } from './context-windows.js'
+import { streamAcpForeman } from './foreman.js'
 import { decidePermission, noteToolCall } from './permission.js'
 import { PromptCapabilitiesCache } from './prompt-capabilities.js'
 import { consumedIds, conversationOf, fullPrompt, incrementalPrompt, systemText } from './transcript.js'
@@ -88,6 +89,8 @@ function failure(code: string, message: string): { code: string, message: string
 }
 
 function failureOf(error: unknown): { code: string, message: string } {
+  if (error instanceof LlmError)
+    return failure(error.code, error.message)
   const known = typeof error === 'object' && error !== null ? Reflect.get(error, 'failure') as { code?: unknown, message?: unknown } | undefined : undefined
   if (typeof known?.code === 'string' && typeof known.message === 'string')
     return failure(known.code, known.message)
@@ -343,14 +346,11 @@ export class AcpAdapter extends LlmAdapter {
   }
 
   override async* stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
-    if (isForemanReview(options)) {
-      // Withholding the DSH bridge does not disable an ACP agent's own tools.
-      yield { type: 'finish', reason: { kind: 'error', failure: failure('AUX_DISABLED', 'Foreman review is unavailable on ACP agent routes: choose a tool-free Foreman model') } }
-      return
-    }
+    const foreman = isForemanReview(options)
     let finished = false
     try {
-      for await (const chunk of this.run(options)) {
+      const chunks = foreman ? this.runForeman(options) : this.run(options)
+      for await (const chunk of chunks) {
         finished ||= chunk.type === 'finish'
         yield chunk
       }
@@ -360,20 +360,28 @@ export class AcpAdapter extends LlmAdapter {
         throw error
       // A thrown dispatch error ends this dispatch's capability *before* the caller sees the
       // error finish: a caller may stop consuming right after it, so waiting for this
-      // generator to close would leave the grant alive. An auxiliary call owns none, so its
-      // failure must leave the live Worker's grant untouched.
-      if ((options.purpose as string | undefined) === undefined)
+      // generator to close would leave the grant alive. An auxiliary or Foreman call owns
+      // none, so its failure must leave the live Worker's grant untouched.
+      if (!foreman && (options.purpose as string | undefined) === undefined)
         this.#revokeBridge(options.sessionId as string | undefined)
       yield { type: 'finish', reason: options.signal?.aborted ? { kind: 'aborted', failure: failure('ABORTED', 'request aborted') } : { kind: 'error', failure: failureOf(error) } }
     }
     finally {
       // The consumer stopped iterating before the turn settled, so it never saw a finish
       // chunk: the dispatch is over and its Host-tool capability goes with it. An
-      // auxiliary request owns no capability, so it never revokes the live one belonging to
-      // the session it borrows the id from.
-      if (!finished && (options.purpose as string | undefined) === undefined)
+      // auxiliary or Foreman request owns no capability, so it never revokes the live one
+      // belonging to the session it borrows the id from.
+      if (!finished && !foreman && (options.purpose as string | undefined) === undefined)
         this.#revokeBridge(options.sessionId as string | undefined)
     }
+  }
+
+  private async* runForeman(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    const route = options.provider
+    const profile = this.profiles().get(route)
+    if (profile === undefined)
+      throw new LlmError(`${PLUGIN_ID}: no ACP agent is configured for provider "${route}"`, 'PROVIDER_NOT_FOUND')
+    yield* streamAcpForeman(options, profile, this.agent(route, profile), this.turns, this.contextWindows)
   }
 
   private async* run(options: GenerateOptions): AsyncIterable<StreamChunk> {

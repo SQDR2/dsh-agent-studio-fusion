@@ -1,7 +1,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { createAssistantMessage, createToolResultMessage, createUserMessage, ToolCallId } from '@deepseek-ai/dsh-llm'
-import type { ContentBlock, GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
+import type { ContentBlock, GenerateOptions, ReplayEnvelope, StreamChunk } from '@deepseek-ai/dsh-llm'
 import { realpathSync } from 'node:fs'
 import { FUSION_SOURCE_KIND } from '../message-source.js'
 import type { PhysicalRoute, PlanReviewCandidate } from '../contracts.js'
@@ -134,6 +134,12 @@ export class ForemanReviewClock {
     return this.ceilingMs === undefined ? undefined : this.startedAt + this.ceilingMs
   }
 
+  /** What is left of the configured ceiling, or undefined when this combo set none. */
+  get ceilingRemainingMs(): number | undefined {
+    const ceiling = this.ceilingAtMs
+    return ceiling === undefined ? undefined : Math.max(0, ceiling - Date.now())
+  }
+
   /**
    * Move the deadline by `ms`, never past the ceiling.
    *
@@ -172,10 +178,11 @@ export function foremanStallBudgetMs(windowMs: number): number {
   return Math.max(1, Math.min(FOREMAN_NO_PROGRESS_TIMEOUT_MS, Math.floor(windowMs / 2)))
 }
 
-/** One assistant turn as the loop accumulates it: text blocks in order, plus the calls it asked for. */
+/** One assistant turn as the loop accumulates it: blocks in order, plus the calls it asked for. */
 interface AssistantTurn {
   /** Every block, in index order, exactly as it should be replayed to the model. */
   blocks: ContentBlock[]
+  replayState?: ReplayEnvelope
   text: string
   calls: { id: string; name: string; arguments: string }[]
 }
@@ -350,19 +357,18 @@ export class NativePlanReviewService implements PlanReviewModule {
       // The same applies when a configured ceiling is close enough that the verdict would no
       // longer fit inside it.
       // Keep a quarter of a configured ceiling for the verdict, never more than the reserve
-      // constant — and never more than three quarters of the base window, because a reserve
-      // larger than the first window would declare the review out of room before it had
-      // inspected anything.
+      // constant. Measured against the remaining ceiling rather than the unextended base
+      // window, so a slow first reasoning turn does not declare a multi-minute review out of
+      // room before its first inspection has run and renewed the window.
       const reserveMs = clock.ceiling === undefined
         ? 0
         : Math.min(
           FOREMAN_FINAL_ANSWER_RESERVE_MS,
           Math.max(1, Math.floor(clock.ceiling / 4)),
-          Math.max(1, Math.floor(this.baseBudgetMs * 0.75)),
         )
       const atInspectionCap = toolCalls + answered.calls.length > FOREMAN_MAX_TOOL_CALLS
       // No ceiling means the review is never "out of room": it ends on its verdict.
-      const outOfRoom = reserveMs > 0 && clock.remainingMs <= reserveMs
+      const outOfRoom = reserveMs > 0 && (clock.ceilingRemainingMs ?? Infinity) <= reserveMs
       if (concluding) {
         return {
           outcome: {
@@ -375,10 +381,16 @@ export class NativePlanReviewService implements PlanReviewModule {
           toolCalls,
         }
       }
+      const assistantSource = {
+        provider: route.provider,
+        model: route.model,
+        ...(answered.replayState === undefined ? {} : { replayState: answered.replayState }),
+      }
       if (atInspectionCap || outOfRoom) {
+        clock.extend(Math.max(FOREMAN_TOOL_CALL_BUDGET_MS, reserveMs))
         messages.push(createAssistantMessage({
           content: answered.blocks,
-          source: { provider: route.provider, model: route.model },
+          source: assistantSource,
         }))
         for (const call of answered.calls) {
           toolCalls++
@@ -398,7 +410,7 @@ export class NativePlanReviewService implements PlanReviewModule {
 
       messages.push(createAssistantMessage({
         content: answered.blocks,
-        source: { provider: route.provider, model: route.model },
+        source: assistantSource,
       }))
       for (const call of answered.calls) {
         toolCalls++
@@ -446,9 +458,10 @@ export class NativePlanReviewService implements PlanReviewModule {
     externalSignal: AbortSignal | undefined,
     onChunk: () => void,
   ): Promise<{ turn?: AssistantTurn; outcome?: PlanReviewOutcome; cause?: AbortCause }> {
-    const blocks = new Map<number, { kind: 'text'; text: string } | { kind: 'tool-call'; id: string; name: string; arguments: string }>()
+    const blocks = new Map<number, CollectedBlock>()
     let finishReason: string | undefined
     let finishFailure: string | undefined
+    let replayState: ReplayEnvelope | undefined
 
     const causeOf = (): AbortCause => externalSignal?.aborted === true
       ? 'caller'
@@ -474,6 +487,7 @@ export class NativePlanReviewService implements PlanReviewModule {
         collect(blocks, chunk)
         if (chunk.type === 'finish') {
           finishReason = chunk.reason.kind
+          replayState = chunk.replayState
           if (chunk.reason.kind === 'error') finishFailure = chunk.reason.failure.message
         }
       }
@@ -522,11 +536,20 @@ export class NativePlanReviewService implements PlanReviewModule {
     if (calls.length > 0 && finishReason !== 'tool-calls' && finishReason !== 'stop') {
       return { outcome: { kind: 'unavailable', reason: `Foreman model call ended with unexpected finish reason: "${finishReason}"` } }
     }
+    const contentBlocks = ordered.flatMap((block): ContentBlock[] => {
+      if (block.kind === 'text') return [{ type: 'text', text: block.text }]
+      if (block.kind === 'reasoning') {
+        return block.text !== '' || replayState !== undefined ? [{ type: 'reasoning', text: block.text }] : []
+      }
+      return [{ type: 'tool-call', id: ToolCallId(block.id), name: block.name, arguments: block.arguments }]
+    })
+    const validReplay = replayState !== undefined
+      && (replayState.blocks === undefined || replayState.blocks.length === contentBlocks.length)
+      ? replayState : undefined
     return {
       turn: {
-        blocks: ordered.flatMap((block): ContentBlock[] => block.kind === 'text'
-          ? [{ type: 'text', text: block.text }]
-          : [{ type: 'tool-call', id: ToolCallId(block.id), name: block.name, arguments: block.arguments }]),
+        blocks: contentBlocks,
+        ...(validReplay === undefined ? {} : { replayState: validReplay }),
         text,
         calls,
       },
@@ -587,14 +610,25 @@ function verified(outcome: PlanReviewOutcome, root: string | undefined): PlanRev
 }
 
 /** Fold one stream chunk into the per-index block accumulator. */
+type CollectedBlock =
+  | { kind: 'text'; text: string }
+  | { kind: 'reasoning'; text: string }
+  | { kind: 'tool-call'; id: string; name: string; arguments: string }
+
 function collect(
-  blocks: Map<number, { kind: 'text'; text: string } | { kind: 'tool-call'; id: string; name: string; arguments: string }>,
+  blocks: Map<number, CollectedBlock>,
   chunk: StreamChunk,
 ): void {
   if (chunk.type === 'text-delta') {
     const existing = blocks.get(chunk.index)
-    if (existing?.kind === 'tool-call') return
+    if (existing && existing.kind !== 'text') return
     blocks.set(chunk.index, { kind: 'text', text: (existing?.text ?? '') + chunk.text })
+    return
+  }
+  if (chunk.type === 'reasoning-delta') {
+    const existing = blocks.get(chunk.index)
+    if (existing && existing.kind !== 'reasoning') return
+    blocks.set(chunk.index, { kind: 'reasoning', text: (existing?.text ?? '') + chunk.text })
     return
   }
   if (chunk.type === 'tool-call-delta') {
@@ -613,6 +647,12 @@ function collect(
     const existing = blocks.get(chunk.index)
     if (existing?.kind === 'text' && existing.text !== '') return
     blocks.set(chunk.index, { kind: 'text', text: block.text })
+    return
+  }
+  if (block.type === 'reasoning') {
+    const existing = blocks.get(chunk.index)
+    if (existing?.kind === 'reasoning' && existing.text !== '') return
+    blocks.set(chunk.index, { kind: 'reasoning', text: block.text })
     return
   }
   if (block.type === 'tool-call') {

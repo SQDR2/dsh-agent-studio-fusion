@@ -93,6 +93,7 @@ export declare class AcpAdapter extends LlmAdapter {
     /** Read every image the prompt wants, as base64 request versions; unreadable ones stay text. */
     private readImages;
     stream(options: GenerateOptions): AsyncIterable<StreamChunk>;
+    private runForeman;
     private run;
     private finish;
     /**

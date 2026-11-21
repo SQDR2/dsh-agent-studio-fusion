@@ -212,14 +212,17 @@ export class WarmupService {
   /**
    * Fetch cloudaicompanionProject via loadCodeAssist (official Antigravity project resolution).
    */
-  async fetchProjectId(accessToken: string, proxyUrl?: string): Promise<string> {
+  async fetchProjectId(accessToken: string, proxyUrl?: string, signal?: AbortSignal): Promise<string> {
     const reqBody = JSON.stringify({ metadata: { ideType: 'ANTIGRAVITY' } })
     const userAgent = agyUserAgent(this.agyVersion())
 
     for (const url of LOAD_PROJECT_ENDPOINTS) {
       try {
+        signal?.throwIfAborted()
         const res = await agyFetch(url, {
           method: 'POST',
+          redirect: 'error',
+          signal,
           headers: {
             Authorization: `Bearer ${accessToken}`,
             'Content-Type': 'application/json',
@@ -234,8 +237,11 @@ export class WarmupService {
         if (res.ok) {
           const projectId = extractWarmupProjectId(await res.json())
           if (projectId !== '') return projectId
+        } else {
+          await res.body?.cancel()
         }
       } catch {
+        signal?.throwIfAborted()
         // try next endpoint
       }
     }

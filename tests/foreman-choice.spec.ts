@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { FOREMAN_MAX_OUTPUT_TOKENS, FOREMAN_TIMEOUT_MS, foremanChoice } from '../src/profile/foreman.js'
+import { validatePairChoice, type SettingsCatalog } from '../src/host/settings.js'
 
 const route = { provider: 'physical', model: 'audit' }
 const valid = { route, maxOutputTokens: 4096, timeoutMs: 30_000 }
@@ -39,6 +40,18 @@ describe('foreman configuration validation', () => {
 
   // The bound has to admit a review that a slow model and a large plan need: five
   // minutes is a normal setting and must not be refused.
+  it('rejects ACP only as Foreman and keeps Antigravity eligible', () => {
+    const catalog: SettingsCatalog = { groups: [
+      { id: 'devin', name: 'Devin', foremanUnsupported: 'acp-agent', models: [{ id: 'default', name: 'Default' }] },
+      { id: 'antigravity', name: 'Antigravity', models: [{ id: 'gemini-4-hydrogen', name: 'Hydrogen' }] },
+    ] }
+    const devin = { provider: 'devin', model: 'default' }
+    const hydrogen = { provider: 'antigravity', model: 'gemini-4-hydrogen' }
+    const pair = { lead: devin, worker: devin, foreman: { ...valid, route: hydrogen } }
+    expect(validatePairChoice(pair, catalog)).toEqual(pair)
+    expect(() => validatePairChoice({ ...pair, foreman: { ...valid, route: devin } }, catalog, 'Review')).toThrow(/Review.*ACP Agent.*devin\/default/)
+  })
+
   it('accepts a multi-minute review timeout', () => {
     expect(foremanChoice({ ...valid, timeoutMs: 300_000 })?.timeoutMs).toBe(300_000)
     expect(foremanChoice({ ...valid, timeoutMs: FOREMAN_TIMEOUT_MS.max })?.timeoutMs).toBe(FOREMAN_TIMEOUT_MS.max)
