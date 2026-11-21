@@ -6,6 +6,7 @@ import type { ToolExecution } from '@deepseek-ai/dsh-tools'
 import { requestOutputReservation } from '../context/guard.js'
 import type { PhysicalRoute, Role } from '../contracts.js'
 import type { SessionBinding } from './bindings.js'
+import { bindingIdentity } from './bindings.js'
 import { digestOf } from '../digest.js'
 import { isFusionSelectionLabel } from '../identity.js'
 import { fusionToolDiagnostic, projectRoleTools } from './tool-table.js'
@@ -142,8 +143,11 @@ export class NativeFusionScopes {
       if (session !== agent.session || event.type !== 'turn/start' || !entry.ready || !this.callbacks.beforeTurn) return
       try {
         const nextBinding = this.callbacks.beforeTurn(agent, entry.binding, role, event.data.turn)
-        if (nextBinding.sessionId !== entry.binding.sessionId || digestOf(nextBinding.profile) !== digestOf(entry.binding.profile)
-          || digestOf(nextBinding.prompts) !== digestOf(entry.binding.prompts)) throw new Error('Task rollover must preserve the frozen route and prompts')
+        // The Lead and Sidekick routes are the identity every record of this selection is
+        // bound to; the reviewer is not (it holds no session and is named per review), so a
+        // combo may re-freeze the reviewer at the rollover without tripping this guard.
+        if (nextBinding.sessionId !== entry.binding.sessionId || bindingIdentity(nextBinding.profile) !== bindingIdentity(entry.binding.profile)
+          || digestOf(nextBinding.prompts) !== digestOf(entry.binding.prompts)) throw new Error('Task rollover must preserve the frozen Lead and Sidekick routes and prompts')
         entry.binding = structuredClone(nextBinding)
         entry.refreshTools()
       } catch (error) { entry.ready = false; throw error }

@@ -10,7 +10,7 @@ import { NativeWorkerNotices } from './native-worker-notices.js'
 import { SessionId as NativeSessionId } from '@deepseek-ai/dsh-session'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ToolExecution, ToolRunContext } from '@deepseek-ai/dsh-tools'
-import type { AuthorityAction, Digest, ExplorationReport, ForemanAssessment, ForemanDisposition, ForemanFinding, FusionEvent, PhysicalRoute, PlanReviewCandidate, PlanReviewCheckDefinition, PlanReviewRecord, RequirementCoverage, Role, RuntimeHandle, TaskId, WorkerReport, WorkOrder } from '../contracts.js'
+import type { AuthorityAction, Digest, ExplorationReport, ForemanAssessment, ForemanDisposition, ForemanFinding, FusionEvent, PairProfile, PhysicalRoute, PlanReviewCandidate, PlanReviewCheckDefinition, PlanReviewRecord, RequirementCoverage, Role, RuntimeHandle, TaskId, WorkerReport, WorkOrder } from '../contracts.js'
 import { EpochId, OperationId, PUBLICATION_PROHIBITION, SessionId, SnapshotId, TaskId as asTaskId, WorkOrderId } from '../contracts.js'
 import { candidateDigest, semanticCandidateProjection, assertValidPlanReviewCandidate, lintPlanReviewCandidate, collectForemanFindings, foremanAssessmentSchema, planReviewGateDecision, FOREMAN_MAX_REVIEW_ROUNDS, type PlanReviewModule, type PlanReviewOutcome } from '../plan-review.js'
 import { NativePlanReviewService } from './plan-review.js'
@@ -26,7 +26,7 @@ import { StatusPending } from '../task/status-index.js'
 import type { SqliteFusionStore } from '../task/sqlite-store.js'
 import type { TaskState } from '../task/state.js'
 import type { DeletionBlocker } from '../task/deletion.js'
-import { BindingRepository } from './bindings.js'
+import { BindingRepository, revisedReviewerProfile } from './bindings.js'
 import type { SessionBinding } from './bindings.js'
 import { BASELINE_PARSERS, MAX_CHECK_SECONDS, TEST_PARSERS, checkCommandUnavailable, checkPrograms, freezeChecks, probeMissingPrograms, runBaselineChecks, runNativeChecks } from './native-checks.js'
 import type { CheckDefinition, FrozenCheck } from './native-checks.js'
@@ -166,6 +166,17 @@ export interface CoordinatorOptions {
    * everything else is a model route. Read per dispatch, never cached by callers.
    */
   acpRoutes?(): ReadonlySet<string>
+  /**
+   * The reviewer the session's combo names now, read at each task rollover.
+   *
+   * A saved combo change has to reach a session that is already selected, or the settings
+   * page silently describes a reviewer nobody uses. Only the reviewer may move: the Lead
+   * route is pinned to the user's own model choice and the Sidekick route owns a persistent
+   * Worker session, so those still require a new session. `undefined` means "no saved combo
+   * for this binding, keep what is frozen"; `{ foreman: undefined }` means the combo no
+   * longer configures a reviewer.
+   */
+  currentReviewer?(binding: SessionBinding): { foreman: PairProfile['foreman'] } | undefined
   /**
    * Whether an ACP route refuses every Host tool to a text order. `AcpToolBridge`
    * answers `undefined` from its grant decision for `mode: 'text'`, so with the
@@ -490,14 +501,20 @@ export class FusionCoordinator {
         // Adopt the known completed child of pre-workerId bindings once.
         if (!binding.workerId && previous.acceptedChild) this.bindings.assignWorker(agent.id, binding.taskId, previous.acceptedChild)
         const nextTask = asTaskId(randomUUID())
-        this.#createTask(agent, nextTask, { profile: binding.profile, prompts: binding.prompts }, binding.taskId)
+        // A combo names the reviewer, and the reviewer owns no session: adopt a changed one
+        // for the successor task instead of rewriting the identity this task's records were
+        // frozen with. The Lead and Sidekick routes stay frozen — only a new session may
+        // change those, because the Sidekick route owns a persistent Worker session.
+        const named = this.options.currentReviewer?.(binding)
+        const revised = named === undefined ? undefined : revisedReviewerProfile(binding.profile, binding.prompts, named.foreman)
+        this.#createTask(agent, nextTask, { profile: revised ?? binding.profile, prompts: binding.prompts }, binding.taskId)
         const grantId = `explore-grant:${binding.taskId}`, grantRow = store.readDocument(grantId)
         const grant = grantRow?.value as ExplorationGrant | undefined
         if (grant && !grant.used) {
           store.writeDocument(grantId, grantRow!.revision, { ...grant, used: true })
           store.writeDocument(`explore-grant:${nextTask}`, 0, grant)
         }
-        return this.bindings.rollover(agent.id, binding.taskId, nextTask)
+        return this.bindings.rollover(agent.id, binding.taskId, nextTask, revised)
       },
       taskContext: (agent, binding, role) => binding.profile.interactionMode === 'model-like'
         ? this.onDemand.message(agent, binding, role) : this.taskContext.message(agent, binding, role),

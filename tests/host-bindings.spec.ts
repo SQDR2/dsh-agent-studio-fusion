@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest'
-import { BindingRepository } from '../src/host/bindings.js'
+import { BindingRepository, bindingIdentity, revisedReviewerProfile } from '../src/host/bindings.js'
 import { completeProfile } from '../src/profile/resolve.js'
 import { digestOf } from '../src/digest.js'
 import { SqliteFusionStore } from '../src/task/sqlite-store.js'
@@ -100,5 +100,49 @@ describe('native session selection persistence', () => {
     expect(() => bindings.assignWorker('lead-a', TaskId('task-a'), 'worker-a')).toThrow('changed')
     bindings.clear('lead-a')
     expect(bindings.select('lead-a', TaskId('task-c'), { profile, prompts }).workerId).toBeUndefined()
+  })
+})
+
+describe('re-freezing only the reviewer', () => {
+  const reviewing = (model: string) => completeProfile({ id: 'fusion-auto', version: 'faithful-v1', enabled: true,
+    lead: { provider: 'configured', model: 'lead' }, worker: { provider: 'configured', model: 'worker' },
+    foreman: { route: { provider: 'configured', model }, maxOutputTokens: 4096 } }, prompts)
+
+  // The Lead route is pinned to the user's own model choice and the Sidekick route owns a
+  // persistent Worker session; a rollover that moved either would relabel work that already
+  // ran. The reviewer holds no session and is named per review, so it is not that identity.
+  it('hashes the frozen pair without the reviewer', () => {
+    const first = reviewing('first-reviewer'), second = reviewing('second-reviewer')
+    expect(bindingIdentity(first)).toBe(bindingIdentity(second))
+    const movedLead = completeProfile({ id: 'fusion-auto', version: 'faithful-v1', enabled: true,
+      lead: { provider: 'configured', model: 'another-lead' }, worker: { provider: 'configured', model: 'worker' },
+      foreman: { route: { provider: 'configured', model: 'first-reviewer' }, maxOutputTokens: 4096 } }, prompts)
+    expect(bindingIdentity(first)).not.toBe(bindingIdentity(movedLead))
+  })
+
+  it('re-derives the digest when the combo names a different reviewer', () => {
+    const frozen = reviewing('first-reviewer')
+    expect(revisedReviewerProfile(frozen, prompts, frozen.foreman)).toBeUndefined()
+    const next = revisedReviewerProfile(frozen, prompts, reviewing('second-reviewer').foreman)!
+    expect(next.foreman?.route).toEqual({ provider: 'configured', model: 'second-reviewer' })
+    expect(next.lead).toEqual(frozen.lead)
+    expect(next.worker).toEqual(frozen.worker)
+    expect(bindingIdentity(next)).toBe(bindingIdentity(frozen))
+    expect(next.digest).not.toBe(frozen.digest)
+    // Removing the reviewer is a change too, not "leave it as it was".
+    expect(revisedReviewerProfile(frozen, prompts, undefined)?.foreman).toBeUndefined()
+  })
+
+  it('starts the next task on the saved reviewer and leaves the frozen pair alone', () => {
+    const { bindings } = setup()
+    const frozen = reviewing('first-reviewer')
+    bindings.select('lead-a', TaskId('task-a'), { profile: frozen, prompts })
+    const next = revisedReviewerProfile(frozen, prompts, reviewing('second-reviewer').foreman)
+    const rolled = bindings.rollover('lead-a', TaskId('task-a'), TaskId('task-b'), next)
+    expect(rolled.taskId).toBe('task-b')
+    expect(rolled.profile.foreman?.route).toEqual({ provider: 'configured', model: 'second-reviewer' })
+    expect(rolled.profile.lead).toEqual(frozen.lead)
+    expect(bindings.read('lead-a')!.binding.profile.digest).toBe(next!.digest)
+    expect(bindings.selected()[0]?.profile.foreman?.route.model).toBe('second-reviewer')
   })
 })

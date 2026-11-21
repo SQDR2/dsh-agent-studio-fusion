@@ -93,7 +93,9 @@ Lead 亲自读代码 / 跑命令形成判断 → 定稿计划
 
 **Antigravity 与 ACP 工长均做独立会话与工具隔离。** Antigravity 工长不启动 `agy`，Fusion 使用 Antigravity 账户直接请求所选模型，只把当前候选及审查证据发给模型，不复用 Lead / Sidekick 的 CLI 会话，也不启用 Antigravity 自带工具或 MCP。ACP Agent 工长在临时空目录中开启独立会话，不挂载 Host 工具桥、切入只读问答模式、拒绝一切原生工具权限并在检测到原生工具调用时立即中止，所有查证请求统一由 Fusion 执行并做引用校验。若鉴权、配额或模型不可用，Fusion 会报告原因且不派工。
 
-**选型与验证。** 本机 `gz/gpt-6.2-sol` 已通过真实网关的最小工长验收；`gz/deepseek-v4.1-flash` 有实际审查成功记录，但最近的同类验收曾中止，优先用 GPT。需要复测时，可显式开启 [工长线路验收](native-tests/foreman-routes.spec.ts) 的 `FUSION_FOREMAN_LIVE=1`，并从受控环境提供 `FUSION_FOREMAN_GATEWAY_URL` 和 `GZ_API_KEY`。验收只发送合成候选与临时证据，不派工。`devin/*` 通过 ACP 访问时不支持工长，这与所选的 Devin 内部模型无关。
+**改设置什么时候生效.** 组合本身是冻结的：一条会话一旦选定组合，Lead、Sidekick 和提示词就固定下来，任务记录、检查点与会话用量都绑定这个摘要。工长不算这份身份——它不持有会话、每次审查都带明确线路——所以保存新工长后，这条会话的**下一个任务**就会用它；当前任务里等待决定的候选仍用 `/fusion foreman-model` 指定。
+
+**选型与验证。** 本机 `gz/gpt-6.2-sol` 已通过真实网关的最小工长验收；`gz/deepseek-v4.1-flash` 有实际审查成功记录，但最近的同类验收曾中止，优先用 GPT。需要复测时，可显式开启 [工长线路验收](native-tests/foreman-routes.spec.ts) 的 `FUSION_FOREMAN_LIVE=1`，并从受控环境提供 `FUSION_FOREMAN_GATEWAY_URL` 和 `GZ_API_KEY`。验收只发送合成候选与临时证据，不派工。`devin/*` 走 ACP 时也已就绪（本机实测通过），但每次审查都会开一个隔离的空目录会话并计入该账户用量。
 
 ## 命令与工具
 
@@ -149,7 +151,7 @@ Lead 在会话里能调用的（Sidekick 只有其中一部分）：
 
 - **Lead 和 Sidekick 同时改同一个文件的窗口仍然存在。** 程序只挡住「另一个角色持租约时的写入」；两者都空闲时，靠提示词。
 - **Code Mode 下 `run_code` 不受写租约约束。** Code Mode 把所有工具调用都包进 `run_code`，租约看不到程序内部，所以只能靠提示词约束。
-- **ACP Agent 线路做不了工长。** 审查仍会明确拒绝（见上一节），不会派工。
+- **Lead 与 Sidekick 的线路不会中途更换。** 它们属于这条会话的身份（Lead 是你选的模型、Sidekick 绑定着一个持久的 Worker 会话），换它们等于给已经跑过的任务重新贴标签，所以只在重新选择 Fusion 时生效。**工长可以中途换**：组合保存后，会话的下一个新任务会自动采用新工长，旧任务保留它当时冻结的配置与摘要；仍在那份候选上等待决定的审查，用 `/fusion foreman-model <provider/model>` 单独指定。
 - **工长跑命令可能有副作用**（例如测试写缓存或快照）。它被要求不修改工作区；宿主在审查结束后会比对工作区快照，快照变了就拒绝派工（`The workspace changed during plan review`），但不会逐文件报告漂移。
 - **验收命令由宿主执行，失败重试策略有限**：同一份检查连续失败会被退回一次，之后交给 Lead 判断。
 

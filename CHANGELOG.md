@@ -20,6 +20,14 @@ own tags and releases.
 Entry format: what changed, then what was actually validated. "Not claimed" lines mark what a release did *not* test —
 read them before assuming a platform is covered.
 
+## 1.5.4 — 2026-11-21
+
+- **保存的新工长会在会话的下一个任务生效，不必重开会话。** 组合本身仍然冻结：Lead 与 Sidekick 的线路属于这条会话的身份（Lead 是你选的模型，Sidekick 绑定着持久的 Worker 会话），任务记录、检查点与会话用量都绑定那个摘要。
+  - 工长不持有会话、每次审查都带明确线路，因此不再计入这份身份：`BindingRepository` 新增 `bindingIdentity`（冻结身份除去工长）与 `revisedReviewerProfile`（重新派生摘要），`rollover` 可携带新 profile 并自检读回。
+  - `NativeFusionScopes` 的中途换线守卫改为比较 `bindingIdentity`，Lead/Sidekick 或提示词变化仍然拒绝；`FusionCoordinator` 在每个新任务开始时通过 `currentReviewer` 读取组合当前工长并采纳。
+  - 旧任务保留它当时冻结的配置与摘要；仍在同一份候选上等待决定的审查，继续用 `/fusion foreman-model <provider/model>` 单独指定。
+  - 覆盖：`tests/host-bindings.spec.ts` 三个用例（身份哈希忽略工长、改工长重算摘要、rollover 写入后仍可读回），`native-tests/coordinator.spec.ts` 端到端用例（保存新工长后下一个任务采纳，Lead/Sidekick/提示词原样）。
+
 ## 1.5.3 — 2026-11-21
 
 - **恢复全可选模型的工长计划审查，同时维持独立审查与工具隔离。**

@@ -119,6 +119,8 @@ async function setup(script: Script, workerScript?: Script, options: {
    */
   bridgeTransport?: boolean
   foreman?: { route?: PhysicalRoute; maxOutputTokens?: number; timeoutMs?: number } | boolean
+  /** The reviewer the saved combo names at the next rollover, for adoption coverage. */
+  currentReviewer?: () => { foreman: SessionBinding['profile']['foreman'] } | undefined
   foremanScript?: Script
   planReview?: (agent: Agent, binding: SessionBinding) => PlanReviewModule
   /**
@@ -283,6 +285,7 @@ async function setup(script: Script, workerScript?: Script, options: {
     workerTools: [...(options.jobs ? [shellTool, 'job_output', 'job_kill'] : [shellTool]), ...(options.files ? ['read', 'write', 'edit'] : [])], keepaliveClock: options.clock,
     commandMaxSeconds: options.commandMaxSeconds,
     maxWorkerSteps: options.maxWorkerSteps, maxReworkRounds: options.maxReworkRounds,
+    ...(options.currentReviewer ? { currentReviewer: () => options.currentReviewer!() } : {}),
     ...(options.planReview ? { planReview: options.planReview } : {}),
     authorizeRequest: () => { /* scripted in-process adapter: no upstream or bill */ },
     reserveRequest: request => { budget && budget.reserve(request, request.maxTokens!) } })
@@ -4947,6 +4950,35 @@ describe('enforced-v3 daily-driver safeguards (study 2026-09-26)', () => {
     await parent.whenIdle()
     expect(results(parent)).not.toContain('must be exact quotes')
     expect(coordinator.state(coordinator.bindings.read(parent.id)!.binding.taskId).phase).toBe('COMPLETED')
+  })
+
+  /**
+   * A saved combo has to reach a session that is already selected, or the settings page
+   * describes a reviewer nobody uses. Only the reviewer may move: the Lead route is the
+   * user's own model choice and the Sidekick route owns a persistent Worker session.
+   */
+  it('adopts a reviewer saved after this session was frozen, and keeps the frozen pair', async () => {
+    let named: { foreman: SessionBinding['profile']['foreman'] } = { foreman: undefined }
+    const { parent, coordinator } = await setup([
+      textResponse('Hello.'), delegateV3(true, ['Correct addition.']), acceptV3(), textResponse('Verified.'),
+    ], [edit(), report()], { ...options, currentReviewer: () => named })
+    const frozen = coordinator.bindings.read(parent.id)!.binding
+    // No reviewer was saved either, so the first rollover must keep the profile byte-identical.
+    parent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Correct addition.' }] }))
+    await parent.whenIdle()
+    expect(coordinator.bindings.read(parent.id)!.binding.profile.digest).toBe(frozen.profile.digest)
+
+    named = { foreman: { route: { provider: 'test-native', model: 'replacement-foreman' }, maxOutputTokens: 4096 } }
+    parent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Go ahead now.' }] }))
+    await parent.whenIdle()
+    const adopted = coordinator.bindings.read(parent.id)!.binding
+    expect(adopted.taskId).not.toBe(frozen.taskId)
+    expect(adopted.profile.foreman).toEqual(named.foreman)
+    // Everything a running selection must keep frozen is untouched, including the prompts.
+    expect(adopted.profile.lead).toEqual(frozen.profile.lead)
+    expect(adopted.profile.worker).toEqual(frozen.profile.worker)
+    expect(adopted.prompts).toEqual(frozen.prompts)
+    expect(adopted.profile.digest).not.toBe(frozen.profile.digest)
   })
 
   it('accepts only with one met verdict per user requirement', async () => {

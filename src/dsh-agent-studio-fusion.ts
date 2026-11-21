@@ -191,6 +191,16 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
         // A Worker dispatched on a configured ACP route runs as an agent process
         // served by the bridge below; every other route is a model provider.
         acpRoutes: () => new Set(agentsOf(config).keys()),
+        // Saving a combo has to reach a session that is already selected, or the page would
+        // describe a reviewer nobody uses. Only the reviewer moves mid-selection: the Lead
+        // route is the user's own model choice and the Sidekick route owns a persistent
+        // Worker session, so those still need a new session. `combos` is refreshed by every
+        // settings read/save; `undefined` here means "not resolved yet, keep what is frozen".
+        currentReviewer: binding => {
+          const combo = modelOfProfileId(binding.profile.id)
+          const resolved = combo === undefined ? undefined : combos?.profiles.get(combo)
+          return resolved === undefined ? undefined : { foreman: resolved.profile.foreman }
+        },
         grantsNoToolsInText: true,
         resumeAuthorization: binding => needsBudget(binding.profile) ? budget.check(effectiveRoutes(binding)).authorizationId : 'native-account',
         authorizeRequest: (_agent, binding) => {
@@ -260,6 +270,10 @@ export async function apply(ctx: Context, config: Config = {}): Promise<void> {
     }))
   }
   ctx.effect(() => ctx.llm.registerAdapter([FUSION_PROVIDER], new FusionCatalogAdapter(fusionModels)))
+  // Resolve the saved combos once at boot, so a reviewer saved while the Host was down is
+  // adopted on this session's next task instead of waiting for someone to open the page.
+  // A Host whose catalog is not ready yet simply leaves it unresolved; the page refreshes it.
+  void resolveCombos().catch(() => undefined)
   ctx.effect(() => installNativeFusionSelection(ctx, {
     coordinator: () => runtime,
     profile: profileOf,

@@ -2,7 +2,7 @@ import type { Context } from '@deepseek-ai/cordis';
 import type { Agent } from '@deepseek-ai/dsh-agent';
 import type { GenerateOptions } from '@deepseek-ai/dsh-llm';
 import type { ToolExecution, ToolRunContext } from '@deepseek-ai/dsh-tools';
-import type { Digest, ForemanDisposition, FusionEvent, PhysicalRoute, RequirementCoverage, Role, TaskId } from '../contracts.js';
+import type { Digest, ForemanDisposition, FusionEvent, PairProfile, PhysicalRoute, RequirementCoverage, Role, TaskId } from '../contracts.js';
 import { type PlanReviewModule } from '../plan-review.js';
 import { WorkspaceWriteLease } from '../execution/write-lease.js';
 import type { ResolvedProfile } from '../profile/resolve.js';
@@ -50,6 +50,19 @@ export interface CoordinatorOptions {
      * everything else is a model route. Read per dispatch, never cached by callers.
      */
     acpRoutes?(): ReadonlySet<string>;
+    /**
+     * The reviewer the session's combo names now, read at each task rollover.
+     *
+     * A saved combo change has to reach a session that is already selected, or the settings
+     * page silently describes a reviewer nobody uses. Only the reviewer may move: the Lead
+     * route is pinned to the user's own model choice and the Sidekick route owns a persistent
+     * Worker session, so those still require a new session. `undefined` means "no saved combo
+     * for this binding, keep what is frozen"; `{ foreman: undefined }` means the combo no
+     * longer configures a reviewer.
+     */
+    currentReviewer?(binding: SessionBinding): {
+        foreman: PairProfile['foreman'];
+    } | undefined;
     /**
      * Whether an ACP route refuses every Host tool to a text order. `AcpToolBridge`
      * answers `undefined` from its grant decision for `mode: 'text'`, so with the
